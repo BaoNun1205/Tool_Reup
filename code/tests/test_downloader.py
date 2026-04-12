@@ -7,6 +7,8 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 import tempfile
 import unittest
+import json
+from unittest import mock
 
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.exceptions import DownloadError
@@ -75,6 +77,50 @@ class SourceDownloaderTests(unittest.TestCase):
         self.assertIn("--cookies", command)
         self.assertIn(str(self.base_dir / "browser_chrome_cookies.txt"), command)
 
+    def test_build_lazy_down_command_uses_json_manifest_mode(self):
+        command = self.downloader._build_lazy_down_command(
+            "https://www.tiktok.com/@store/video/123",
+            self.base_dir,
+        )
+        self.assertIn(self.downloader.config.lazy_down_bin, command)
+        self.assertIn("--write-json", command)
+        self.assertIn("--output-file", command)
+        self.assertIn("--all", command)
+        self.assertIn("--quiet", command)
+
+    def test_normalize_source_url_for_lazy_down_keeps_full_url(self):
+        source_url = "https://www.tiktok.com/@store/video/123"
+        self.assertEqual(self.downloader._normalize_source_url_for_lazy_down(source_url), source_url)
+
+    def test_normalize_source_url_for_lazy_down_strips_tracking_query(self):
+        source_url = "https://www.tiktok.com/@store/video/123?_r=1&_t=ZS-abc"
+        self.assertEqual(
+            self.downloader._normalize_source_url_for_lazy_down(source_url),
+            "https://www.tiktok.com/@store/video/123",
+        )
+
+    def test_normalize_source_url_for_lazy_down_expands_shortlink(self):
+        class FakeResponse(object):
+            def __init__(self, resolved_url):
+                self._resolved_url = resolved_url
+
+            def geturl(self):
+                return self._resolved_url
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        source_url = "https://vt.tiktok.com/ZSHuwkq4J/"
+        resolved_url = "https://www.tiktok.com/@store/video/1234567890?_r=1&_t=ZS-abc"
+        with mock.patch("auto_tiktok_editor.media.downloader.urlopen", return_value=FakeResponse(resolved_url)):
+            self.assertEqual(
+                self.downloader._normalize_source_url_for_lazy_down(source_url),
+                "https://www.tiktok.com/@store/video/1234567890",
+            )
+
     def test_stage_cookies_file_copies_into_workspace(self):
         cookies_path = self.base_dir / "cookies.txt"
         cookies_path.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
@@ -105,6 +151,42 @@ class SourceDownloaderTests(unittest.TestCase):
         )
         self.assertIn("Close Chrome and Edge completely", message)
         self.assertIn("User-Agent", message)
+
+    def test_select_lazy_down_video_prefers_hd_no_watermark(self):
+        hd_path = self.base_dir / "video_hd.mp4"
+        normal_path = self.base_dir / "video_normal.mp4"
+        hd_path.write_text("hd", encoding="utf-8")
+        normal_path.write_text("normal", encoding="utf-8")
+        payload = {
+            "medias": [
+                {
+                    "type": "video",
+                    "quality": "no_watermark",
+                    "width": 576,
+                    "height": 1024,
+                    "filesize": 9000,
+                    "localPath": str(normal_path),
+                },
+                {
+                    "type": "video",
+                    "quality": "hd_no_watermark",
+                    "width": 720,
+                    "height": 1280,
+                    "filesize": 5000,
+                    "localPath": str(hd_path),
+                },
+            ]
+        }
+        selected_path, selected_media = self.downloader._select_lazy_down_video(payload, self.base_dir)
+        self.assertEqual(selected_path, hd_path.resolve())
+        self.assertEqual(selected_media.get("quality"), "hd_no_watermark")
+
+    def test_find_lazy_down_json_path_reads_json_path_from_stdout(self):
+        manifest_path = self.base_dir / "lazy_result_tiktok_123.json"
+        manifest_path.write_text(json.dumps({"medias": []}), encoding="utf-8")
+        command_output = json.dumps({"jsonPath": str(manifest_path)})
+        result = self.downloader._find_lazy_down_json_path(command_output, self.base_dir)
+        self.assertEqual(result, manifest_path.resolve())
 
 
 if __name__ == "__main__":

@@ -95,7 +95,7 @@ class InputValidatorTests(unittest.TestCase):
             output_dir=self.base_dir / "out",
             cookies_file=cookies_path,
         )
-        result = self.validator.validate(spec)
+        result = InputValidator(config=self.validator.config.__class__(download_via_lazy_down_only=False)).validate(spec)
         self.assertTrue(any("tiktokv.com" in warning for warning in result.warnings))
 
     def test_warns_when_cookies_file_is_older_than_fresh_session_window(self):
@@ -118,8 +118,26 @@ class InputValidatorTests(unittest.TestCase):
             output_dir=self.base_dir / "out",
             cookies_file=cookies_path,
         )
-        result = self.validator.validate(spec)
+        result = InputValidator(config=self.validator.config.__class__(download_via_lazy_down_only=False)).validate(spec)
         self.assertTrue(any("older than" in warning for warning in result.warnings))
+
+    def test_ignores_cookie_warnings_when_lazy_down_only_is_enabled(self):
+        image_path = self.base_dir / "product.png"
+        write_fake_png(image_path, 900, 900, has_alpha=True)
+        cookies_path = self.base_dir / "cookies.txt"
+        cookies_path.write_text(
+            "# Netscape HTTP Cookie File\n"
+            ".tiktok.com\tTRUE\t/\tTRUE\t0\tsessionid\tabc123\n",
+            encoding="utf-8",
+        )
+        spec = JobSpec(
+            source_video_url="https://www.tiktok.com/@store/video/1234567890",
+            product_image=image_path,
+            output_dir=self.base_dir / "out",
+            cookies_file=cookies_path,
+        )
+        result = self.validator.validate(spec)
+        self.assertEqual(result.warnings, [])
 
 
 class SessionValidatorTests(unittest.TestCase):
@@ -186,10 +204,10 @@ class SessionValidatorTests(unittest.TestCase):
             cookies_file=self.cookies_path,
         )
         validated = self.validator.validate(session)
-        self.assertEqual(validated.session_spec.cookies_file, self.cookies_path.resolve())
-        self.assertEqual(validated.items[0].validated_job.job_spec.cookies_file, self.cookies_path.resolve())
+        self.assertIsNone(validated.session_spec.cookies_file)
+        self.assertIsNone(validated.items[0].validated_job.job_spec.cookies_file)
 
-    def test_session_validator_rejects_missing_cookies_file(self):
+    def test_session_validator_ignores_missing_cookies_file_when_lazy_down_only(self):
         session = SessionSpec(
             items=[
                 SessionItemSpec(
@@ -201,8 +219,8 @@ class SessionValidatorTests(unittest.TestCase):
             output_root_dir=self.base_dir / "out",
             cookies_file=self.base_dir / "missing_cookies.txt",
         )
-        with self.assertRaises(SessionValidationError):
-            self.validator.validate(session)
+        validated = self.validator.validate(session)
+        self.assertIsNone(validated.session_spec.cookies_file)
 
 
 if __name__ == "__main__":

@@ -51,6 +51,7 @@ class InputValidator(object):
             output_basename=basename,
             shuffle_seed=job_spec.shuffle_seed,
             cookies_file=cookies_file,
+            overlay_alpha_ratio=self._normalize_overlay_alpha_ratio(job_spec.overlay_alpha_ratio),
         )
         return ValidatedJob(job_spec=normalized, image_info=image_info, warnings=warnings)
 
@@ -72,8 +73,21 @@ class InputValidator(object):
             raise ValidationError("Output basename contains no valid filename characters.")
         return sanitized
 
+    def _normalize_overlay_alpha_ratio(self, value):
+        if value is None:
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            raise ValidationError("Overlay opacity must be a number.")
+        if numeric < 0.05 or numeric > 0.95:
+            raise ValidationError("Overlay opacity must stay between 0.05 and 0.95.")
+        return numeric
+
     def _validate_cookies_file(self, value):
         if not value:
+            return None
+        if self.config.download_via_lazy_down_only:
             return None
         cookies_path = Path(value).expanduser().resolve()
         if not cookies_path.exists() or not cookies_path.is_file():
@@ -82,6 +96,8 @@ class InputValidator(object):
 
     def _build_cookie_warnings(self, cookies_path):
         if cookies_path is None:
+            return []
+        if self.config.download_via_lazy_down_only:
             return []
         domains = self._read_cookie_domains(cookies_path)
         if not domains:
@@ -173,6 +189,7 @@ class SessionValidator(object):
                 output_basename=item_spec.output_basename,
                 shuffle_seed=item_spec.shuffle_seed,
                 cookies_file=cookies_file,
+                overlay_alpha_ratio=item_spec.overlay_alpha_ratio,
             )
             try:
                 validated_job = self.item_validator.validate(provisional_job)
@@ -185,6 +202,7 @@ class SessionValidator(object):
                 product_image=validated_job.job_spec.product_image,
                 output_basename=validated_job.job_spec.output_basename,
                 shuffle_seed=validated_job.job_spec.shuffle_seed,
+                overlay_alpha_ratio=validated_job.job_spec.overlay_alpha_ratio,
             )
             duplicate_key = (
                 normalized_item.source_video_url,
@@ -235,6 +253,8 @@ class SessionValidator(object):
 
     def _validate_session_cookies_file(self, value):
         if not value:
+            return None
+        if self.config.download_via_lazy_down_only:
             return None
         cookies_path = Path(value).expanduser().resolve()
         if not cookies_path.exists() or not cookies_path.is_file():

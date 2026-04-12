@@ -22,7 +22,7 @@ class SceneQualifier(object):
         black_ranges: Sequence[Tuple[float, float]],
     ) -> Tuple[List[SceneRange], List[SceneRange], List[str]]:
         dropped = []
-        cleaned = []
+        usable = []
         for scene in raw_scenes:
             if scene.duration_seconds <= 0.05:
                 scene.drop_reason = "degenerate"
@@ -32,30 +32,7 @@ class SceneQualifier(object):
                 scene.drop_reason = "mostly_black"
                 dropped.append(scene)
                 continue
-            cleaned.append(copy.deepcopy(scene))
-
-        merged = []
-        for scene in cleaned:
-            if not merged:
-                merged.append(scene)
-                continue
-            if merged[-1].duration_seconds < self.config.min_scene_duration:
-                merged[-1].end_seconds = scene.end_seconds
-                merged[-1].origin_end_seconds = scene.origin_end_seconds or scene.end_seconds
-            else:
-                merged.append(scene)
-
-        usable = []
-        for scene in merged:
-            if scene.duration_seconds < self.config.min_scene_duration:
-                if usable:
-                    usable[-1].end_seconds = scene.end_seconds
-                    usable[-1].origin_end_seconds = scene.origin_end_seconds or scene.end_seconds
-                else:
-                    scene.drop_reason = "too_short"
-                    dropped.append(scene)
-                continue
-            usable.extend(self._split_scene(scene))
+            usable.extend(self._split_scene(copy.deepcopy(scene)))
 
         warnings = []
         if len(usable) < 3:
@@ -109,91 +86,108 @@ class EditPlanner(object):
     def build(self, scenes: Sequence[SceneRange], seed: Optional[int] = None) -> EditPlan:
         if not scenes:
             raise PipelineStageError("Edit planner received no scenes.")
-        if len(scenes) <= 2:
-            chosen_seed = seed if seed is not None else 0
-            return EditPlan(
-                seed=chosen_seed,
-                opener_index=scenes[0].source_index,
-                closer_index=scenes[-1].source_index,
-                ordered_scenes=list(scenes),
-                warnings=["Scene count is too low for meaningful shuffle; original order was kept."],
-            )
-
         chosen_seed = seed if seed is not None else random.SystemRandom().randint(1, 10 ** 9)
-        opener_pool_size = max(1, int(math.ceil(len(scenes) * 0.2)))
-        closer_pool_size = opener_pool_size
-        opener = self._pick_longest(scenes[:opener_pool_size])
-        closer_candidates = [scene for scene in scenes[-closer_pool_size:] if scene is not opener]
-        closer = self._pick_longest(closer_candidates or [scenes[-1]])
-        middle = [scene for scene in scenes if scene not in (opener, closer)]
-        rng = random.Random(chosen_seed)
-        rng.shuffle(middle)
-        ordered = [opener] + self._repair_adjacency(middle, opener, closer) + [closer]
+        ordered = self._build_strict_shuffle(list(scenes), random.Random(chosen_seed))
         warnings = []
-        if self._contains_hard_adjacency(ordered):
-            warnings.append("Some adjacent source regions remained after constrained shuffle repair.")
+        if self._violates_shuffle_constraints(ordered):
+            warnings.append(
+                "Scene count is too low for a perfect shuffle; some chunks may still remain close to their source neighbors."
+            )
         return EditPlan(
             seed=chosen_seed,
-            opener_index=opener.source_index,
-            closer_index=closer.source_index,
+            opener_index=ordered[0].source_index if ordered else None,
+            closer_index=ordered[-1].source_index if ordered else None,
             ordered_scenes=ordered,
+            dropped_scenes=[],
             warnings=warnings,
         )
 
-    def _pick_longest(self, scenes: Sequence[SceneRange]) -> SceneRange:
-        return max(scenes, key=lambda scene: scene.duration_seconds)
+    def _build_strict_shuffle(self, scenes: List[SceneRange], rng: random.Random) -> List[SceneRange]:
+        if len(scenes) <= 1:
+            return list(scenes)
+        if len(scenes) == 2:
+            return [scenes[1], scenes[0]]
 
-    def _repair_adjacency(
+        best_order = list(scenes)
+        best_score = self._score_order(best_order)
+        max_attempts = max(64, min(1024, len(scenes) * 32))
+        for _attempt in range(max_attempts):
+            candidate = self._build_backtracking_order(list(scenes), rng)
+            if candidate is None:
+                shuffled = list(scenes)
+                rng.shuffle(shuffled)
+                candidate = shuffled
+            score = self._score_order(candidate)
+            if score < best_score:
+                best_order = candidate
+                best_score = score
+            if score == (0, 0):
+                return candidate
+        return best_order
+
+    def _build_backtracking_order(
         self,
         scenes: List[SceneRange],
-        opener: SceneRange,
-        closer: SceneRange,
-    ) -> List[SceneRange]:
-        ordered = list(scenes)
-        for index in range(len(ordered)):
-            prev_scene = opener if index == 0 else ordered[index - 1]
-            next_scene = closer if index == len(ordered) - 1 else ordered[index + 1]
-            if not self._is_bad_neighbor(prev_scene, ordered[index]) and not self._is_bad_neighbor(ordered[index], next_scene):
-                continue
-            swap_index = self._find_swap_candidate(ordered, index, prev_scene, next_scene)
-            if swap_index is not None:
-                ordered[index], ordered[swap_index] = ordered[swap_index], ordered[index]
-        return ordered
+        rng: random.Random,
+    ) -> Optional[List[SceneRange]]:
+        ordered = []  # type: List[SceneRange]
+        remaining = list(scenes)
 
-    def _find_swap_candidate(
-        self,
-        scenes: List[SceneRange],
-        index: int,
-        prev_scene: SceneRange,
-        next_scene: SceneRange,
-    ) -> Optional[int]:
-        for candidate_index in range(index + 1, len(scenes)):
-            candidate = scenes[candidate_index]
-            candidate_prev = prev_scene
-            candidate_next = next_scene if candidate_index == len(scenes) - 1 else scenes[candidate_index + 1]
-            if self._is_bad_neighbor(candidate_prev, candidate):
-                continue
-            if self._is_bad_neighbor(candidate, next_scene):
-                continue
-            if index > 0 and self._is_bad_neighbor(scenes[candidate_index - 1], scenes[index]):
-                continue
-            if candidate_index < len(scenes) - 1 and self._is_bad_neighbor(scenes[index], candidate_next):
-                continue
-            return candidate_index
+        def backtrack(position: int) -> bool:
+            if not remaining:
+                return True
+            candidate_indexes = list(range(len(remaining)))
+            rng.shuffle(candidate_indexes)
+            candidate_indexes.sort(key=lambda idx: self._candidate_rank(remaining[idx], position, ordered[-1] if ordered else None))
+            for candidate_index in candidate_indexes:
+                candidate = remaining[candidate_index]
+                if candidate.source_index == position:
+                    continue
+                if ordered and self._is_bad_neighbor(ordered[-1], candidate):
+                    continue
+                ordered.append(candidate)
+                remaining.pop(candidate_index)
+                if backtrack(position + 1):
+                    return True
+                remaining.insert(candidate_index, candidate)
+                ordered.pop()
+            return False
+
+        if backtrack(0):
+            return ordered
         return None
 
-    def _contains_hard_adjacency(self, ordered: Sequence[SceneRange]) -> bool:
+    def _candidate_rank(
+        self,
+        candidate: SceneRange,
+        position: int,
+        prev_scene: Optional[SceneRange],
+    ) -> Tuple[int, int, float]:
+        fixed_position_penalty = 0 if candidate.source_index != position else 1
+        neighbor_penalty = 0 if prev_scene is None or not self._is_bad_neighbor(prev_scene, candidate) else 1
+        distance_score = abs(candidate.source_index - position)
+        return (fixed_position_penalty, neighbor_penalty, -float(distance_score))
+
+    def _score_order(self, ordered: List[SceneRange]) -> Tuple[int, int]:
+        if not ordered:
+            return (0, 0)
+        fixed_position_count = 0
+        hard_adjacency_count = 0
+        for index, scene in enumerate(ordered):
+            if scene.source_index == index:
+                fixed_position_count += 1
+        for left, right in zip(ordered, ordered[1:]):
+            if self._is_bad_neighbor(left, right):
+                hard_adjacency_count += 1
+        return (hard_adjacency_count, fixed_position_count)
+
+    def _violates_shuffle_constraints(self, ordered: Sequence[SceneRange]) -> bool:
+        if any(scene.source_index == index for index, scene in enumerate(ordered)):
+            return True
         for left, right in zip(ordered, ordered[1:]):
             if self._is_bad_neighbor(left, right):
                 return True
         return False
 
     def _is_bad_neighbor(self, left: SceneRange, right: SceneRange) -> bool:
-        if abs(left.source_index - right.source_index) <= 1:
-            return True
-        if left.duration_seconds and right.duration_seconds:
-            larger = max(left.duration_seconds, right.duration_seconds)
-            smaller = min(left.duration_seconds, right.duration_seconds)
-            if smaller > 0 and larger / smaller > 3.0:
-                return True
-        return False
+        return abs(left.source_index - right.source_index) <= 1

@@ -58,7 +58,12 @@ class FakeDownloader(object):
             source_url=source_url,
             downloaded_path=source_path,
             extractor_name="fake",
-            metadata={"download_strategy": "cookies_file" if cookies_file else "direct"},
+            metadata={
+                "download_strategy": "cookies_file" if cookies_file else "direct",
+                "source_title": "Demo title #xuhuong #demo",
+                "source_author": "demo-author",
+                "source_unique_id": "demo-uid",
+            },
         )
 
 
@@ -119,7 +124,7 @@ class FakeRoughCutRenderer(object):
 
 
 class FakeOverlayPlanner(object):
-    def plan(self, image_info):
+    def plan(self, image_info, separator_max_alpha_ratio=None):
         return OverlaySpec(
             source_image_path=image_info.path,
             image_type=image_info.image_type,
@@ -133,6 +138,7 @@ class FakeOverlayPlanner(object):
             padding=0,
             shadow_offset=12,
             warnings=[],
+            separator_max_alpha_ratio=separator_max_alpha_ratio,
         )
 
 
@@ -210,16 +216,26 @@ class SessionSmokeTests(unittest.TestCase):
             )
             self.assertEqual(result.status, "completed_with_success")
             self.assertEqual(len(result.items), 2)
-            self.assertTrue(result.artifacts.summary_path.exists())
-            self.assertEqual(result.summary["cookies_file"], str(cookies_path.resolve()))
+            self.assertIsNone(result.artifacts.summary_path)
+            self.assertTrue(result.artifacts.titles_path.exists())
+            self.assertEqual(
+                result.artifacts.titles_path.read_text(encoding="utf-8"),
+                "Demo title #xuhuong #demo\n\nDemo title #xuhuong #demo\n",
+            )
+            self.assertTrue((result.artifacts.session_dir / "002_final_video.mp4").exists())
+            self.assertTrue((result.artifacts.session_dir / "001_final_video.mp4").exists())
+            self.assertFalse((result.artifacts.session_dir / "items").exists())
+            self.assertIsNone(result.summary["cookies_file"])
             for item in result.items:
                 self.assertEqual(item.status, "completed")
-                self.assertEqual(item.metadata["download_strategy_used"], "cookies_file")
+                self.assertEqual(item.metadata["download_strategy_used"], "direct")
+                self.assertEqual(item.metadata["source_title"], "Demo title #xuhuong #demo")
                 self.assertTrue(item.metadata["audio_extracted_before_shuffle"])
-                self.assertTrue(item.artifacts.metadata_path.exists())
-                self.assertTrue(item.artifacts.process_log_path.exists())
                 self.assertTrue(item.artifacts.final_video_path.exists())
-                self.assertTrue(item.artifacts.final_audio_path.exists())
+                self.assertIsNone(item.artifacts.final_audio_path)
+                self.assertIsNone(item.artifacts.metadata_path)
+                self.assertIsNone(item.artifacts.process_log_path)
+                self.assertIsNone(item.artifacts.video_title_path)
             self.assertEqual(len(services.audio_finisher.prepared_inputs), 2)
             self.assertEqual(len(services.audio_finisher.finished_inputs), 2)
         finally:
@@ -258,7 +274,9 @@ class SessionSmokeTests(unittest.TestCase):
             self.assertEqual(result.summary["item_count_failed"], 1)
             self.assertEqual(result.items[0].status, "failed")
             self.assertEqual(result.items[1].status, "completed")
-            self.assertTrue(result.artifacts.summary_path.exists())
+            self.assertIsNone(result.artifacts.summary_path)
+            self.assertTrue(result.artifacts.titles_path.exists())
+            self.assertTrue((result.artifacts.session_dir / "001_final_video.mp4").exists())
         finally:
             temp_dir.cleanup()
 

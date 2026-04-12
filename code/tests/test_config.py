@@ -16,18 +16,22 @@ class PipelineConfigTests(unittest.TestCase):
         old_ffmpeg = os.environ.get("AUTO_EDITOR_FFMPEG_BIN")
         old_ffprobe = os.environ.get("AUTO_EDITOR_FFPROBE_BIN")
         old_ytdlp = os.environ.get("AUTO_EDITOR_YTDLP_BIN")
+        old_lazy_only = os.environ.get("AUTO_EDITOR_LAZY_DOWN_ONLY")
         try:
             os.environ["AUTO_EDITOR_FFMPEG_BIN"] = "custom-ffmpeg"
             os.environ["AUTO_EDITOR_FFPROBE_BIN"] = "custom-ffprobe"
             os.environ["AUTO_EDITOR_YTDLP_BIN"] = "custom-ytdlp"
+            os.environ["AUTO_EDITOR_LAZY_DOWN_ONLY"] = "false"
             config = PipelineConfig.from_env()
             self.assertEqual(config.ffmpeg_bin, "custom-ffmpeg")
             self.assertEqual(config.ffprobe_bin, "custom-ffprobe")
             self.assertEqual(config.ytdlp_bin, "custom-ytdlp")
+            self.assertFalse(config.download_via_lazy_down_only)
         finally:
             self._restore("AUTO_EDITOR_FFMPEG_BIN", old_ffmpeg)
             self._restore("AUTO_EDITOR_FFPROBE_BIN", old_ffprobe)
             self._restore("AUTO_EDITOR_YTDLP_BIN", old_ytdlp)
+            self._restore("AUTO_EDITOR_LAZY_DOWN_ONLY", old_lazy_only)
 
     def test_build_job_id_has_prefix_and_suffix(self):
         config = PipelineConfig()

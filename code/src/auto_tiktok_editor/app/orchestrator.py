@@ -76,6 +76,9 @@ class ItemPipelineRunner(object):
                 validated.job_spec.cookies_file,
             )
             metadata["download_strategy_used"] = source_asset.metadata.get("download_strategy")
+            metadata["source_title"] = source_asset.metadata.get("source_title")
+            metadata["source_author"] = source_asset.metadata.get("source_author")
+            metadata["source_unique_id"] = source_asset.metadata.get("source_unique_id")
 
             self._transition(recorder, session_id, validated_item, "normalizing_media", event_callback)
             source_info = self.services.probe.probe(source_asset.downloaded_path)
@@ -133,9 +136,13 @@ class ItemPipelineRunner(object):
                 workspace.clips_dir,
                 workspace.output_dir / "rough_cut.mp4",
             )
-            overlay_spec = self.services.overlay_planner.plan(validated.image_info)
+            overlay_spec = self.services.overlay_planner.plan(
+                validated.image_info,
+                validated.job_spec.overlay_alpha_ratio,
+            )
             self._record_warnings(recorder, session_id, validated_item, overlay_spec.warnings, event_callback)
             metadata["overlay_mode_used"] = overlay_spec.mode
+            metadata["overlay_alpha_ratio_used"] = overlay_spec.separator_max_alpha_ratio
 
             final_audio = self.services.audio_finisher.finish(
                 prepared_audio,
@@ -418,6 +425,7 @@ class SessionOrchestrator(object):
                 session_workspace,
                 summary,
                 recorder,
+                items=items,
             )
             self._emit(
                 event_callback,
@@ -488,6 +496,7 @@ class SessionOrchestrator(object):
                     session_workspace,
                     summary,
                     recorder,
+                    items=items,
                 )
             self._emit(
                 event_callback,
@@ -541,12 +550,13 @@ class SessionOrchestrator(object):
             "job_id": item.job_id,
             "status": item.status,
             "source_video_url": item.source_video_url,
+            "source_title": item.metadata.get("source_title"),
             "product_image_path": str(item.product_image_path) if item.product_image_path else None,
             "output_dir": str(item.output_dir),
             "final_video_path": str(item.artifacts.final_video_path) if item.artifacts.final_video_path else None,
             "final_audio_path": str(item.artifacts.final_audio_path) if item.artifacts.final_audio_path else None,
-            "metadata_path": str(item.artifacts.metadata_path),
-            "process_log_path": str(item.artifacts.process_log_path),
+            "metadata_path": str(item.artifacts.metadata_path) if item.artifacts.metadata_path else None,
+            "process_log_path": str(item.artifacts.process_log_path) if item.artifacts.process_log_path else None,
             "warnings": item.warnings,
             "error": item.error,
         }

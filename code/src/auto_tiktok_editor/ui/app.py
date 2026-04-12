@@ -45,21 +45,38 @@ STATUS_LABELS = {
     "failed_session": "Session lỗi",
 }
 
+PALETTE = {
+    "bg": "#0F1724",
+    "hero": "#141D2D",
+    "panel": "#131C2B",
+    "panel_alt": "#1A2538",
+    "card": "#141D2D",
+    "border": "#2A3650",
+    "text": "#F3F4F6",
+    "muted": "#97A6BA",
+    "accent": "#22C55E",
+    "accent_hover": "#16A34A",
+    "button_text": "#F8FAFC",
+    "log_bg": "#060D19",
+    "input_bg": "#202B3E",
+    "input_fg": "#E5E7EB",
+}
+
 STATUS_COLORS = {
-    "draft": ("#E2E8F0", "#334155"),
-    "invalid": ("#FEE2E2", "#991B1B"),
-    "queued": ("#DBEAFE", "#1D4ED8"),
-    "validating": ("#FEF3C7", "#92400E"),
-    "downloading": ("#D1FAE5", "#065F46"),
-    "processing": ("#DCFCE7", "#166534"),
-    "completed": ("#DCFCE7", "#166534"),
-    "failed": ("#FEE2E2", "#991B1B"),
-    "validating_session": ("#FEF3C7", "#92400E"),
-    "ready_to_run": ("#DBEAFE", "#1D4ED8"),
-    "running": ("#DBEAFE", "#1D4ED8"),
-    "completed_with_success": ("#DCFCE7", "#166534"),
-    "completed_with_partial_failure": ("#FEF3C7", "#92400E"),
-    "failed_session": ("#FEE2E2", "#991B1B"),
+    "draft": ("#25324A", "#CFD8E3"),
+    "invalid": ("#4A2527", "#F5B4B0"),
+    "queued": ("#23344B", "#C9D7E8"),
+    "validating": ("#493D28", "#F2D29A"),
+    "downloading": ("#17323A", "#A8D6DF"),
+    "processing": ("#1D3A2A", "#B6E2C0"),
+    "completed": ("#1D3A2A", "#C8F0D2"),
+    "failed": ("#4A2527", "#F5B4B0"),
+    "validating_session": ("#493D28", "#F2D29A"),
+    "ready_to_run": ("#23344B", "#C9D7E8"),
+    "running": ("#23344B", "#C9D7E8"),
+    "completed_with_success": ("#1D3A2A", "#C8F0D2"),
+    "completed_with_partial_failure": ("#493D28", "#F2D29A"),
+    "failed_session": ("#4A2527", "#F5B4B0"),
 }
 
 
@@ -70,10 +87,13 @@ class SessionRowWidgets:
     index_var: tk.StringVar
     url_var: tk.StringVar
     image_var: tk.StringVar
+    opacity_var: tk.IntVar
+    opacity_label_var: tk.StringVar
     status_var: tk.StringVar
     detail_var: tk.StringVar
     url_entry: ttk.Entry
     image_entry: ttk.Entry
+    opacity_scale: tk.Scale
     browse_button: ttk.Button
     remove_button: ttk.Button
     open_button: ttk.Button
@@ -97,28 +117,34 @@ class EditorApplication(object):
         self.rows = []  # type: List[SessionRowWidgets]
         self.row_counter = 0
         self.running = False
+        self.device_action_running = False
         self.latest_result = None  # type: Optional[SessionResult]
         self.current_session_dir = None  # type: Optional[str]
+        self.connected_device_serial = None  # type: Optional[str]
 
         self.session_name_var = tk.StringVar()
         self.output_root_var = tk.StringVar(value=str(self.config.default_output_root))
-        self.cookies_file_var = tk.StringVar()
         self.session_status_var = tk.StringVar(value=STATUS_LABELS["draft"])
         self.session_detail_var = tk.StringVar(value="Tạo danh sách item rồi bấm chạy session.")
         self.summary_counts_var = tk.StringVar(value="0 item | 0 hoàn tất | 0 lỗi")
         self.summary_path_var = tk.StringVar(value="Chưa có output session.")
 
+        self.device_mode_var = tk.StringVar(value="usb")
+        self.device_address_var = tk.StringVar()
+        self.device_status_var = tk.StringVar(value="Chua ket noi dien thoai.")
+
         self._configure_window()
         self._build_styles()
         self._build_layout()
         self._add_row()
+        self._refresh_device_action_buttons()
         self.root.after(self.config.ui_poll_interval_ms, self._poll_events)
 
     def _configure_window(self) -> None:
         self.root.title("Auto TikTok Video Editor")
         self.root.geometry("1360x880")
         self.root.minsize(1180, 760)
-        self.root.configure(bg="#F8FAFC")
+        self.root.configure(bg=PALETTE["bg"])
 
     def _build_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -126,33 +152,109 @@ class EditorApplication(object):
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("App.TFrame", background="#F8FAFC")
-        style.configure("Card.TFrame", background="#FFFFFF", relief="flat")
-        style.configure("Card.TLabelframe", background="#FFFFFF", borderwidth=1)
-        style.configure("Card.TLabelframe.Label", background="#FFFFFF", foreground="#0F172A", font=("Segoe UI", 11, "bold"))
-        style.configure("Title.TLabel", background="#F8FAFC", foreground="#0F172A", font=("Segoe UI Semibold", 19, "bold"))
-        style.configure("Subtitle.TLabel", background="#F8FAFC", foreground="#475569", font=("Segoe UI", 10))
-        style.configure("Field.TLabel", background="#FFFFFF", foreground="#334155", font=("Segoe UI", 10, "bold"))
-        style.configure("Body.TLabel", background="#FFFFFF", foreground="#475569", font=("Segoe UI", 10))
-        style.configure("Primary.TButton", font=("Segoe UI Semibold", 10, "bold"), padding=(14, 8))
-        style.configure("Secondary.TButton", font=("Segoe UI", 10), padding=(12, 7))
-        style.configure("TEntry", padding=6)
+        style.configure("App.TFrame", background=PALETTE["bg"])
+        style.configure("Hero.TFrame", background=PALETTE["hero"])
+        style.configure("Card.TFrame", background=PALETTE["card"], relief="flat")
+        style.configure(
+            "Card.TLabelframe",
+            background=PALETTE["card"],
+            borderwidth=1,
+            relief="solid",
+            bordercolor=PALETTE["border"],
+            lightcolor=PALETTE["border"],
+            darkcolor=PALETTE["border"],
+        )
+        style.configure(
+            "Card.TLabelframe.Label",
+            background=PALETTE["card"],
+            foreground=PALETTE["text"],
+            font=("Bahnschrift SemiBold", 11, "bold"),
+        )
+        style.configure("Title.TLabel", background=PALETTE["hero"], foreground=PALETTE["text"], font=("Segoe UI Semibold", 22, "bold"))
+        style.configure("Subtitle.TLabel", background=PALETTE["hero"], foreground=PALETTE["muted"], font=("Segoe UI", 10))
+        style.configure("HeroBody.TLabel", background=PALETTE["hero"], foreground=PALETTE["muted"], font=("Segoe UI", 10))
+        style.configure("Field.TLabel", background=PALETTE["card"], foreground=PALETTE["text"], font=("Segoe UI Semibold", 10, "bold"))
+        style.configure("Body.TLabel", background=PALETTE["card"], foreground=PALETTE["muted"], font=("Segoe UI", 10))
+        style.configure("Dark.TRadiobutton", background=PALETTE["card"], foreground=PALETTE["text"], font=("Segoe UI", 10))
+        style.map(
+            "Dark.TRadiobutton",
+            background=[("active", PALETTE["card"]), ("selected", PALETTE["card"])],
+            foreground=[("disabled", "#7F8FA5"), ("active", PALETTE["text"]), ("selected", PALETTE["text"])],
+        )
+        style.configure(
+            "Primary.TButton",
+            font=("Segoe UI Semibold", 10, "bold"),
+            padding=(16, 10),
+            background=PALETTE["accent"],
+            foreground=PALETTE["button_text"],
+            borderwidth=0,
+        )
+        style.map(
+            "Primary.TButton",
+            background=[("active", PALETTE["accent_hover"]), ("disabled", "#22314B")],
+            foreground=[("disabled", "#AAB6C5")],
+        )
+        style.configure(
+            "Secondary.TButton",
+            font=("Segoe UI Semibold", 10),
+            padding=(12, 8),
+            background=PALETTE["panel_alt"],
+            foreground=PALETTE["text"],
+            borderwidth=0,
+        )
+        style.map(
+            "Secondary.TButton",
+            background=[("active", "#243149"), ("disabled", "#182335")],
+            foreground=[("disabled", "#7F8FA5")],
+        )
+        style.configure(
+            "TEntry",
+            padding=8,
+            fieldbackground=PALETTE["input_bg"],
+            background=PALETTE["input_bg"],
+            foreground=PALETTE["input_fg"],
+            insertcolor=PALETTE["input_fg"],
+            bordercolor=PALETTE["border"],
+            lightcolor=PALETTE["border"],
+            darkcolor=PALETTE["border"],
+            relief="solid",
+        )
+        style.map(
+            "TEntry",
+            bordercolor=[("focus", PALETTE["accent"])],
+            lightcolor=[("focus", PALETTE["accent"])],
+            darkcolor=[("focus", PALETTE["accent"])],
+        )
+        style.configure(
+            "Vertical.TScrollbar",
+            background=PALETTE["panel_alt"],
+            troughcolor=PALETTE["log_bg"],
+            bordercolor=PALETTE["border"],
+            arrowcolor=PALETTE["muted"],
+        )
+
+    def _default_blur_percent(self) -> int:
+        return int(round((1.0 - self.config.split_separator_max_alpha_ratio) * 100.0))
+
+    def _alpha_ratio_from_blur_percent(self, value: int) -> float:
+        clamped = max(5, min(95, int(value)))
+        return max(0.05, min(0.95, 1.0 - (clamped / 100.0)))
 
     def _build_layout(self) -> None:
-        outer = ttk.Frame(self.root, style="App.TFrame", padding=20)
+        outer = ttk.Frame(self.root, style="App.TFrame", padding=24)
         outer.pack(fill="both", expand=True)
 
-        header = ttk.Frame(outer, style="App.TFrame")
+        header = ttk.Frame(outer, style="Hero.TFrame", padding=20)
         header.pack(fill="x")
         ttk.Label(header, text="Auto TikTok Video Editor", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             header,
             text="Nhập nhiều cặp link TikTok và ảnh sản phẩm, rồi chạy session tuần tự với trạng thái rõ cho từng item.",
-            style="Subtitle.TLabel",
-        ).pack(anchor="w", pady=(4, 0))
+            style="HeroBody.TLabel",
+        ).pack(anchor="w", pady=(6, 0))
 
-        controls = ttk.LabelFrame(outer, text="Session Control", style="Card.TLabelframe", padding=16)
-        controls.pack(fill="x", pady=(18, 14))
+        controls = ttk.LabelFrame(outer, text="Session Control", style="Card.TLabelframe", padding=18)
+        controls.pack(fill="x", pady=(20, 16))
         controls.columnconfigure(1, weight=1)
         controls.columnconfigure(4, weight=1)
 
@@ -171,16 +273,12 @@ class EditorApplication(object):
         )
         self.output_browse_button.grid(row=1, column=4, sticky="e", padx=(12, 0), pady=(6, 0))
 
-        ttk.Label(controls, text="Cookies.txt (optional)", style="Field.TLabel").grid(row=2, column=0, columnspan=5, sticky="w", pady=(14, 0))
-        self.cookies_file_entry = ttk.Entry(controls, textvariable=self.cookies_file_var)
-        self.cookies_file_entry.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        self.cookies_browse_button = ttk.Button(
+        ttk.Label(controls, text="Downloader", style="Field.TLabel").grid(row=2, column=0, columnspan=5, sticky="w", pady=(14, 0))
+        ttk.Label(
             controls,
-            text="Ch?n cookies.txt",
-            style="Secondary.TButton",
-            command=self._browse_cookies_file,
-        )
-        self.cookies_browse_button.grid(row=3, column=4, sticky="e", padx=(12, 0), pady=(6, 0))
+            text="Máº·c Ä‘á»‹nh dÃ¹ng lazy-down cho má»i link TikTok. KhÃ´ng cáº§n nháº­p cookies.txt.",
+            style="Body.TLabel",
+        ).grid(row=3, column=0, columnspan=5, sticky="w", pady=(6, 0))
 
         actions = ttk.Frame(controls, style="Card.TFrame")
         actions.grid(row=4, column=0, columnspan=5, sticky="ew", pady=(16, 0))
@@ -204,7 +302,7 @@ class EditorApplication(object):
     def _build_rows_panel(self, parent: ttk.LabelFrame) -> None:
         container = ttk.Frame(parent, style="Card.TFrame")
         container.pack(fill="both", expand=True)
-        canvas = tk.Canvas(container, background="#FFFFFF", highlightthickness=0, bd=0)
+        canvas = tk.Canvas(container, background=PALETTE["panel"], highlightthickness=0, bd=0)
         scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
         self.rows_host = ttk.Frame(canvas, style="Card.TFrame")
         self.rows_host.bind(
@@ -221,44 +319,124 @@ class EditorApplication(object):
         )
 
     def _build_summary_panel(self, parent: ttk.LabelFrame) -> None:
-        parent.columnconfigure(0, weight=1)
-        status_frame = ttk.Frame(parent, style="Card.TFrame")
+        container = ttk.Frame(parent, style="Card.TFrame")
+        container.pack(fill="both", expand=True)
+
+        canvas = tk.Canvas(container, background=PALETTE["card"], highlightthickness=0, bd=0)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        summary_host = ttk.Frame(canvas, style="Card.TFrame")
+        summary_host.bind(
+            "<Configure>",
+            lambda event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        summary_window_id = canvas.create_window((0, 0), window=summary_host, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(summary_window_id, width=event.width),
+        )
+
+        def _on_summary_mousewheel(event):
+            delta = 0
+            if getattr(event, "delta", 0):
+                delta = int(-event.delta / 120)
+            elif getattr(event, "num", None) == 4:
+                delta = -1
+            elif getattr(event, "num", None) == 5:
+                delta = 1
+            if delta:
+                canvas.yview_scroll(delta, "units")
+
+        canvas.bind_all("<MouseWheel>", _on_summary_mousewheel)
+        canvas.bind_all("<Button-4>", _on_summary_mousewheel)
+        canvas.bind_all("<Button-5>", _on_summary_mousewheel)
+
+        status_frame = ttk.Frame(summary_host, style="Card.TFrame")
         status_frame.pack(fill="x")
-        ttk.Label(status_frame, text="Trạng thái session", style="Field.TLabel").pack(anchor="w")
-        self.session_chip = tk.Label(status_frame, text=STATUS_LABELS["draft"], font=("Segoe UI", 9, "bold"), padx=10, pady=5)
+        ttk.Label(status_frame, text="Trang thai session", style="Field.TLabel").pack(anchor="w")
+        self.session_chip = tk.Label(
+            status_frame,
+            text=STATUS_LABELS["draft"],
+            font=("Bahnschrift SemiBold", 9, "bold"),
+            padx=12,
+            pady=6,
+            bd=0,
+        )
         self.session_chip.pack(anchor="w", pady=(8, 0))
         self._set_chip_style(self.session_chip, "draft")
         ttk.Label(status_frame, textvariable=self.session_detail_var, style="Body.TLabel", wraplength=360, justify="left").pack(anchor="w", pady=(8, 0))
 
-        counts_frame = ttk.Frame(parent, style="Card.TFrame")
+        counts_frame = ttk.Frame(summary_host, style="Card.TFrame")
         counts_frame.pack(fill="x", pady=(18, 0))
-        ttk.Label(counts_frame, text="Tổng quan", style="Field.TLabel").pack(anchor="w")
+        ttk.Label(counts_frame, text="Tong quan", style="Field.TLabel").pack(anchor="w")
         ttk.Label(counts_frame, textvariable=self.summary_counts_var, style="Body.TLabel").pack(anchor="w", pady=(8, 0))
 
-        output_frame = ttk.Frame(parent, style="Card.TFrame")
+        output_frame = ttk.Frame(summary_host, style="Card.TFrame")
         output_frame.pack(fill="x", pady=(18, 0))
         ttk.Label(output_frame, text="Output session", style="Field.TLabel").pack(anchor="w")
         ttk.Label(output_frame, textvariable=self.summary_path_var, style="Body.TLabel", wraplength=360, justify="left").pack(anchor="w", pady=(8, 0))
         self.open_session_button = ttk.Button(
             output_frame,
-            text="Mở thư mục session",
+            text="Mo thu muc session",
             style="Secondary.TButton",
             command=lambda: self._open_path(self.current_session_dir),
             state="disabled",
         )
         self.open_session_button.pack(anchor="w", pady=(10, 0))
 
-        log_frame = ttk.Frame(parent, style="Card.TFrame")
+        device_frame = ttk.Frame(summary_host, style="Card.TFrame")
+        device_frame.pack(fill="x", pady=(18, 0))
+        ttk.Label(device_frame, text="Phone Transfer", style="Field.TLabel").pack(anchor="w")
+        ttk.Label(
+            device_frame,
+            text="Ket noi bang USB hoac Wi-Fi, sau do gui tat ca video final theo dung thu tu session.",
+            style="Body.TLabel",
+            wraplength=360,
+            justify="left",
+        ).pack(anchor="w", pady=(8, 0))
+
+        mode_frame = ttk.Frame(device_frame, style="Card.TFrame")
+        mode_frame.pack(fill="x", pady=(10, 0))
+        ttk.Radiobutton(mode_frame, text="USB", value="usb", variable=self.device_mode_var, style="Dark.TRadiobutton").pack(side="left")
+        ttk.Radiobutton(mode_frame, text="Wi-Fi", value="wifi", variable=self.device_mode_var, style="Dark.TRadiobutton").pack(side="left", padx=(14, 0))
+
+        device_actions = ttk.Frame(device_frame, style="Card.TFrame")
+        device_actions.pack(fill="x", pady=(10, 0))
+        device_actions.columnconfigure(1, weight=1)
+        self.connect_device_button = ttk.Button(
+            device_actions,
+            text="Connect",
+            style="Secondary.TButton",
+            command=self._connect_device,
+        )
+        self.connect_device_button.grid(row=0, column=0, sticky="w")
+        self.send_to_phone_button = ttk.Button(
+            device_actions,
+            text="Send To Phone",
+            style="Primary.TButton",
+            command=self._send_session_to_phone,
+            state="disabled",
+        )
+        self.send_to_phone_button.grid(row=0, column=1, sticky="e")
+
+        ttk.Label(device_frame, text="Wi-Fi IP:PORT", style="Body.TLabel").pack(anchor="w", pady=(10, 4))
+        self.device_address_entry = ttk.Entry(device_frame, textvariable=self.device_address_var)
+        self.device_address_entry.pack(fill="x")
+        ttk.Label(device_frame, textvariable=self.device_status_var, style="Body.TLabel", wraplength=360, justify="left").pack(anchor="w", pady=(10, 0))
+
+        log_frame = ttk.Frame(summary_host, style="Card.TFrame")
         log_frame.pack(fill="both", expand=True, pady=(18, 0))
         ttk.Label(log_frame, text="Activity Log", style="Field.TLabel").pack(anchor="w")
         self.log_text = tk.Text(
             log_frame,
-            height=18,
+            height=10,
             wrap="word",
             relief="flat",
-            bg="#F8FAFC",
-            fg="#0F172A",
-            insertbackground="#0F172A",
+            bg=PALETTE["log_bg"],
+            fg=PALETTE["text"],
+            insertbackground=PALETTE["text"],
             font=("Consolas", 10),
             padx=10,
             pady=10,
@@ -269,13 +447,16 @@ class EditorApplication(object):
     def _add_row(self) -> None:
         self.row_counter += 1
         row_id = "row_%03d" % self.row_counter
-        row_frame = ttk.Frame(self.rows_host, style="Card.TFrame", padding=14)
+        row_frame = ttk.Frame(self.rows_host, style="Card.TFrame", padding=16)
         row_frame.pack(fill="x", pady=(0, 12))
         row_frame.columnconfigure(1, weight=1)
 
         index_var = tk.StringVar(value="Item %d" % len(self.rows))
         url_var = tk.StringVar()
         image_var = tk.StringVar()
+        default_blur_percent = self._default_blur_percent()
+        opacity_var = tk.IntVar(value=default_blur_percent)
+        opacity_label_var = tk.StringVar(value="%d%%" % default_blur_percent)
         status_var = tk.StringVar(value=STATUS_LABELS["draft"])
         detail_var = tk.StringVar(value="Chưa chạy.")
 
@@ -314,10 +495,42 @@ class EditorApplication(object):
         )
         browse_button.grid(row=4, column=3, sticky="e", padx=(10, 0))
 
+        opacity_header = ttk.Frame(row_frame, style="Card.TFrame")
+        opacity_header.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(12, 4))
+        opacity_header.columnconfigure(0, weight=1)
+        ttk.Label(opacity_header, text="Do mo vung giao nhau", style="Body.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(opacity_header, textvariable=opacity_label_var, style="Field.TLabel").grid(row=0, column=1, sticky="e")
+
+        opacity_scale = tk.Scale(
+            row_frame,
+            from_=5,
+            to=95,
+            orient="horizontal",
+            showvalue=False,
+            highlightthickness=0,
+            bd=0,
+            relief="flat",
+            variable=opacity_var,
+            background=PALETTE["card"],
+            foreground=PALETTE["text"],
+            troughcolor=PALETTE["input_bg"],
+            activebackground=PALETTE["accent"],
+            length=420,
+            command=lambda value, label_var=opacity_label_var: label_var.set("%d%%" % int(round(float(value)))),
+        )
+        opacity_scale.grid(row=6, column=0, columnspan=4, sticky="ew")
+
         footer = ttk.Frame(row_frame, style="Card.TFrame")
-        footer.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        footer.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         footer.columnconfigure(1, weight=1)
-        status_chip = tk.Label(footer, text=STATUS_LABELS["draft"], font=("Segoe UI", 9, "bold"), padx=10, pady=4)
+        status_chip = tk.Label(
+            footer,
+            text=STATUS_LABELS["draft"],
+            font=("Bahnschrift SemiBold", 9, "bold"),
+            padx=12,
+            pady=5,
+            bd=0,
+        )
         status_chip.grid(row=0, column=0, sticky="w")
         ttk.Label(footer, textvariable=detail_var, style="Body.TLabel", wraplength=620, justify="left").grid(row=0, column=1, sticky="w", padx=(10, 0))
 
@@ -328,10 +541,13 @@ class EditorApplication(object):
             index_var=index_var,
             url_var=url_var,
             image_var=image_var,
+            opacity_var=opacity_var,
+            opacity_label_var=opacity_label_var,
             status_var=status_var,
             detail_var=detail_var,
             url_entry=url_entry,
             image_entry=image_entry,
+            opacity_scale=opacity_scale,
             browse_button=browse_button,
             remove_button=remove_button,
             open_button=open_button,
@@ -379,21 +595,79 @@ class EditorApplication(object):
         if selected:
             self.output_root_var.set(selected)
 
-    def _browse_cookies_file(self) -> None:
-        selected = filedialog.askopenfilename(
-            title="Ch?n cookies.txt",
-            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+    def _connect_device(self) -> None:
+        if self.running or self.device_action_running:
+            return
+        self.device_action_running = True
+        self.connect_device_button.configure(state="disabled")
+        self.send_to_phone_button.configure(state="disabled")
+        self.device_status_var.set("Dang ket noi dien thoai...")
+        worker = threading.Thread(
+            target=self._connect_device_worker,
+            args=(self.device_mode_var.get(), self.device_address_var.get().strip()),
+            daemon=True,
         )
-        if selected:
-            self.cookies_file_var.set(selected)
+        worker.start()
+
+    def _connect_device_worker(self, mode: str, address: str) -> None:
+        payload = self.orchestrator.services.device_transfer.connect(mode, address)
+        self._queue_event(SessionEvent(event_type="device_connected", payload=payload))
+
+    def _send_session_to_phone(self) -> None:
+        if self.running or self.device_action_running:
+            return
+        if self.latest_result is None or not self.latest_result.items:
+            messagebox.showwarning("Chua co session", "Hay chay xong session truoc khi gui video sang dien thoai.")
+            return
+        if not self.connected_device_serial:
+            messagebox.showwarning("Chua ket noi", "Hay bam Connect de ket noi dien thoai truoc.")
+            return
+        video_paths = []
+        for item in self.latest_result.items:
+            if item.status == "completed" and item.artifacts.final_video_path is not None:
+                video_paths.append(item.artifacts.final_video_path)
+        if not video_paths:
+            messagebox.showwarning("Khong co video", "Session nay chua co video final de gui sang dien thoai.")
+            return
+
+        titles_path = self.latest_result.artifacts.titles_path if self.latest_result.artifacts else None
+        session_label = self.latest_result.summary.get("session_name") or self.latest_result.session_id
+
+        self.device_action_running = True
+        self.connect_device_button.configure(state="disabled")
+        self.send_to_phone_button.configure(state="disabled")
+        self.device_status_var.set("Dang gui video sang dien thoai...")
+        worker = threading.Thread(
+            target=self._send_session_to_phone_worker,
+            args=(video_paths, titles_path, str(session_label), self.connected_device_serial),
+            daemon=True,
+        )
+        worker.start()
+
+    def _send_session_to_phone_worker(
+        self,
+        video_paths: List[Path],
+        titles_path: Optional[Path],
+        session_label: str,
+        device_serial: str,
+    ) -> None:
+        payload = self.orchestrator.services.device_transfer.push_session_outputs(
+            video_paths,
+            titles_path=titles_path,
+            session_label=session_label,
+            device_serial=device_serial,
+        )
+        self._queue_event(SessionEvent(event_type="device_transfer_completed", payload=payload))
 
     def _start_session(self) -> None:
         if self.running:
             return
         self.latest_result = None
         self.current_session_dir = None
+        self.connected_device_serial = None
         self.summary_path_var.set("Đang chuẩn bị session...")
         self.open_session_button.configure(state="disabled")
+        self.send_to_phone_button.configure(state="disabled")
         session_spec = self._build_session_spec()
         self._clear_all_row_states_for_run()
         self._set_running_state(True)
@@ -412,14 +686,14 @@ class EditorApplication(object):
                     row_id=row.row_id,
                     source_video_url=row.url_var.get().strip(),
                     product_image=product_image,
+                    overlay_alpha_ratio=self._alpha_ratio_from_blur_percent(row.opacity_var.get()),
                 )
             )
-        cookies_text = self.cookies_file_var.get().strip()
         return SessionSpec(
             items=items,
             output_root_dir=Path(output_root_text),
             session_name=(self.session_name_var.get().strip() or None),
-            cookies_file=Path(cookies_text) if cookies_text else None,
+            cookies_file=None,
         )
 
     def _run_session_worker(self, session_spec: SessionSpec) -> None:
@@ -441,14 +715,30 @@ class EditorApplication(object):
         self.run_button.configure(state=state)
         self.output_root_entry.configure(state=state)
         self.output_browse_button.configure(state=state)
-        self.cookies_file_entry.configure(state=state)
-        self.cookies_browse_button.configure(state=state)
         self.session_name_entry.configure(state=state)
         for row in self.rows:
             row.url_entry.configure(state=state)
             row.image_entry.configure(state=state)
+            row.opacity_scale.configure(state=state)
             row.browse_button.configure(state=state)
             row.remove_button.configure(state=state)
+        self.device_address_entry.configure(state=state)
+        self._refresh_device_action_buttons()
+
+    def _refresh_device_action_buttons(self) -> None:
+        connect_state = "disabled" if self.running or self.device_action_running else "normal"
+        send_ready = (
+            not self.running
+            and not self.device_action_running
+            and self.connected_device_serial is not None
+            and self.latest_result is not None
+            and any(
+                item.status == "completed" and item.artifacts.final_video_path is not None
+                for item in self.latest_result.items
+            )
+        )
+        self.connect_device_button.configure(state=connect_state)
+        self.send_to_phone_button.configure(state="normal" if send_ready else "disabled")
 
     def _queue_event(self, event: SessionEvent) -> None:
         self.event_queue.put(event)
@@ -529,6 +819,43 @@ class EditorApplication(object):
             self._set_session_status("failed_session", event.message or "Session failed.")
             self._append_log("Session failed: %s" % (event.message or ""))
             return
+        if event.event_type == "device_connected":
+            payload = event.payload or {}
+            self.device_action_running = False
+            if payload.get("connected"):
+                self.connected_device_serial = str(payload.get("device_serial") or "")
+                self.device_status_var.set(str(payload.get("message") or "Da ket noi dien thoai."))
+                self._append_log("Device connected: %s" % self.connected_device_serial)
+            else:
+                self.connected_device_serial = None
+                self.device_status_var.set(str(payload.get("message") or "Khong the ket noi dien thoai."))
+                self._append_log("Device connect failed: %s" % (payload.get("message") or "unknown error"))
+            self._refresh_device_action_buttons()
+            return
+        if event.event_type == "device_transfer_completed":
+            payload = event.payload or {}
+            self.device_action_running = False
+            pushed_count = int(payload.get("pushed_count") or 0)
+            remote_dir = payload.get("remote_dir") or ""
+            warnings = payload.get("warnings") or []
+            if pushed_count > 0:
+                self.device_status_var.set("Da gui %d video sang dien thoai." % pushed_count)
+                self._append_log("Transferred %d video(s) to %s." % (pushed_count, remote_dir))
+                if warnings:
+                    for warning in warnings:
+                        self._append_log("Transfer warning: %s" % warning)
+                    messagebox.showwarning("Transfer completed", "Da gui %d video, nhung van con canh bao. Xem log de biet them." % pushed_count)
+                else:
+                    messagebox.showinfo("Transfer completed", "Da gui %d video sang dien thoai thanh cong." % pushed_count)
+            else:
+                message = "Khong gui duoc video nao sang dien thoai."
+                if warnings:
+                    message = str(warnings[0])
+                self.device_status_var.set(message)
+                self._append_log("Transfer failed: %s" % message)
+                messagebox.showwarning("Transfer failed", message)
+            self._refresh_device_action_buttons()
+            return
         if event.event_type == "worker_result":
             self._finalize_result(event.payload.get("result"))
 
@@ -536,20 +863,33 @@ class EditorApplication(object):
         self.latest_result = result
         self._set_running_state(False)
         if result is None:
+            self._refresh_device_action_buttons()
             self._set_session_status("failed_session", "Không nhận được kết quả session.")
             messagebox.showerror("Session failed", "Không nhận được kết quả session.")
             return
         if result.row_errors:
+            self._refresh_device_action_buttons()
             self._apply_row_errors(result.row_errors)
             messagebox.showwarning("Kiểm tra lại input", "Session chưa thể chạy vì còn dòng invalid. Xem trạng thái từng dòng để sửa.")
             return
         if result.artifacts and result.artifacts.session_dir:
             self.current_session_dir = str(result.artifacts.session_dir)
-            self.summary_path_var.set(str(result.artifacts.summary_path))
+            self.summary_path_var.set(str(result.artifacts.session_dir))
             self.open_session_button.configure(state="normal")
+            for row in self.rows:
+                if row.status_var.get() == STATUS_LABELS["completed"]:
+                    row.output_dir = self.current_session_dir
+                    row.open_button.configure(state="normal")
+                else:
+                    row.output_dir = None
+                    row.open_button.configure(state="disabled")
         else:
             self.summary_path_var.set("Session không tạo được summary artifact.")
             self.open_session_button.configure(state="disabled")
+        completed_count = len([item for item in result.items if item.status == "completed"])
+        if completed_count > 0:
+            self.device_status_var.set("Session da xong. Bam Connect roi Send To Phone de gui %d video." % completed_count)
+        self._refresh_device_action_buttons()
         if result.status == "completed_with_success":
             messagebox.showinfo("Session hoàn tất", "Tất cả item đã xử lý xong thành công.")
         elif result.status == "completed_with_partial_failure":
@@ -625,5 +965,3 @@ def launch_ui(config: Optional[PipelineConfig] = None) -> int:
     app = EditorApplication(root, config=config)
     root.mainloop()
     return 0
-
-

@@ -10,6 +10,7 @@ import unittest
 
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import FinalAudioAsset, ImageInfo, MediaInfo, RoughCutAsset
+from auto_tiktok_editor.media.normalize import MediaNormalizer
 from auto_tiktok_editor.media.overlay import OverlayPlanner
 from auto_tiktok_editor.media.render import FinalCompositor
 from auto_tiktok_editor.utils.command import CommandRunner
@@ -24,7 +25,50 @@ class RecordingRunner(object):
         return None
 
 
+class FakeProbe(object):
+    def probe(self, path):
+        return MediaInfo(
+            path=path,
+            duration_seconds=1.0,
+            width=1080,
+            height=1920,
+            frame_rate=30.0,
+            has_audio=True,
+            audio_sample_rate=48000,
+            video_codec='h264',
+            audio_codec='aac',
+        )
+
+
 class RenderLayoutTests(unittest.TestCase):
+    def test_normalizer_bakes_vertical_shift_before_scene_detection(self):
+        config = PipelineConfig()
+        runner = RecordingRunner()
+        normalizer = MediaNormalizer(config, runner, FakeProbe())
+
+        normalizer.normalize(
+            type('SourceAssetStub', (), {'downloaded_path': Path('source.mp4')})(),
+            MediaInfo(
+                path=Path('source.mp4'),
+                duration_seconds=5.0,
+                width=1080,
+                height=1920,
+                frame_rate=30.0,
+                has_audio=True,
+                audio_sample_rate=48000,
+                video_codec='h264',
+                audio_codec='aac',
+            ),
+            Path('normalized.mp4'),
+        )
+
+        command = runner.commands[0]
+        vf = command[command.index('-vf') + 1]
+        self.assertIn('scale=1080:1920:force_original_aspect_ratio=increase', vf)
+        self.assertIn('crop=1080:1440:0:120', vf)
+        self.assertIn('scale=trunc(iw*1.1000/2)*2:trunc(ih*1.1000/2)*2', vf)
+        self.assertIn('crop=1080:1584:(iw-1080)/2:0', vf)
+
     def test_split_layout_filter_matches_requested_crop_and_blend(self):
         config = PipelineConfig()
         planner = OverlayPlanner(config)
@@ -43,19 +87,37 @@ class RenderLayoutTests(unittest.TestCase):
         filter_complex = compositor._build_filter_complex(spec)
 
         self.assertEqual(spec.mode, 'stacked_split_mask')
-        self.assertIn('crop=iw:trunc(ih*0.8000/2)*2:0:0', filter_complex)
-        self.assertIn('scale=1080:1920:force_original_aspect_ratio=increase', filter_complex)
+        self.assertIn('[0:v]scale=1080:-2:flags=lanczos,setsar=1,pad=1080:1920:0:0:color=black[basev]', filter_complex)
         self.assertIn('scale=trunc(iw*1.1000/2)*2:trunc(ih*1.1000/2)*2', filter_complex)
-        self.assertIn('crop=1080:1920:(iw-1080)/2:max(0\\,(ih-1920)*0.6000)[basev]', filter_complex)
         self.assertIn("crop='min(iw\\,ih)':'min(iw\\,ih)'", filter_complex)
-        self.assertIn('scale=1080:999:force_original_aspect_ratio=increase', filter_complex)
-        self.assertIn('crop=1080:999:(iw-1080)/2:ih-999[imgcrop]', filter_complex)
-        self.assertIn("geq=lum='if(lte(Y\\,346)\\,255*Y/346\\,255)'", filter_complex)
-        self.assertIn('overlay=0:0:shortest=1:eof_action=pass,format=rgba[bottomsrc]', filter_complex)
-        self.assertIn('[maskraw]boxblur=22:1[bottommask]', filter_complex)
+        self.assertIn('scale=1080:1467:force_original_aspect_ratio=increase', filter_complex)
+        self.assertIn('crop=1080:1320:(iw-1080)/2:ih-1320[imgcrop]', filter_complex)
+        self.assertIn("geq=lum='if(lte(Y\\,714)\\,97*Y/714\\,255)'", filter_complex)
+        self.assertIn('overlay=0:147:shortest=1:eof_action=pass,format=rgba[bottomsrc]', filter_complex)
+        self.assertIn('[maskraw]boxblur=45:1[bottommask]', filter_complex)
         self.assertIn('[bottomsrc][bottommask]alphamerge[bottom]', filter_complex)
-        self.assertIn('[basev][bottom]overlay=0:921:shortest=1:eof_action=pass[vraw]', filter_complex)
+        self.assertIn('[basev][bottom]overlay=0:453:shortest=1:eof_action=pass[vraw]', filter_complex)
         self.assertIn('[vraw]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[vout]', filter_complex)
+
+    def test_split_layout_respects_custom_overlay_alpha_ratio(self):
+        config = PipelineConfig()
+        planner = OverlayPlanner(config)
+        spec = planner.plan(
+            ImageInfo(
+                path=Path('product.png'),
+                width=1600,
+                height=1200,
+                mime_type='image/jpeg',
+                image_type='jpg',
+                has_alpha=False,
+            ),
+            separator_max_alpha_ratio=0.25,
+        )
+        compositor = FinalCompositor(config, CommandRunner())
+
+        filter_complex = compositor._build_filter_complex(spec)
+
+        self.assertIn("geq=lum='if(lte(Y\\,714)\\,64*Y/714\\,255)'", filter_complex)
 
     def test_final_compositor_caps_to_rough_cut_without_shortest_mux_truncation(self):
         config = PipelineConfig()

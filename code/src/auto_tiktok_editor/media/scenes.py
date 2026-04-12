@@ -31,39 +31,35 @@ class SceneDetector(object):
         return raw_scenes, black_ranges, warnings
 
     def _detect_scene_boundaries(self, processed_master: ProcessedMaster) -> List[SceneRange]:
-        command = [
-            self.config.ffmpeg_bin,
-            "-i",
-            str(processed_master.path),
-            "-filter:v",
-            "select='gt(scene,%s)',showinfo" % self.config.scene_threshold,
-            "-an",
-            "-f",
-            "null",
-            self.runner.devnull,
-        ]
-        completed = self.runner.run(command, check=True, capture_output=True)
-        cut_points = [0.0]
-        for match in SHOWINFO_RE.finditer(completed.stderr or ""):
-            timestamp = float(match.group("time"))
-            if 0.0 < timestamp < processed_master.info.duration_seconds:
-                cut_points.append(timestamp)
-        unique_points = sorted(set(cut_points + [processed_master.info.duration_seconds]))
-        if len(unique_points) < 2:
-            unique_points = [0.0, processed_master.info.duration_seconds]
+        chunk_duration = max(0.5, float(self.config.fixed_chunk_duration_seconds))
+        total_duration = max(0.0, processed_master.info.duration_seconds)
+        if total_duration <= 0.0:
+            return [
+                SceneRange(
+                    start_seconds=0.0,
+                    end_seconds=0.0,
+                    source_index=0,
+                    origin_start_seconds=0.0,
+                    origin_end_seconds=0.0,
+                )
+            ]
+
         scenes = []
-        for index in range(len(unique_points) - 1):
-            start = unique_points[index]
-            end = unique_points[index + 1]
+        cursor = 0.0
+        index = 0
+        while cursor < total_duration - 0.001:
+            end = min(total_duration, cursor + chunk_duration)
             scenes.append(
                 SceneRange(
-                    start_seconds=start,
+                    start_seconds=cursor,
                     end_seconds=end,
                     source_index=index,
-                    origin_start_seconds=start,
+                    origin_start_seconds=cursor,
                     origin_end_seconds=end,
                 )
             )
+            cursor = end
+            index += 1
         return scenes
 
     def _detect_black_ranges(self, processed_master: ProcessedMaster) -> List[Tuple[float, float]]:

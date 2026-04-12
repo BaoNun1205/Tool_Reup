@@ -18,6 +18,7 @@ from auto_tiktok_editor.media.scenes import SceneDetector
 from auto_tiktok_editor.media.speed import SpeedProcessor
 from auto_tiktok_editor.utils.command import CommandRunner
 from auto_tiktok_editor.app.artifacts import ArtifactExporter
+from auto_tiktok_editor.app.device_transfer import AndroidDeviceTransfer
 
 
 @dataclass
@@ -35,6 +36,7 @@ class PipelineServices:
     audio_finisher: object
     final_compositor: object
     artifact_exporter: object
+    device_transfer: object
 
 
 def build_default_services(config: PipelineConfig) -> PipelineServices:
@@ -55,4 +57,5 @@ def build_default_services(config: PipelineConfig) -> PipelineServices:
         audio_finisher=AudioFinisher(config, runner),
         final_compositor=FinalCompositor(config, runner),
         artifact_exporter=ArtifactExporter(),
+        device_transfer=AndroidDeviceTransfer(config, runner, logger=logger),
     )

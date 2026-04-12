@@ -50,7 +50,7 @@ class RoughCutRenderer(object):
             "-preset",
             "medium",
             "-crf",
-            "20",
+            str(self.config.video_crf),
             "-pix_fmt",
             "yuv420p",
             "-r",
@@ -81,7 +81,7 @@ class RoughCutRenderer(object):
             "-preset",
             "medium",
             "-crf",
-            "20",
+            str(self.config.video_crf),
             "-pix_fmt",
             "yuv420p",
         ]
@@ -205,24 +205,25 @@ class FinalCompositor(object):
         feather_height = max(24, feather_height)
         overlay_height = min(target_height, bottom_height + feather_height)
         overlay_y = max(0, min(target_height - overlay_height, overlay_spec.y))
+        image_trim_top = max(0, min(overlay_height - 2, int(round(overlay_height * self.config.split_image_trim_top_ratio))))
+        visible_image_height = max(2, overlay_height - image_trim_top)
         mask_blur = max(12, int(round(feather_height / 16.0)))
+        separator_alpha_ratio = overlay_spec.separator_max_alpha_ratio
+        if separator_alpha_ratio is None:
+            separator_alpha_ratio = self.config.split_separator_max_alpha_ratio
+        separator_max_alpha = max(32, min(255, int(round(255.0 * separator_alpha_ratio))))
         zoom_factor = overlay_spec.zoom_factor or self.config.split_zoom_factor
-        trim_ratio = overlay_spec.video_trim_bottom_ratio or self.config.split_video_trim_bottom_ratio
-        video_vertical_offset_ratio = self.config.split_video_vertical_offset_ratio
         image_bg = self._ffmpeg_color(overlay_spec.image_background_color or self.config.split_image_background_color)
-        video_crop_height_expr = "trunc(ih*%0.4f/2)*2" % (1.0 - trim_ratio)
         zoom_expr = "%0.4f" % zoom_factor
-        video_y_expr = "max(0\\,(ih-%d)*%0.4f)" % (target_height, video_vertical_offset_ratio)
         square_expr = "min(iw\,ih)"
-        mask_expr = "if(lte(Y\,%d)\,255*Y/%d\,255)" % (feather_height, feather_height)
+        mask_expr = "if(lte(Y\,%d)\,%d*Y/%d\,255)" % (feather_height, separator_max_alpha, feather_height)
         return (
-            "[0:v]crop=iw:{video_crop_h}:0:0,scale={tw}:{th}:force_original_aspect_ratio=increase,"
-            "scale=trunc(iw*{zoom}/2)*2:trunc(ih*{zoom}/2)*2,crop={tw}:{th}:(iw-{tw})/2:{video_y}[basev];"
+            "[0:v]scale={tw}:-2:flags=lanczos,setsar=1,pad={tw}:{th}:0:0:color=black[basev];"
             "[2:v]format=rgba,crop='{square}':'{square}':(iw-{square})/2:(ih-{square})/2,"
             "scale={tw}:{overlay_h}:force_original_aspect_ratio=increase,"
-            "scale=trunc(iw*{zoom}/2)*2:trunc(ih*{zoom}/2)*2,crop={tw}:{overlay_h}:(iw-{tw})/2:ih-{overlay_h}[imgcrop];"
+            "scale=trunc(iw*{zoom}/2)*2:trunc(ih*{zoom}/2)*2,crop={tw}:{visible_h}:(iw-{tw})/2:ih-{visible_h}[imgcrop];"
             "color=color={bg}:size={tw}x{overlay_h},format=rgba[imgbg];"
-            "[imgbg][imgcrop]overlay=0:0:shortest=1:eof_action=pass,format=rgba[bottomsrc];"
+            "[imgbg][imgcrop]overlay=0:{image_y}:shortest=1:eof_action=pass,format=rgba[bottomsrc];"
             "nullsrc=size={tw}x{overlay_h},format=gray,geq=lum='{mask}'[maskraw];"
             "[maskraw]boxblur={mask_blur}:1[bottommask];"
             "[bottomsrc][bottommask]alphamerge[bottom];"
@@ -233,9 +234,9 @@ class FinalCompositor(object):
             th=target_height,
             overlay_h=overlay_height,
             overlay_y=overlay_y,
+            visible_h=visible_image_height,
+            image_y=image_trim_top,
             square=square_expr,
-            video_crop_h=video_crop_height_expr,
-            video_y=video_y_expr,
             zoom=zoom_expr,
             mask=mask_expr,
             mask_blur=mask_blur,

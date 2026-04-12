@@ -16,6 +16,7 @@ class JobSpec:
     output_basename: Optional[str] = None
     shuffle_seed: Optional[int] = None
     cookies_file: Optional[Path] = None
+    overlay_alpha_ratio: Optional[float] = None
 
 
 @dataclass
@@ -25,6 +26,7 @@ class SessionItemSpec:
     product_image: Optional[Path] = None
     output_basename: Optional[str] = None
     shuffle_seed: Optional[int] = None
+    overlay_alpha_ratio: Optional[float] = None
 
 
 @dataclass
@@ -151,6 +153,7 @@ class OverlaySpec:
     zoom_factor: float = 1.0
     video_trim_bottom_ratio: float = 0.0
     image_background_color: str = "#FFF4C2"
+    separator_max_alpha_ratio: Optional[float] = None
 
 
 @dataclass
@@ -180,8 +183,9 @@ class JobArtifacts:
     output_dir: Path
     final_video_path: Optional[Path]
     final_audio_path: Optional[Path]
-    metadata_path: Path
-    process_log_path: Path
+    video_title_path: Optional[Path]
+    metadata_path: Optional[Path]
+    process_log_path: Optional[Path]
 
 
 @dataclass
@@ -204,6 +208,7 @@ class SessionArtifacts:
     session_dir: Optional[Path]
     summary_path: Optional[Path]
     session_log_path: Optional[Path]
+    titles_path: Optional[Path] = None
 
 
 @dataclass

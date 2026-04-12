@@ -20,9 +20,27 @@ class MediaNormalizer(object):
     def normalize(self, source_asset: SourceAsset, source_info: MediaInfo, output_path: Path) -> WorkingMedia:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         warnings = self._build_warnings(source_info)
+        zoom_expr = "%0.4f" % self.config.split_zoom_factor
+        visible_height = max(
+            2,
+            self._even_int(
+                (self.config.target_height - self.config.split_video_trim_top_pixels - self.config.split_video_trim_bottom_pixels)
+                * self.config.split_zoom_factor
+            ),
+        )
         vf = (
             "scale=%d:%d:force_original_aspect_ratio=increase," % (self.config.target_width, self.config.target_height)
-            + "crop=%d:%d," % (self.config.target_width, self.config.target_height)
+            + "crop=%d:%d:0:%d," % (
+                self.config.target_width,
+                self.config.target_height - self.config.split_video_trim_top_pixels - self.config.split_video_trim_bottom_pixels,
+                self.config.split_video_trim_top_pixels,
+            )
+            + "scale=trunc(iw*%s/2)*2:trunc(ih*%s/2)*2," % (zoom_expr, zoom_expr)
+            + "crop=%d:%d:(iw-%d)/2:0," % (
+                self.config.target_width,
+                visible_height,
+                self.config.target_width,
+            )
             + "fps=%d,format=yuv420p" % self.config.target_fps
         )
         command = [
@@ -64,6 +82,12 @@ class MediaNormalizer(object):
         self.runner.run(command)
         normalized_info = self.probe.probe(output_path)
         return WorkingMedia(path=output_path, info=normalized_info, warnings=warnings)
+
+    def _even_int(self, value: float) -> int:
+        rounded = int(round(value))
+        if rounded % 2 != 0:
+            rounded += 1
+        return rounded
 
     def _build_warnings(self, source_info: MediaInfo) -> List[str]:
         warnings = []

@@ -1,10 +1,14 @@
-"""Download public TikTok videos using yt-dlp binary with layered fallbacks."""
+"""Download public TikTok videos using lazy-down by default, with optional yt-dlp legacy fallback."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import shutil
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
+from urllib.error import URLError
+from urllib.parse import urlparse, urlunparse
+from urllib.request import Request, urlopen
 
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import SourceAsset
@@ -17,6 +21,14 @@ IGNORED_EXTENSIONS = {".part", ".ytdl", ".json", ".description", ".jpg", ".jpeg"
 TIKTOK_EXTRACTOR_ARGS = "TikTok:app_info=musical_ly/35.1.3/2023501030/0"
 TIKTOK_IMPERSONATE_TARGET = "chrome"
 BROWSER_FALLBACKS = ("chrome", "edge")
+LAZY_DOWN_OUTPUT_PREFIX = "lazy_result"
+TIKTOK_SHORTLINK_HOSTS = {"vt.tiktok.com", "vm.tiktok.com"}
+LAZY_DOWN_VIDEO_QUALITY_ORDER = {
+    "hd_no_watermark": 4,
+    "no_watermark": 3,
+    "video": 2,
+    "play": 1,
+}
 
 
 class SourceDownloader(object):
@@ -28,6 +40,32 @@ class SourceDownloader(object):
     def download(self, source_url: str, destination_dir: Path, cookies_file: Optional[Path] = None) -> SourceAsset:
         destination_dir.mkdir(parents=True, exist_ok=True)
         output_template = str(destination_dir / "source.%(ext)s")
+        if self.config.download_via_lazy_down_only:
+            self._cleanup_destination_dir(destination_dir)
+            try:
+                downloaded_path, lazy_metadata = self._download_with_lazy_down(source_url, destination_dir)
+                return SourceAsset(
+                    source_url=source_url,
+                    downloaded_path=downloaded_path,
+                    extractor_name="lazy-down",
+                    metadata={
+                        "output_template": output_template,
+                        "downloaded_path": str(downloaded_path),
+                        "download_strategy": "lazy_down_primary",
+                        "cookies_file_ignored": str(cookies_file) if cookies_file else None,
+                        "lazy_down_json_path": lazy_metadata.get("json_path"),
+                        "lazy_down_media_count": lazy_metadata.get("media_count"),
+                        "lazy_down_selected_quality": lazy_metadata.get("selected_quality"),
+                        "source_title": lazy_metadata.get("title"),
+                        "source_author": lazy_metadata.get("author"),
+                        "source_unique_id": lazy_metadata.get("unique_id"),
+                    },
+                )
+            except (DownloadError, ExternalToolError) as exc:
+                raise DownloadError(
+                    "lazy-down could not obtain a playable TikTok video stream. Details: %s" % str(exc)
+                )
+
         staged_cookies_file = self._stage_cookies_file(cookies_file, destination_dir.parent) if cookies_file is not None else None
         attempts = []  # type: List[Tuple[str, List[str]]]
         for browser in BROWSER_FALLBACKS:
@@ -83,6 +121,27 @@ class SourceDownloader(object):
             except (DownloadError, ExternalToolError) as exc:
                 failure_messages.append("%s: %s" % (strategy_name, str(exc)))
 
+        self._cleanup_destination_dir(destination_dir)
+        try:
+            downloaded_path, lazy_metadata = self._download_with_lazy_down(source_url, destination_dir)
+            return SourceAsset(
+                source_url=source_url,
+                downloaded_path=downloaded_path,
+                extractor_name="lazy-down",
+                metadata={
+                    "output_template": output_template,
+                    "downloaded_path": str(downloaded_path),
+                    "download_strategy": "lazy_down_fallback",
+                    "cookies_file": str(cookies_file) if cookies_file else None,
+                    "staged_cookies_file": str(staged_cookies_file) if staged_cookies_file else None,
+                    "lazy_down_json_path": lazy_metadata.get("json_path"),
+                    "lazy_down_media_count": lazy_metadata.get("media_count"),
+                    "lazy_down_selected_quality": lazy_metadata.get("selected_quality"),
+                },
+            )
+        except (DownloadError, ExternalToolError) as exc:
+            failure_messages.append("lazy_down_fallback: %s" % str(exc))
+
         raise DownloadError(self._format_failure_message(failure_messages, cookies_file is not None))
 
     def _build_base_command(self, source_url: str, output_template: str, impersonate: bool = False) -> List[str]:
@@ -123,6 +182,23 @@ class SourceDownloader(object):
             str(exported_cookie_path),
         ]
 
+    def _build_lazy_down_command(self, source_url: str, destination_dir: Path) -> List[str]:
+        return [
+            self.config.lazy_down_bin,
+            source_url,
+            "-P",
+            str(destination_dir),
+            "--all",
+            "--quiet",
+            "--timeout",
+            "90",
+            "--retries",
+            "1",
+            "--write-json",
+            "--output-file",
+            LAZY_DOWN_OUTPUT_PREFIX,
+        ]
+
     def _stage_cookies_file(self, cookies_file: Path, workspace_dir: Path) -> Path:
         workspace_dir.mkdir(parents=True, exist_ok=True)
         staged_path = workspace_dir / "runtime_cookies.txt"
@@ -148,6 +224,47 @@ class SourceDownloader(object):
                 return self._impersonate_supported
         self._impersonate_supported = False
         return False
+
+    def _download_with_lazy_down(self, source_url: str, destination_dir: Path) -> Tuple[Path, Dict[str, object]]:
+        self.runner.ensure_tool(self.config.lazy_down_bin)
+        lazy_down_source_url = self._normalize_source_url_for_lazy_down(source_url)
+        command = self._build_lazy_down_command(lazy_down_source_url, destination_dir)
+        completed = self.runner.run(command)
+        json_path = self._find_lazy_down_json_path(completed.stdout or "", destination_dir)
+        payload = self._read_lazy_down_payload(json_path)
+        selected_path, selected_media = self._select_lazy_down_video(payload, destination_dir)
+        root_info = payload.get("json") if isinstance(payload.get("json"), dict) else {}
+        return selected_path, {
+            "json_path": str(json_path),
+            "media_count": len(payload.get("medias", [])),
+            "selected_quality": selected_media.get("quality"),
+            "title": root_info.get("title") or selected_media.get("title"),
+            "author": root_info.get("author") or selected_media.get("author"),
+            "unique_id": root_info.get("unique_id") or selected_media.get("unique_id"),
+        }
+
+    def _normalize_source_url_for_lazy_down(self, source_url: str) -> str:
+        parsed = urlparse(source_url)
+        host = (parsed.netloc or "").lower()
+        if host not in TIKTOK_SHORTLINK_HOSTS:
+            return self._strip_tiktok_tracking_query(source_url)
+        try:
+            request = Request(source_url, headers={"User-Agent": self.config.tiktok_web_user_agent})
+            with urlopen(request, timeout=15) as response:
+                resolved_url = response.geturl()
+        except (URLError, ValueError, OSError):
+            return self._strip_tiktok_tracking_query(source_url)
+        resolved_parsed = urlparse(resolved_url)
+        if resolved_parsed.scheme and resolved_parsed.netloc:
+            return self._strip_tiktok_tracking_query(resolved_url)
+        return self._strip_tiktok_tracking_query(source_url)
+
+    def _strip_tiktok_tracking_query(self, source_url: str) -> str:
+        parsed = urlparse(source_url)
+        hostname = (parsed.hostname or "").lower()
+        if not hostname.endswith("tiktok.com"):
+            return source_url
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
 
     def _resolve_downloaded_file(self, command_output: str, destination_dir: Path) -> Path:
         printed_path = self._extract_printed_path(command_output)
@@ -198,6 +315,61 @@ class SourceDownloader(object):
     def _is_video_file(self, path: Path) -> bool:
         return path.suffix.lower() in VIDEO_EXTENSIONS
 
+    def _find_lazy_down_json_path(self, command_output: str, destination_dir: Path) -> Path:
+        lines = [line.strip() for line in command_output.splitlines() if line.strip()]
+        for line in reversed(lines):
+            if not line.startswith("{"):
+                continue
+            try:
+                payload = json.loads(line)
+            except ValueError:
+                continue
+            json_path = payload.get("jsonPath")
+            if json_path:
+                candidate = Path(str(json_path))
+                if candidate.exists() and candidate.is_file():
+                    return candidate.resolve()
+        candidates = sorted(destination_dir.glob("%s*.json" % LAZY_DOWN_OUTPUT_PREFIX), key=lambda item: item.stat().st_mtime, reverse=True)
+        if candidates:
+            return candidates[0].resolve()
+        raise DownloadError("lazy-down completed without producing a JSON manifest.")
+
+    def _read_lazy_down_payload(self, json_path: Path) -> Dict[str, object]:
+        try:
+            return json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise DownloadError("lazy-down produced an unreadable JSON manifest.") from exc
+
+    def _select_lazy_down_video(self, payload: Dict[str, object], destination_dir: Path) -> Tuple[Path, Dict[str, object]]:
+        medias = payload.get("medias")
+        if not isinstance(medias, list):
+            raise DownloadError("lazy-down manifest did not include any media entries.")
+        video_candidates = []
+        for media in medias:
+            if not isinstance(media, dict):
+                continue
+            if media.get("type") != "video":
+                continue
+            local_path_value = media.get("localPath") or media.get("savedPath")
+            if not local_path_value:
+                continue
+            candidate_path = Path(str(local_path_value))
+            if not candidate_path.exists() or not candidate_path.is_file():
+                continue
+            if candidate_path.suffix.lower() not in VIDEO_EXTENSIONS:
+                continue
+            quality_rank = LAZY_DOWN_VIDEO_QUALITY_ORDER.get(str(media.get("quality") or "").lower(), 0)
+            width = int(media.get("width") or 0)
+            height = int(media.get("height") or 0)
+            filesize = int(media.get("filesize") or 0)
+            video_candidates.append(((quality_rank, width * height, filesize), candidate_path.resolve(), media))
+        if video_candidates:
+            video_candidates.sort(key=lambda item: item[0], reverse=True)
+            _score, selected_path, selected_media = video_candidates[0]
+            return selected_path, selected_media
+        fallback_path = self._resolve_downloaded_file("", destination_dir)
+        return fallback_path, {}
+
     def _cleanup_destination_dir(self, destination_dir: Path) -> None:
         for path in destination_dir.iterdir():
             if path.is_file():
@@ -234,5 +406,10 @@ class SourceDownloader(object):
             return (
                 "yt-dlp could not obtain a playable video stream. Direct download returned non-video artifacts, "
                 "and browser-cookie fallback failed. Close Chrome and Edge completely, retry with a fresh browser session, and keep the browser User-Agent aligned with yt-dlp. Details: %s" % details
+            )
+        if any(message.startswith("lazy_down_fallback:") for message in failure_messages):
+            return (
+                "yt-dlp could not obtain a playable TikTok video stream, and lazy-down fallback also failed. "
+                "Details: %s" % details
             )
         return "yt-dlp could not obtain a playable video stream. Details: %s" % details
