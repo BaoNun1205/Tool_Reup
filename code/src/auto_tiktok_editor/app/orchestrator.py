@@ -10,7 +10,7 @@ from auto_tiktok_editor.app.recorder import PipelineRecorder
 from auto_tiktok_editor.app.services import PipelineServices, build_default_services
 from auto_tiktok_editor.app.workspace import SessionWorkspace, create_item_workspace, create_session_workspace
 from auto_tiktok_editor.config import PipelineConfig
-from auto_tiktok_editor.domain.models import ItemProcessResult, SessionEvent, SessionResult, SessionSpec, ValidatedSessionItem
+from auto_tiktok_editor.domain.models import ItemProcessResult, SessionArtifacts, SessionEvent, SessionItemSpec, SessionResult, SessionSpec, ValidatedSessionItem
 from auto_tiktok_editor.domain.validation import SessionValidator
 from auto_tiktok_editor.exceptions import EditorError, SessionValidationError
 
@@ -421,12 +421,8 @@ class SessionOrchestrator(object):
                 items=items,
                 warnings=list(recorder.warnings),
             )
-            artifacts = self.services.artifact_exporter.export_session(
-                session_workspace,
-                summary,
-                recorder,
-                items=items,
-            )
+            summary["review_required"] = True
+            artifacts = self.services.artifact_exporter.create_review_session_artifacts(session_workspace)
             self._emit(
                 event_callback,
                 SessionEvent(
@@ -516,6 +512,95 @@ class SessionOrchestrator(object):
                 summary=summary,
                 artifacts=artifacts,
             )
+
+    def rerun_item_for_review(
+        self,
+        session_result: SessionResult,
+        item_spec: SessionItemSpec,
+        item_index: int,
+        event_callback: EventCallback = None,
+    ) -> SessionResult:
+        if session_result.artifacts is None or session_result.artifacts.session_dir is None:
+            raise EditorError("Session review workspace is unavailable.")
+        session_workspace = SessionWorkspace(
+            root_dir=session_result.artifacts.session_dir,
+            items_dir=session_result.artifacts.session_dir / "items",
+        )
+        validated_session = self.session_validator.validate(
+            SessionSpec(
+                items=[item_spec],
+                output_root_dir=session_workspace.root_dir.parent,
+                session_name=session_result.summary.get("session_name"),
+                cookies_file=None,
+            )
+        )
+        validated_item = validated_session.items[0]
+        validated_item.item_index = item_index
+        validated_item.row_id = item_spec.row_id
+        rerun_result = self.item_runner.run(
+            session_result.session_id,
+            validated_item,
+            session_workspace,
+            event_callback=event_callback,
+        )
+        session_result.items[item_index] = rerun_result
+        session_result.status = self._final_status(session_result.items)
+        session_result.summary = self._build_summary(
+            session_id=session_result.session_id,
+            session_name=session_result.summary.get("session_name"),
+            status=session_result.status,
+            started_at=session_result.summary.get("started_at", self._now()),
+            finished_at=self._now(),
+            items=session_result.items,
+            warnings=session_result.warnings,
+        )
+        session_result.summary["review_required"] = True
+        if session_result.artifacts is not None:
+            session_result.artifacts.is_finalized = False
+            session_result.artifacts.titles_path = None
+        return session_result
+
+    def finalize_reviewed_session(
+        self,
+        session_result: SessionResult,
+        event_callback: EventCallback = None,
+    ) -> SessionResult:
+        if session_result.artifacts is None or session_result.artifacts.session_dir is None:
+            raise EditorError("Session review workspace is unavailable.")
+        session_workspace = SessionWorkspace(
+            root_dir=session_result.artifacts.session_dir,
+            items_dir=session_result.artifacts.session_dir / "items",
+        )
+        recorder = PipelineRecorder(session_result.session_id, run_label="session_finalize", logger=self.logger)
+        session_result.status = self._final_status(session_result.items)
+        session_result.summary = self._build_summary(
+            session_id=session_result.session_id,
+            session_name=session_result.summary.get("session_name"),
+            status=session_result.status,
+            started_at=session_result.summary.get("started_at", self._now()),
+            finished_at=self._now(),
+            items=session_result.items,
+            warnings=session_result.warnings,
+        )
+        session_result.summary["review_required"] = False
+        artifacts = self.services.artifact_exporter.export_session(
+            session_workspace,
+            session_result.summary,
+            recorder,
+            items=session_result.items,
+        )
+        session_result.artifacts = artifacts
+        self._emit(
+            event_callback,
+            SessionEvent(
+                event_type="session_finalized",
+                session_id=session_result.session_id,
+                status=session_result.status,
+                message="Session outputs were approved and saved.",
+                payload=session_result.summary,
+            ),
+        )
+        return session_result
 
     def _build_summary(
         self,

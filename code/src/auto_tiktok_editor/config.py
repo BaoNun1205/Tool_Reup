@@ -162,14 +162,28 @@ class PipelineConfig:
     split_bottom_panel_ratio: float = 0.3921
     # Chieu cao vung mo mem giao nhau giua video va anh.
     # Tang len de vung overlap dai hon.
-    split_separator_height_ratio: float = 0.3721
+    split_separator_height_ratio: float = 0.2521
+    # Rut gon rieng dai fade cua vung mo de overlap gon hon ma van giu
+    # cung huong mo dan tu duoi len tren.
+    split_separator_fade_trim_pixels: int = 100
     # Do day alpha toi da trong vung mo.
     # Gia tri cang thap thi vung overlap cang trong.
-    split_separator_max_alpha_ratio: float = 0.38
-    # Muc zoom chung ap dung cho video normalize va anh o phan duoi.
-    split_zoom_factor: float = 1.1
+    split_separator_max_alpha_ratio: float = 0.40
+    # Muc zoom ap dung cho video normalize.
+    split_zoom_factor: float = 1.0
+    # Sau khi crop anh san pham ve 1:1, se scale theo ti le nay truoc khi
+    # cat mep tren/duoi va dat sat day.
+    split_image_scale_factor: float = 1.1
+    # Muc zoom lon nhat cua anh san pham trong split layout.
+    split_image_zoom_peak_factor: float = 1.2
+    # Chu ky phong/thu cua anh san pham de tao nhiep zoom mem va deu.
+    split_image_zoom_cycle_seconds: float = 6.0
     # Cat bo mep tren cua anh san pham truoc khi de len video.
     split_image_trim_top_ratio: float = 0.10
+    # Cat chinh xac theo pixel o mep tren cua anh trong split layout.
+    split_image_trim_top_pixels: int = 50
+    # Cat chinh xac theo pixel o mep duoi cua anh trong split layout.
+    split_image_trim_bottom_pixels: int = 50
 
     # Can chinh khung video nguon truoc speed va truoc khi cat chunk.
     # So pixel cat o phia tren.

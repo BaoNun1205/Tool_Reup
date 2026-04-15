@@ -217,14 +217,9 @@ class SessionSmokeTests(unittest.TestCase):
             self.assertEqual(result.status, "completed_with_success")
             self.assertEqual(len(result.items), 2)
             self.assertIsNone(result.artifacts.summary_path)
-            self.assertTrue(result.artifacts.titles_path.exists())
-            self.assertEqual(
-                result.artifacts.titles_path.read_text(encoding="utf-8"),
-                "Demo title #xuhuong #demo\n\nDemo title #xuhuong #demo\n",
-            )
-            self.assertTrue((result.artifacts.session_dir / "002_final_video.mp4").exists())
-            self.assertTrue((result.artifacts.session_dir / "001_final_video.mp4").exists())
-            self.assertFalse((result.artifacts.session_dir / "items").exists())
+            self.assertFalse(result.artifacts.is_finalized)
+            self.assertIsNone(result.artifacts.titles_path)
+            self.assertTrue((result.artifacts.session_dir / "items").exists())
             self.assertIsNone(result.summary["cookies_file"])
             for item in result.items:
                 self.assertEqual(item.status, "completed")
@@ -232,10 +227,22 @@ class SessionSmokeTests(unittest.TestCase):
                 self.assertEqual(item.metadata["source_title"], "Demo title #xuhuong #demo")
                 self.assertTrue(item.metadata["audio_extracted_before_shuffle"])
                 self.assertTrue(item.artifacts.final_video_path.exists())
-                self.assertIsNone(item.artifacts.final_audio_path)
+                self.assertTrue(item.artifacts.final_audio_path.exists())
                 self.assertIsNone(item.artifacts.metadata_path)
                 self.assertIsNone(item.artifacts.process_log_path)
                 self.assertIsNone(item.artifacts.video_title_path)
+            finalized = orchestrator.finalize_reviewed_session(result)
+            self.assertTrue(finalized.artifacts.is_finalized)
+            self.assertTrue(finalized.artifacts.titles_path.exists())
+            self.assertEqual(
+                finalized.artifacts.titles_path.read_text(encoding="utf-8"),
+                "Demo title #xuhuong #demo\n\nDemo title #xuhuong #demo\n",
+            )
+            self.assertTrue((finalized.artifacts.session_dir / "002_final_video.mp4").exists())
+            self.assertTrue((finalized.artifacts.session_dir / "001_final_video.mp4").exists())
+            self.assertFalse((finalized.artifacts.session_dir / "items").exists())
+            for item in finalized.items:
+                self.assertIsNone(item.artifacts.final_audio_path)
             self.assertEqual(len(services.audio_finisher.prepared_inputs), 2)
             self.assertEqual(len(services.audio_finisher.finished_inputs), 2)
         finally:
@@ -275,8 +282,11 @@ class SessionSmokeTests(unittest.TestCase):
             self.assertEqual(result.items[0].status, "failed")
             self.assertEqual(result.items[1].status, "completed")
             self.assertIsNone(result.artifacts.summary_path)
-            self.assertTrue(result.artifacts.titles_path.exists())
-            self.assertTrue((result.artifacts.session_dir / "001_final_video.mp4").exists())
+            self.assertFalse(result.artifacts.is_finalized)
+            self.assertIsNone(result.artifacts.titles_path)
+            finalized = orchestrator.finalize_reviewed_session(result)
+            self.assertTrue(finalized.artifacts.titles_path.exists())
+            self.assertTrue((finalized.artifacts.session_dir / "001_final_video.mp4").exists())
         finally:
             temp_dir.cleanup()
 

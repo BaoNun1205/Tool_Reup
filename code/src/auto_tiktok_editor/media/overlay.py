@@ -34,7 +34,7 @@ class OverlayPlanner(object):
             video_panel_height=self.config.target_height,
             image_panel_height=bottom_panel_height,
             separator_height=separator_height,
-            zoom_factor=self.config.split_zoom_factor,
+            zoom_factor=self.config.split_image_scale_factor,
             video_trim_bottom_ratio=self.config.split_video_trim_bottom_ratio,
             image_background_color=self.config.split_image_background_color,
             separator_max_alpha_ratio=separator_max_alpha_ratio,

@@ -66,8 +66,8 @@ class RenderLayoutTests(unittest.TestCase):
         vf = command[command.index('-vf') + 1]
         self.assertIn('scale=1080:1920:force_original_aspect_ratio=increase', vf)
         self.assertIn('crop=1080:1440:0:120', vf)
-        self.assertIn('scale=trunc(iw*1.1000/2)*2:trunc(ih*1.1000/2)*2', vf)
-        self.assertIn('crop=1080:1584:(iw-1080)/2:0', vf)
+        self.assertIn('scale=trunc(iw*1.0000/2)*2:trunc(ih*1.0000/2)*2', vf)
+        self.assertIn('crop=1080:1440:(iw-1080)/2:0', vf)
 
     def test_split_layout_filter_matches_requested_crop_and_blend(self):
         config = PipelineConfig()
@@ -88,15 +88,14 @@ class RenderLayoutTests(unittest.TestCase):
 
         self.assertEqual(spec.mode, 'stacked_split_mask')
         self.assertIn('[0:v]scale=1080:-2:flags=lanczos,setsar=1,pad=1080:1920:0:0:color=black[basev]', filter_complex)
-        self.assertIn('scale=trunc(iw*1.1000/2)*2:trunc(ih*1.1000/2)*2', filter_complex)
         self.assertIn("crop='min(iw\\,ih)':'min(iw\\,ih)'", filter_complex)
-        self.assertIn('scale=1080:1467:force_original_aspect_ratio=increase', filter_complex)
-        self.assertIn('crop=1080:1320:(iw-1080)/2:ih-1320[imgcrop]', filter_complex)
-        self.assertIn("geq=lum='if(lte(Y\\,714)\\,97*Y/714\\,255)'", filter_complex)
-        self.assertIn('overlay=0:147:shortest=1:eof_action=pass,format=rgba[bottomsrc]', filter_complex)
-        self.assertIn('[maskraw]boxblur=45:1[bottommask]', filter_complex)
+        self.assertIn("scale=w='1362.0000+122.0000*(1-abs(2*mod(n\\,180.0000)/180.0000-1))':h='1362.0000+122.0000*(1-abs(2*mod(n\\,180.0000)/180.0000-1))':flags=lanczos:eval=frame", filter_complex)
+        self.assertIn('crop=1080:1237:(iw-1080)/2:(ih-1237)/2[imgcrop]', filter_complex)
+        self.assertIn("geq=lum='if(lte(Y\\,0)\\,0\\,if(lte(Y\\,384)\\,255*pow((Y-0)/384\\,1.4800)\\,255))'", filter_complex)
+        self.assertIn('overlay=0:0:shortest=1:eof_action=pass,format=rgba[bottomsrc]', filter_complex)
+        self.assertIn('[maskraw]boxblur=30:1[bottommask]', filter_complex)
         self.assertIn('[bottomsrc][bottommask]alphamerge[bottom]', filter_complex)
-        self.assertIn('[basev][bottom]overlay=0:453:shortest=1:eof_action=pass[vraw]', filter_complex)
+        self.assertIn('[basev][bottom]overlay=0:683:shortest=1:eof_action=pass[vraw]', filter_complex)
         self.assertIn('[vraw]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[vout]', filter_complex)
 
     def test_split_layout_respects_custom_overlay_alpha_ratio(self):
@@ -117,7 +116,7 @@ class RenderLayoutTests(unittest.TestCase):
 
         filter_complex = compositor._build_filter_complex(spec)
 
-        self.assertIn("geq=lum='if(lte(Y\\,714)\\,64*Y/714\\,255)'", filter_complex)
+        self.assertIn("geq=lum='if(lte(Y\\,0)\\,0\\,if(lte(Y\\,384)\\,255*pow((Y-0)/384\\,1.7500)\\,255))'", filter_complex)
 
     def test_final_compositor_caps_to_rough_cut_without_shortest_mux_truncation(self):
         config = PipelineConfig()

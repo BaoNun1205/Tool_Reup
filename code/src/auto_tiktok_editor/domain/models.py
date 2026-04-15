@@ -209,6 +209,7 @@ class SessionArtifacts:
     summary_path: Optional[Path]
     session_log_path: Optional[Path]
     titles_path: Optional[Path] = None
+    is_finalized: bool = False
 
 
 @dataclass

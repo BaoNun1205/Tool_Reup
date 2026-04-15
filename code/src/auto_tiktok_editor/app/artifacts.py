@@ -50,6 +50,19 @@ class ArtifactExporter(object):
             summary_path=None,
             session_log_path=None,
             titles_path=titles_path,
+            is_finalized=True,
+        )
+
+    def create_review_session_artifacts(
+        self,
+        workspace: SessionWorkspace,
+    ) -> SessionArtifacts:
+        return SessionArtifacts(
+            session_dir=workspace.root_dir,
+            summary_path=None,
+            session_log_path=None,
+            titles_path=None,
+            is_finalized=False,
         )
 
     def _materialize_session_deliverables(self, workspace: SessionWorkspace, items: List[ItemProcessResult]) -> None:
