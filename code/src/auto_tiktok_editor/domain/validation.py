@@ -79,9 +79,9 @@ class InputValidator(object):
         try:
             numeric = float(value)
         except (TypeError, ValueError):
-            raise ValidationError("Overlay opacity must be a number.")
+            raise ValidationError("Overlay fade ratio must be a number.")
         if numeric < 0.05 or numeric > 0.95:
-            raise ValidationError("Overlay opacity must stay between 0.05 and 0.95.")
+            raise ValidationError("Overlay fade ratio must stay between 0.05 and 0.95.")
         return numeric
 
     def _validate_cookies_file(self, value):

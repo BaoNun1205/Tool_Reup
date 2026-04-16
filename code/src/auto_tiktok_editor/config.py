@@ -115,6 +115,8 @@ class PipelineConfig:
     default_output_root: Path = PROJECT_ROOT / "output"
     # So item toi da trong giao dien batch.
     max_session_items: int = 20
+    # So item co the render song song trong cung mot session.
+    max_parallel_session_items: int = 2
     # Tan suat UI cap nhat progress/log.
     ui_poll_interval_ms: int = 120
 
@@ -169,6 +171,9 @@ class PipelineConfig:
     # Do day alpha toi da trong vung mo.
     # Gia tri cang thap thi vung overlap cang trong.
     split_separator_max_alpha_ratio: float = 0.40
+    # Phan tram chieu cao danh cho dai fade. Phan con lai o ben duoi se giu
+    # muc mo dam hon truoc khi fade dan len 0 o phia tren.
+    split_separator_fade_ratio: float = 0.50
     # Muc zoom ap dung cho video normalize.
     split_zoom_factor: float = 1.0
     # Sau khi crop anh san pham ve 1:1, se scale theo ti le nay truoc khi

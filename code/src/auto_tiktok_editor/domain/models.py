@@ -154,6 +154,7 @@ class OverlaySpec:
     video_trim_bottom_ratio: float = 0.0
     image_background_color: str = "#FFF4C2"
     separator_max_alpha_ratio: Optional[float] = None
+    separator_fade_ratio: Optional[float] = None
 
 
 @dataclass

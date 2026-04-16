@@ -222,20 +222,25 @@ class FinalCompositor(object):
         # lai dung khung co so de an phan du o moi canh.
         base_frame_width = min(target_width, scaled_square_size)
         base_frame_height = min(image_frame_height, scaled_square_size)
-        mask_blur = max(12, int(round(feather_height / 16.0)))
         separator_alpha_ratio = overlay_spec.separator_max_alpha_ratio
         if separator_alpha_ratio is None:
             separator_alpha_ratio = self.config.split_separator_max_alpha_ratio
+        separator_fade_ratio = overlay_spec.separator_fade_ratio
+        if separator_fade_ratio is None:
+            separator_fade_ratio = self.config.split_separator_fade_ratio
+        separator_fade_ratio = max(0.05, min(0.95, float(separator_fade_ratio)))
         fade_gamma = max(0.35, min(2.5, 2.2 - (separator_alpha_ratio * 1.8)))
         image_bg = self._ffmpeg_color(overlay_spec.image_background_color or self.config.split_image_background_color)
         square_expr = "min(iw\,ih)"
         fade_height_target = max(
             24,
-            feather_height - max(0, int(getattr(self.config, "split_separator_fade_trim_pixels", 0))),
+            int(round(overlay_height * separator_fade_ratio))
+            - max(0, int(getattr(self.config, "split_separator_fade_trim_pixels", 0))),
         )
         fade_start_y = 0
         fade_end_y = min(overlay_height, fade_start_y + fade_height_target)
         fade_height = max(1, fade_end_y - fade_start_y)
+        mask_blur = max(12, int(round(fade_height / 16.0)))
         zoom_cycle_frames = max(
             1.0,
             self.config.target_fps * max(0.1, getattr(self.config, "split_image_zoom_cycle_seconds", 6.0)),

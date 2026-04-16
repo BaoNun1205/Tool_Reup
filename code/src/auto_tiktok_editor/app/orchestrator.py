@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import logging
+import queue
 import time
 from typing import Callable, Dict, List, Optional
 
@@ -143,6 +145,7 @@ class ItemPipelineRunner(object):
             self._record_warnings(recorder, session_id, validated_item, overlay_spec.warnings, event_callback)
             metadata["overlay_mode_used"] = overlay_spec.mode
             metadata["overlay_alpha_ratio_used"] = overlay_spec.separator_max_alpha_ratio
+            metadata["overlay_fade_ratio_used"] = overlay_spec.separator_fade_ratio
 
             final_audio = self.services.audio_finisher.finish(
                 prepared_audio,
@@ -324,7 +327,12 @@ class SessionOrchestrator(object):
         self.item_runner = item_runner or ItemPipelineRunner(self.config, self.services, logger=self.logger)
         self._last_session_cookies_file = None
 
-    def run(self, session_spec: SessionSpec, event_callback: EventCallback = None) -> SessionResult:
+    def run(
+        self,
+        session_spec: SessionSpec,
+        event_callback: EventCallback = None,
+        rerun_queue: Optional[queue.Queue] = None,
+    ) -> SessionResult:
         session_id = self.config.build_session_id()
         recorder = PipelineRecorder(session_id, run_label="session", logger=self.logger)
         started_at = self._now()
@@ -381,34 +389,21 @@ class SessionOrchestrator(object):
                     session_id=session_id,
                     status="running",
                     stage="running",
-                    message="Processing items sequentially.",
-                    payload={"item_count": len(validated_session.items)},
+                    message="Processing items in parallel.",
+                    payload={
+                        "item_count": len(validated_session.items),
+                        "max_parallel_items": max(1, int(self.config.max_parallel_session_items)),
+                    },
                 ),
             )
 
-            for validated_item in validated_session.items:
-                result = self.item_runner.run(
-                    session_id,
-                    validated_item,
-                    session_workspace,
-                    event_callback=event_callback,
-                )
-                items.append(result)
-                self._emit(
-                    event_callback,
-                    SessionEvent(
-                        event_type="session_progress",
-                        session_id=session_id,
-                        status="running",
-                        message="Session progress updated.",
-                        payload={
-                            "completed_items": len([item for item in items if item.status == "completed"]),
-                            "failed_items": len([item for item in items if item.status == "failed"]),
-                            "processed_items": len(items),
-                            "total_items": len(validated_session.items),
-                        },
-                    ),
-                )
+            items = self._run_items_parallel(
+                session_id=session_id,
+                validated_session=validated_session,
+                session_workspace=session_workspace,
+                event_callback=event_callback,
+                rerun_queue=rerun_queue,
+            )
 
             final_status = self._final_status(items)
             recorder.transition("exporting_summary")
@@ -512,6 +507,181 @@ class SessionOrchestrator(object):
                 summary=summary,
                 artifacts=artifacts,
             )
+
+    def _run_items_parallel(
+        self,
+        session_id: str,
+        validated_session,
+        session_workspace: SessionWorkspace,
+        event_callback: EventCallback,
+        rerun_queue: Optional[queue.Queue],
+    ) -> List[ItemProcessResult]:
+        max_workers = max(1, int(self.config.max_parallel_session_items))
+        results = [None] * len(validated_session.items)
+        running_futures = {}
+        running_indexes = set()
+        pending_reruns = {}
+
+        def submit(validated_item: ValidatedSessionItem) -> None:
+            future = executor.submit(
+                self.item_runner.run,
+                session_id,
+                validated_item,
+                session_workspace,
+                event_callback,
+            )
+            running_futures[future] = validated_item
+            running_indexes.add(validated_item.item_index)
+
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="auto-editor-item") as executor:
+            for validated_item in validated_session.items:
+                submit(validated_item)
+            while running_futures or pending_reruns or self._queue_has_pending_items(rerun_queue):
+                self._drain_rerun_requests(
+                    rerun_queue=rerun_queue,
+                    running_indexes=running_indexes,
+                    pending_reruns=pending_reruns,
+                    results=results,
+                    output_root_dir=validated_session.session_spec.output_root_dir,
+                    session_name=validated_session.session_spec.session_name,
+                    cookies_file=validated_session.session_spec.cookies_file,
+                    submit_callback=submit,
+                    event_callback=event_callback,
+                    session_id=session_id,
+                )
+                if not running_futures:
+                    if pending_reruns:
+                        for item_index in list(pending_reruns.keys()):
+                            if item_index in running_indexes:
+                                continue
+                            results[item_index] = None
+                            submit(pending_reruns.pop(item_index))
+                        continue
+                    time.sleep(0.05)
+                    continue
+                completed_futures, _ = wait(
+                    tuple(running_futures.keys()),
+                    timeout=0.10,
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in completed_futures:
+                    validated_item = running_futures.pop(future)
+                    running_indexes.discard(validated_item.item_index)
+                    results[validated_item.item_index] = future.result()
+                    if validated_item.item_index in pending_reruns:
+                        results[validated_item.item_index] = None
+                        submit(pending_reruns.pop(validated_item.item_index))
+                    self._emit_session_progress(
+                        event_callback,
+                        session_id,
+                        results,
+                        len(validated_session.items),
+                    )
+        return [item for item in results if item is not None]
+
+    def _drain_rerun_requests(
+        self,
+        rerun_queue: Optional[queue.Queue],
+        running_indexes,
+        pending_reruns: Dict[int, ValidatedSessionItem],
+        results: List[Optional[ItemProcessResult]],
+        output_root_dir,
+        session_name: Optional[str],
+        cookies_file,
+        submit_callback,
+        event_callback: EventCallback,
+        session_id: str,
+    ) -> None:
+        if rerun_queue is None:
+            return
+        while True:
+            try:
+                rerun_request = rerun_queue.get_nowait()
+            except queue.Empty:
+                return
+            item_index, item_spec = rerun_request
+            try:
+                validated_item = self._validate_rerun_item(
+                    item_spec=item_spec,
+                    item_index=item_index,
+                    output_root_dir=output_root_dir,
+                    session_name=session_name,
+                    cookies_file=cookies_file,
+                )
+            except SessionValidationError as exc:
+                self._emit(
+                    event_callback,
+                    SessionEvent(
+                        event_type="item_failed",
+                        session_id=session_id,
+                        item_index=item_index,
+                        row_id=item_spec.row_id,
+                        status="failed",
+                        message=str(exc),
+                    ),
+                )
+                self._emit_session_progress(event_callback, session_id, results, len(results))
+                continue
+            if item_index in running_indexes:
+                pending_reruns[item_index] = validated_item
+                continue
+            results[item_index] = None
+            submit_callback(validated_item)
+
+    def _validate_rerun_item(
+        self,
+        item_spec: SessionItemSpec,
+        item_index: int,
+        output_root_dir,
+        session_name: Optional[str],
+        cookies_file,
+    ) -> ValidatedSessionItem:
+        validated_session = self.session_validator.validate(
+            SessionSpec(
+                items=[item_spec],
+                output_root_dir=output_root_dir,
+                session_name=session_name,
+                cookies_file=cookies_file,
+            )
+        )
+        validated_item = validated_session.items[0]
+        validated_item.item_index = item_index
+        validated_item.row_id = item_spec.row_id
+        return validated_item
+
+    def _emit_session_progress(
+        self,
+        event_callback: EventCallback,
+        session_id: str,
+        items: List[Optional[ItemProcessResult]],
+        total_items: int,
+    ) -> None:
+        completed_items = len([item for item in items if item is not None and item.status == "completed"])
+        failed_items = len([item for item in items if item is not None and item.status == "failed"])
+        processed_items = len([item for item in items if item is not None])
+        self._emit(
+            event_callback,
+            SessionEvent(
+                event_type="session_progress",
+                session_id=session_id,
+                status="running",
+                message="Session progress updated.",
+                payload={
+                    "completed_items": completed_items,
+                    "failed_items": failed_items,
+                    "processed_items": processed_items,
+                    "total_items": total_items,
+                },
+            ),
+        )
+
+    def _queue_has_pending_items(self, rerun_queue: Optional[queue.Queue]) -> bool:
+        if rerun_queue is None:
+            return False
+        try:
+            return not rerun_queue.empty()
+        except NotImplementedError:
+            return False
 
     def rerun_item_for_review(
         self,

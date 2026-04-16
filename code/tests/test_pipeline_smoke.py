@@ -8,6 +8,7 @@ if str(SRC) not in sys.path:
 import tempfile
 import unittest
 from types import SimpleNamespace
+import queue
 
 from auto_tiktok_editor.app.artifacts import ArtifactExporter
 from auto_tiktok_editor.app.orchestrator import SessionOrchestrator
@@ -287,6 +288,64 @@ class SessionSmokeTests(unittest.TestCase):
             finalized = orchestrator.finalize_reviewed_session(result)
             self.assertTrue(finalized.artifacts.titles_path.exists())
             self.assertTrue((finalized.artifacts.session_dir / "001_final_video.mp4").exists())
+        finally:
+            temp_dir.cleanup()
+
+    def test_session_orchestrator_accepts_live_rerun_while_other_items_continue(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            base_dir = Path(temp_dir.name)
+            image_path = base_dir / "product.png"
+            image_path.write_text("fake-image", encoding="utf-8")
+            config = PipelineConfig(default_output_root=base_dir / "out", max_parallel_session_items=2)
+            services = self.build_services()
+            validator = SessionValidator(item_validator=FakeValidator(), config=config)
+            orchestrator = SessionOrchestrator(config=config, services=services, session_validator=validator)
+            rerun_queue = queue.Queue()
+            rerun_requested = {"value": False}
+
+            def handle_event(event):
+                if event.event_type == "item_failed" and event.item_index == 0 and not rerun_requested["value"]:
+                    rerun_requested["value"] = True
+                    rerun_queue.put(
+                        (
+                            0,
+                            SessionItemSpec(
+                                row_id="row_001",
+                                source_video_url="https://www.tiktok.com/@store/video/1234567899",
+                                product_image=image_path,
+                            ),
+                        )
+                    )
+
+            result = orchestrator.run(
+                SessionSpec(
+                    items=[
+                        SessionItemSpec(
+                            row_id="row_001",
+                            source_video_url="https://www.tiktok.com/@store/video/fail-case",
+                            product_image=image_path,
+                        ),
+                        SessionItemSpec(
+                            row_id="row_002",
+                            source_video_url="https://www.tiktok.com/@store/video/1234567891",
+                            product_image=image_path,
+                        ),
+                    ],
+                    output_root_dir=base_dir / "out",
+                ),
+                event_callback=handle_event,
+                rerun_queue=rerun_queue,
+            )
+
+            self.assertTrue(rerun_requested["value"])
+            self.assertEqual(result.status, "completed_with_success")
+            self.assertEqual(len(result.items), 2)
+            self.assertEqual(result.summary["item_count_completed"], 2)
+            self.assertEqual(result.summary["item_count_failed"], 0)
+            self.assertEqual(result.items[0].status, "completed")
+            self.assertEqual(result.items[0].source_video_url, "https://www.tiktok.com/@store/video/1234567899")
+            self.assertEqual(result.items[1].status, "completed")
         finally:
             temp_dir.cleanup()
 

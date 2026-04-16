@@ -91,14 +91,14 @@ class RenderLayoutTests(unittest.TestCase):
         self.assertIn("crop='min(iw\\,ih)':'min(iw\\,ih)'", filter_complex)
         self.assertIn("scale=w='1362.0000+122.0000*(1-abs(2*mod(n\\,180.0000)/180.0000-1))':h='1362.0000+122.0000*(1-abs(2*mod(n\\,180.0000)/180.0000-1))':flags=lanczos:eval=frame", filter_complex)
         self.assertIn('crop=1080:1237:(iw-1080)/2:(ih-1237)/2[imgcrop]', filter_complex)
-        self.assertIn("geq=lum='if(lte(Y\\,0)\\,0\\,if(lte(Y\\,384)\\,255*pow((Y-0)/384\\,1.4800)\\,255))'", filter_complex)
+        self.assertIn("geq=lum='if(lte(Y\\,0)\\,0\\,if(lte(Y\\,518)\\,255*pow((Y-0)/518\\,1.4800)\\,255))'", filter_complex)
         self.assertIn('overlay=0:0:shortest=1:eof_action=pass,format=rgba[bottomsrc]', filter_complex)
-        self.assertIn('[maskraw]boxblur=30:1[bottommask]', filter_complex)
+        self.assertIn('[maskraw]boxblur=32:1[bottommask]', filter_complex)
         self.assertIn('[bottomsrc][bottommask]alphamerge[bottom]', filter_complex)
         self.assertIn('[basev][bottom]overlay=0:683:shortest=1:eof_action=pass[vraw]', filter_complex)
         self.assertIn('[vraw]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[vout]', filter_complex)
 
-    def test_split_layout_respects_custom_overlay_alpha_ratio(self):
+    def test_split_layout_respects_custom_overlay_fade_ratio(self):
         config = PipelineConfig()
         planner = OverlayPlanner(config)
         spec = planner.plan(
@@ -110,13 +110,14 @@ class RenderLayoutTests(unittest.TestCase):
                 image_type='jpg',
                 has_alpha=False,
             ),
-            separator_max_alpha_ratio=0.25,
+            separator_fade_ratio=0.25,
         )
         compositor = FinalCompositor(config, CommandRunner())
 
         filter_complex = compositor._build_filter_complex(spec)
 
-        self.assertIn("geq=lum='if(lte(Y\\,0)\\,0\\,if(lte(Y\\,384)\\,255*pow((Y-0)/384\\,1.7500)\\,255))'", filter_complex)
+        self.assertIn("geq=lum='if(lte(Y\\,0)\\,0\\,if(lte(Y\\,209)\\,255*pow((Y-0)/209\\,1.4800)\\,255))'", filter_complex)
+        self.assertIn('[maskraw]boxblur=13:1[bottommask]', filter_complex)
 
     def test_final_compositor_caps_to_rough_cut_without_shortest_mux_truncation(self):
         config = PipelineConfig()

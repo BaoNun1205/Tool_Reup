@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 import queue
+import re
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -77,6 +78,8 @@ STATUS_COLORS = {
     "failed_session": ("#4A1F2C", "#FFD0D6"),
 }
 
+SUPPORTED_BULK_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
+
 
 @dataclass
 class SessionRowWidgets:
@@ -108,12 +111,14 @@ class EditorApplication(object):
         self.orchestrator = orchestrator or SessionOrchestrator(self.config)
         self.logger = logger or logging.getLogger("auto_tiktok_editor.ui")
         self.event_queue = queue.Queue()
+        self.session_rerun_queue = queue.Queue()
         self.rows: List[SessionRowWidgets] = []
         self.row_counter = 0
         self.running = False
         self.latest_result: Optional[SessionResult] = None
         self.current_session_dir: Optional[str] = None
         self.review_ready = False
+        self.bulk_import_window: Optional[tk.Toplevel] = None
         self.session_name_var = tk.StringVar()
         self.output_root_var = tk.StringVar(value=str(self.config.default_output_root))
         self.session_status_var = tk.StringVar(value=STATUS_LABELS["draft"])
@@ -160,13 +165,13 @@ class EditorApplication(object):
         style.configure("Vertical.TScrollbar", background=PALETTE["card_alt"], troughcolor=PALETTE["log_bg"], bordercolor=PALETTE["border"], arrowcolor=PALETTE["muted"])
 
     def _default_blur_percent(self) -> int:
-        return self._blur_percent_from_alpha_ratio(self.config.split_separator_max_alpha_ratio)
+        return self._blur_percent_from_fade_ratio(self.config.split_separator_fade_ratio)
 
-    def _blur_percent_from_alpha_ratio(self, value: float) -> int:
+    def _blur_percent_from_fade_ratio(self, value: float) -> int:
         clamped = max(0.05, min(0.95, float(value)))
         return int(round(clamped * 100.0))
 
-    def _alpha_ratio_from_blur_percent(self, value: int) -> float:
+    def _fade_ratio_from_blur_percent(self, value: int) -> float:
         value = max(5, min(95, int(value)))
         return max(0.05, min(0.95, value / 100.0))
 
@@ -217,10 +222,13 @@ class EditorApplication(object):
         actions = ttk.Frame(controls, style="Card.TFrame")
         actions.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(16, 0))
         actions.columnconfigure(0, weight=1)
+        actions.columnconfigure(1, weight=1)
         self.add_row_button = ttk.Button(actions, text="+ Thêm dòng", style="Secondary.TButton", command=self._add_row)
         self.add_row_button.grid(row=0, column=0, sticky="w")
         self.run_button = ttk.Button(actions, text="Chạy session", style="Primary.TButton", command=self._start_session)
-        self.run_button.grid(row=0, column=1, sticky="e")
+        self.bulk_import_button = ttk.Button(actions, text="Nh\u1eadp h\u00e0ng lo\u1ea1t", style="Secondary.TButton", command=self._open_bulk_import_dialog)
+        self.bulk_import_button.grid(row=0, column=1, sticky="w", padx=(12, 0))
+        self.run_button.grid(row=0, column=2, sticky="e")
 
         left_panel = ttk.LabelFrame(left_column, text="Danh sách item", style="Panel.TLabelframe", padding=14)
         left_panel.pack(fill="both", expand=True, pady=(16, 0))
@@ -361,10 +369,239 @@ class EditorApplication(object):
         if selected:
             self.output_root_var.set(selected)
 
+    def _open_bulk_import_dialog(self) -> None:
+        if self.running:
+            return
+        if self.bulk_import_window is not None and self.bulk_import_window.winfo_exists():
+            self.bulk_import_window.lift()
+            self.bulk_import_window.focus_force()
+            return
+        dialog = tk.Toplevel(self.root)
+        self.bulk_import_window = dialog
+        dialog.title("Nh\u1eadp h\u00e0ng lo\u1ea1t")
+        dialog.geometry("860x680")
+        dialog.minsize(760, 560)
+        dialog.transient(self.root)
+        dialog.configure(bg=PALETTE["card"])
+        dialog.protocol("WM_DELETE_WINDOW", self._close_bulk_import_dialog)
+
+        container = ttk.Frame(dialog, style="Card.TFrame", padding=18)
+        container.pack(fill="both", expand=True)
+        ttk.Label(container, text="Nh\u1eadp h\u00e0ng lo\u1ea1t video v\u00e0 \u1ea3nh theo th\u1ee9 t\u1ef1", style="Head.TLabel").pack(anchor="w")
+        ttk.Label(
+            container,
+            text="D\u00e1n m\u1ed7i link video tr\u00ean m\u1ed9t d\u00f2ng. \u1ede d\u01b0\u1edbi ch\u1ecdn folder \u1ea3nh, app s\u1ebd gh\u00e9p \u1ea3nh th\u1ee9 1 cho video th\u1ee9 1, \u1ea3nh th\u1ee9 2 cho video th\u1ee9 2, v\u00e0 ti\u1ebfp t\u1ee5c theo th\u1ee9 t\u1ef1.",
+            style="Body.TLabel",
+            wraplength=780,
+            justify="left",
+        ).pack(anchor="w", pady=(8, 0))
+
+        editor_box = ttk.Frame(container, style="Card.TFrame")
+        editor_box.pack(fill="both", expand=True, pady=(16, 0))
+        line_numbers = tk.Text(
+            editor_box,
+            width=4,
+            wrap="none",
+            state="disabled",
+            takefocus=0,
+            relief="flat",
+            bg=PALETTE["log_bg"],
+            fg=PALETTE["muted"],
+            font=("Consolas", 10),
+            padx=8,
+            pady=12,
+        )
+        line_numbers.pack(side="left", fill="y")
+        url_text = tk.Text(
+            editor_box,
+            wrap="none",
+            relief="flat",
+            bg=PALETTE["input_bg"],
+            fg=PALETTE["text"],
+            insertbackground=PALETTE["text"],
+            font=("Consolas", 10),
+            padx=12,
+            pady=12,
+        )
+        url_text.pack(side="left", fill="both", expand=True)
+        scrollbar = ttk.Scrollbar(editor_box, orient="vertical")
+        scrollbar.pack(side="right", fill="y")
+        scrollbar.configure(command=lambda *args: self._bulk_scroll_views(url_text, line_numbers, *args))
+        url_text.configure(
+            yscrollcommand=lambda first, last: self._bulk_yscroll_callback(
+                first,
+                last,
+                scrollbar,
+                line_numbers,
+            )
+        )
+        url_text.bind("<<Modified>>", lambda event: self._on_bulk_editor_modified(url_text, line_numbers))
+        url_text.bind("<KeyRelease>", lambda event: self._refresh_bulk_line_numbers(url_text, line_numbers))
+        url_text.bind("<MouseWheel>", lambda event: self.root.after_idle(lambda: self._refresh_bulk_line_numbers(url_text, line_numbers)))
+        url_text.bind("<ButtonRelease-1>", lambda event: self.root.after_idle(lambda: self._refresh_bulk_line_numbers(url_text, line_numbers)))
+
+        existing_urls = self._existing_row_urls_text()
+        if existing_urls:
+            url_text.insert("1.0", existing_urls)
+        folder_var = tk.StringVar(value=self._guess_existing_image_folder())
+        self._refresh_bulk_line_numbers(url_text, line_numbers)
+        url_text.edit_modified(False)
+
+        folder_box = ttk.Frame(container, style="Card.TFrame")
+        folder_box.pack(fill="x", pady=(16, 0))
+        folder_box.columnconfigure(0, weight=1)
+        ttk.Label(folder_box, text="Folder \u1ea3nh theo th\u1ee9 t\u1ef1", style="Head.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Entry(folder_box, textvariable=folder_var).grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        ttk.Button(
+            folder_box,
+            text="Ch\u1ecdn folder \u1ea3nh",
+            style="Secondary.TButton",
+            command=lambda: self._browse_bulk_image_folder(folder_var),
+        ).grid(row=1, column=1, sticky="e", padx=(12, 0), pady=(8, 0))
+
+        action_row = ttk.Frame(container, style="Card.TFrame")
+        action_row.pack(fill="x", pady=(18, 0))
+        action_row.columnconfigure(0, weight=1)
+        ttk.Button(action_row, text="\u0110\u00f3ng", style="Ghost.TButton", command=self._close_bulk_import_dialog).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            action_row,
+            text="\u00c1p d\u1ee5ng v\u00e0o danh s\u00e1ch",
+            style="Primary.TButton",
+            command=lambda: self._submit_bulk_import(url_text, folder_var),
+        ).grid(row=0, column=1, sticky="e")
+
+        dialog.grab_set()
+        url_text.focus_set()
+
+    def _close_bulk_import_dialog(self) -> None:
+        if self.bulk_import_window is None:
+            return
+        if self.bulk_import_window.winfo_exists():
+            self.bulk_import_window.destroy()
+        self.bulk_import_window = None
+
+    def _browse_bulk_image_folder(self, folder_var: tk.StringVar) -> None:
+        selected = filedialog.askdirectory(title="Ch\u1ecdn folder \u1ea3nh cho nh\u1eadp h\u00e0ng lo\u1ea1t")
+        if selected:
+            folder_var.set(selected)
+
+    def _bulk_scroll_views(self, url_text: tk.Text, line_numbers: tk.Text, *args) -> None:
+        url_text.yview(*args)
+        line_numbers.yview(*args)
+
+    def _bulk_yscroll_callback(self, first: str, last: str, scrollbar: ttk.Scrollbar, line_numbers: tk.Text) -> None:
+        scrollbar.set(first, last)
+        line_numbers.yview_moveto(first)
+
+    def _on_bulk_editor_modified(self, url_text: tk.Text, line_numbers: tk.Text) -> None:
+        self._refresh_bulk_line_numbers(url_text, line_numbers)
+        url_text.edit_modified(False)
+
+    def _refresh_bulk_line_numbers(self, url_text: tk.Text, line_numbers: tk.Text) -> None:
+        line_count = max(1, int(url_text.index("end-1c").split(".")[0]))
+        content = "\n".join(str(index) for index in range(1, line_count + 1))
+        line_numbers.configure(state="normal")
+        line_numbers.delete("1.0", "end")
+        line_numbers.insert("1.0", content)
+        line_numbers.configure(state="disabled")
+        line_numbers.yview_moveto(url_text.yview()[0])
+
+    def _existing_row_urls_text(self) -> str:
+        return "\n".join(row.url_var.get().strip() for row in self.rows if row.url_var.get().strip())
+
+    def _guess_existing_image_folder(self) -> str:
+        folders = {
+            str(Path(row.image_var.get().strip()).expanduser().resolve().parent)
+            for row in self.rows
+            if row.image_var.get().strip()
+        }
+        return folders.pop() if len(folders) == 1 else ""
+
+    def _submit_bulk_import(self, url_text: tk.Text, folder_var: tk.StringVar) -> None:
+        try:
+            bulk_items = self._prepare_bulk_import_items(url_text.get("1.0", "end-1c"), folder_var.get())
+        except ValueError as exc:
+            messagebox.showerror("Kh\u00f4ng th\u1ec3 nh\u1eadp h\u00e0ng lo\u1ea1t", str(exc))
+            return
+        self._apply_bulk_import_items(bulk_items)
+        self._close_bulk_import_dialog()
+
+    def _prepare_bulk_import_items(self, raw_text: str, folder_path_text: str) -> List[tuple[str, Path]]:
+        video_urls = [line.strip() for line in raw_text.splitlines() if line.strip()]
+        if not video_urls:
+            raise ValueError("H\u00e3y nh\u1eadp \u00edt nh\u1ea5t 1 link video, m\u1ed7i d\u00f2ng 1 link.")
+        if len(video_urls) > self.config.max_session_items:
+            raise ValueError("S\u1ed1 link v\u01b0\u1ee3t qu\u00e1 gi\u1edbi h\u1ea1n %d item c\u1ee7a session." % self.config.max_session_items)
+        if not folder_path_text or not folder_path_text.strip():
+            raise ValueError("H\u00e3y ch\u1ecdn folder \u1ea3nh tr\u01b0\u1edbc khi \u00e1p d\u1ee5ng.")
+        folder_path = Path(folder_path_text).expanduser().resolve()
+        if not folder_path.exists() or not folder_path.is_dir():
+            raise ValueError("Folder \u1ea3nh kh\u00f4ng t\u1ed3n t\u1ea1i ho\u1eb7c kh\u00f4ng h\u1ee3p l\u1ec7.")
+        image_paths = self._list_bulk_image_paths(folder_path)
+        if not image_paths:
+            raise ValueError("Folder \u1ea3nh kh\u00f4ng c\u00f3 file PNG, JPG ho\u1eb7c JPEG.")
+        if len(image_paths) != len(video_urls):
+            raise ValueError(
+                "S\u1ed1 link video (%d) v\u00e0 s\u1ed1 \u1ea3nh trong folder (%d) ph\u1ea3i b\u1eb1ng nhau."
+                % (len(video_urls), len(image_paths))
+            )
+        return list(zip(video_urls, image_paths))
+
+    def _list_bulk_image_paths(self, folder_path: Path) -> List[Path]:
+        image_paths = [
+            path
+            for path in folder_path.iterdir()
+            if path.is_file() and path.suffix.lower() in SUPPORTED_BULK_IMAGE_SUFFIXES
+        ]
+        return sorted(image_paths, key=self._bulk_image_sort_key)
+
+    def _bulk_image_sort_key(self, image_path: Path):
+        parts = re.split(r"(\d+)", image_path.stem.lower())
+        key = []
+        for part in parts:
+            if not part:
+                continue
+            if part.isdigit():
+                key.append((0, int(part)))
+            else:
+                key.append((1, part))
+        key.append((1, image_path.suffix.lower()))
+        key.append((1, image_path.name.lower()))
+        return tuple(key)
+
+    def _apply_bulk_import_items(self, bulk_items: List[tuple[str, Path]]) -> None:
+        self.latest_result = None
+        self.current_session_dir = None
+        self.review_ready = False
+        self.summary_path_var.set("Ch\u01b0a c\u00f3 output session.")
+        self.open_session_button.configure(state="disabled")
+        self.finalize_button.configure(state="disabled")
+        self._ensure_row_count(len(bulk_items))
+        for index, (video_url, image_path) in enumerate(bulk_items):
+            row = self.rows[index]
+            row.url_var.set(video_url)
+            row.image_var.set(str(image_path))
+            row.output_dir = None
+            row.preview_video_path = None
+            row.open_button.configure(state="disabled")
+            self._set_row_status(row, "draft", "\u0110\u00e3 n\u1ea1p t\u1eeb ch\u1ebf \u0111\u1ed9 nh\u1eadp h\u00e0ng lo\u1ea1t.")
+        self._set_session_status("draft", "\u0110\u00e3 n\u1ea1p %d item t\u1eeb ch\u1ebf \u0111\u1ed9 nh\u1eadp h\u00e0ng lo\u1ea1t." % len(bulk_items))
+        self.summary_counts_var.set("%d item | 0 ho\u00e0n t\u1ea5t | 0 l\u1ed7i" % len(bulk_items))
+        self._append_log("\u0110\u00e3 n\u1ea1p %d item t\u1eeb nh\u1eadp h\u00e0ng lo\u1ea1t." % len(bulk_items), reset=True)
+
+    def _ensure_row_count(self, target_count: int) -> None:
+        while len(self.rows) < target_count:
+            self._add_row()
+        while len(self.rows) > target_count:
+            row = self.rows.pop()
+            row.frame.destroy()
+        self._renumber_rows()
+
     def _start_session(self) -> None:
         if self.running:
             return
         self.latest_result = None
+        self.session_rerun_queue = queue.Queue()
         self.current_session_dir = None
         self.summary_path_var.set("Đang chuẩn bị session...")
         self.open_session_button.configure(state="disabled")
@@ -378,11 +615,15 @@ class EditorApplication(object):
         items = []
         for row in self.rows:
             image_text = row.image_var.get().strip()
-            items.append(SessionItemSpec(row_id=row.row_id, source_video_url=row.url_var.get().strip(), product_image=Path(image_text) if image_text else None, overlay_alpha_ratio=self._alpha_ratio_from_blur_percent(row.opacity_var.get())))
+            items.append(SessionItemSpec(row_id=row.row_id, source_video_url=row.url_var.get().strip(), product_image=Path(image_text) if image_text else None, overlay_alpha_ratio=self._fade_ratio_from_blur_percent(row.opacity_var.get())))
         return SessionSpec(items=items, output_root_dir=Path(self.output_root_var.get().strip() or str(self.config.default_output_root)), session_name=(self.session_name_var.get().strip() or None), cookies_file=None)
 
     def _run_session_worker(self, session_spec: SessionSpec) -> None:
-        result = self.orchestrator.run(session_spec, event_callback=self._queue_event)
+        result = self.orchestrator.run(
+            session_spec,
+            event_callback=self._queue_event,
+            rerun_queue=self.session_rerun_queue,
+        )
         self._queue_event(SessionEvent(event_type="worker_result", payload={"result": result}))
 
     def _approve_session_outputs(self) -> None:
@@ -400,8 +641,6 @@ class EditorApplication(object):
             self._queue_event(SessionEvent(event_type="review_finalize_failed", message=str(exc)))
 
     def _rerun_row(self, row_id: str) -> None:
-        if self.running or self.latest_result is None:
-            return
         row = self._find_row_by_id(row_id)
         if row is None:
             return
@@ -411,8 +650,17 @@ class EditorApplication(object):
             row_id=row.row_id,
             source_video_url=row.url_var.get().strip(),
             product_image=Path(image_text) if image_text else None,
-            overlay_alpha_ratio=self._alpha_ratio_from_blur_percent(row.opacity_var.get()),
+            overlay_alpha_ratio=self._fade_ratio_from_blur_percent(row.opacity_var.get()),
         )
+        if self.running:
+            row.rerun_button.configure(state="disabled")
+            self._set_row_status(row, "processing", "\u0110ang x\u1ebfp y\u00eau c\u1ea7u t\u1ea1o l\u1ea1i cho item n\u00e0y.")
+            self._set_session_status("running", "\u0110ang t\u1ea1o l\u1ea1i item %d trong khi c\u00e1c item kh\u00e1c v\u1eabn ti\u1ebfp t\u1ee5c ch\u1ea1y." % (row_index + 1))
+            self._append_log("Queued rerun for item %d while session is still running." % (row_index + 1))
+            self.session_rerun_queue.put((row_index, item_spec))
+            return
+        if self.latest_result is None:
+            return
         self.review_ready = False
         self._set_running_state(True)
         self._set_row_status(row, "processing", "Đang tạo lại video preview cho item này.")
@@ -447,6 +695,7 @@ class EditorApplication(object):
         self.running = is_running
         state = "disabled" if is_running else "normal"
         self.add_row_button.configure(state=state)
+        self.bulk_import_button.configure(state=state)
         self.run_button.configure(state=state)
         self.output_root_entry.configure(state=state)
         self.output_browse_button.configure(state=state)
@@ -457,19 +706,21 @@ class EditorApplication(object):
             row.opacity_scale.configure(state=state)
             row.browse_button.configure(state=state)
             row.remove_button.configure(state=state)
-            row.rerun_button.configure(
-                state="disabled"
-                if is_running
-                else (
-                    "normal"
-                    if row.status_var.get() in (STATUS_LABELS["completed"], STATUS_LABELS["failed"])
-                    else "disabled"
-                )
-            )
+            row.rerun_button.configure(state=self._rerun_button_state(row, is_running))
         if is_running:
             self.finalize_button.configure(state="disabled")
         else:
             self.finalize_button.configure(state="normal" if self.review_ready else "disabled")
+
+    def _rerun_button_state(self, row: SessionRowWidgets, is_running: Optional[bool] = None) -> str:
+        current_running = self.running if is_running is None else is_running
+        if current_running:
+            return "normal" if row.status_var.get() == STATUS_LABELS["failed"] else "disabled"
+        return (
+            "normal"
+            if row.status_var.get() in (STATUS_LABELS["completed"], STATUS_LABELS["failed"])
+            else "disabled"
+        )
 
     def _queue_event(self, event: SessionEvent) -> None:
         self.event_queue.put(event)
@@ -516,6 +767,7 @@ class EditorApplication(object):
                 row.output_dir = event.payload.get("output_dir")
                 row.preview_video_path = event.payload.get("final_video_path")
                 row.open_button.configure(state="normal" if row.preview_video_path else "disabled")
+                row.rerun_button.configure(state=self._rerun_button_state(row))
                 self._set_row_status(row, "completed", "Đã tạo xong video preview cho item này.")
             self._append_log("Item %d completed." % ((event.item_index or 0) + 1))
             return
@@ -525,7 +777,7 @@ class EditorApplication(object):
                 row.output_dir = event.payload.get("output_dir")
                 row.preview_video_path = None
                 row.open_button.configure(state="disabled")
-                row.rerun_button.configure(state="disabled" if self.running else "normal")
+                row.rerun_button.configure(state=self._rerun_button_state(row))
                 self._set_row_status(row, "failed", event.message or "Item thất bại.")
             self._append_log("Item %d failed: %s" % (((event.item_index or 0) + 1), event.message or ""))
             return
@@ -620,6 +872,7 @@ class EditorApplication(object):
         row.detail_var.set(detail)
         row.status_chip.configure(text=row.status_var.get())
         self._set_chip_style(row.status_chip, status)
+        row.rerun_button.configure(state=self._rerun_button_state(row))
 
     def _set_session_status(self, status: str, detail: str) -> None:
         self.session_status_var.set(STATUS_LABELS.get(status, status))
