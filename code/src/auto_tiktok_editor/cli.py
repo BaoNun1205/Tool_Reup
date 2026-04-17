@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("ui", help="Launch the local desktop UI")
+    subparsers.add_parser("telegram-bot", help="Run the Telegram bot worker")
 
     run_parser = subparsers.add_parser("run-session", help="Run a session from a JSON manifest")
     run_parser.add_argument("--session-file", required=True, help="Path to a JSON session manifest")
@@ -75,6 +76,13 @@ def main(argv=None) -> int:
         return launch_ui()
     if args.command == "run-session":
         return run_headless_session(Path(args.session_file))
+    if args.command == "telegram-bot":
+        from auto_tiktok_editor.app.telegram_bot import TelegramBotService
+
+        config = PipelineConfig.from_env()
+        service = TelegramBotService(config=config)
+        service.serve_forever()
+        return 0
     parser.error("Unknown command.")
     return 2
 

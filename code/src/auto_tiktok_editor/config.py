@@ -12,6 +12,7 @@ import uuid
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 VENV_SCRIPTS = PROJECT_ROOT / ".venv" / "Scripts"
+TELEGRAM_BOT_TOKEN_FILE = PROJECT_ROOT / "telegram_bot_token.txt"
 
 
 def _find_project_binary(executable_name):
@@ -89,6 +90,44 @@ def _env_flag(name: str, default: bool) -> bool:
     if normalized in ("0", "false", "no", "off"):
         return False
     return default
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value.strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_chat_ids(name: str):
+    value = os.getenv(name)
+    if value is None:
+        return ()
+    chat_ids = []
+    for chunk in value.split(","):
+        normalized = chunk.strip()
+        if not normalized:
+            continue
+        try:
+            chat_ids.append(int(normalized))
+        except ValueError:
+            continue
+    return tuple(chat_ids)
+
+
+def _resolve_telegram_bot_token() -> str:
+    configured = os.getenv("AUTO_EDITOR_TELEGRAM_BOT_TOKEN", "").strip()
+    if configured:
+        return configured
+    try:
+        if TELEGRAM_BOT_TOKEN_FILE.exists():
+            return TELEGRAM_BOT_TOKEN_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return ""
 
 
 @dataclass(frozen=True)
@@ -223,6 +262,14 @@ class PipelineConfig:
         "Chrome/135.0.0.0 Safari/537.36"
     )
 
+    # Cau hinh Telegram bot polling.
+    telegram_bot_token: str = ""
+    telegram_poll_timeout_seconds: int = 30
+    telegram_poll_interval_seconds: int = 2
+    telegram_input_root: Path = PROJECT_ROOT / "output" / "_telegram_inputs"
+    telegram_allowed_chat_ids: tuple = ()
+    telegram_delivery_chat_id: str = ""
+
     # Hoan thien audio.
     # Muc loudness muc tieu cho audio da xu ly va audio final.
     audio_target_lufs: float = -14.0
@@ -277,6 +324,14 @@ class PipelineConfig:
             android_device_serial=os.getenv("AUTO_EDITOR_ANDROID_DEVICE_SERIAL", "").strip(),
             android_device_video_dir=os.getenv("AUTO_EDITOR_ANDROID_VIDEO_DIR", "/sdcard/Movies/AutoTikTokEditor").strip()
             or "/sdcard/Movies/AutoTikTokEditor",
+            telegram_bot_token=_resolve_telegram_bot_token(),
+            telegram_poll_timeout_seconds=max(1, _env_int("AUTO_EDITOR_TELEGRAM_POLL_TIMEOUT_SECONDS", 30)),
+            telegram_poll_interval_seconds=max(1, _env_int("AUTO_EDITOR_TELEGRAM_POLL_INTERVAL_SECONDS", 2)),
+            telegram_input_root=Path(
+                os.getenv("AUTO_EDITOR_TELEGRAM_INPUT_ROOT", str(output_root / "_telegram_inputs"))
+            ).expanduser().resolve(),
+            telegram_allowed_chat_ids=_env_chat_ids("AUTO_EDITOR_TELEGRAM_ALLOWED_CHAT_IDS"),
+            telegram_delivery_chat_id=os.getenv("AUTO_EDITOR_TELEGRAM_DELIVERY_CHAT_ID", "").strip(),
         )
 
     def build_job_id(self):

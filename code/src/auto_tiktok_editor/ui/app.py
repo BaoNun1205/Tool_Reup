@@ -14,6 +14,8 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Dict, List, Optional
 
 from auto_tiktok_editor.app.orchestrator import SessionOrchestrator
+from auto_tiktok_editor.app.telegram_bot import TelegramBotService
+from auto_tiktok_editor.app.telegram_delivery import TelegramDeliveryService
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import SessionEvent, SessionItemSpec, SessionResult, SessionSpec
 
@@ -119,8 +121,12 @@ class EditorApplication(object):
         self.current_session_dir: Optional[str] = None
         self.review_ready = False
         self.bulk_import_window: Optional[tk.Toplevel] = None
+        self.telegram_bot_service = None  # type: Optional[TelegramBotService]
+        self.telegram_bot_thread = None  # type: Optional[threading.Thread]
+        self.telegram_delivery = None  # type: Optional[TelegramDeliveryService]
         self.session_name_var = tk.StringVar()
         self.output_root_var = tk.StringVar(value=str(self.config.default_output_root))
+        self.telegram_chat_id_var = tk.StringVar(value=str(self.config.telegram_delivery_chat_id or ""))
         self.session_status_var = tk.StringVar(value=STATUS_LABELS["draft"])
         self.session_detail_var = tk.StringVar(value="Tạo danh sách item rồi bấm Chạy session.")
         self.summary_counts_var = tk.StringVar(value="0 item | 0 hoàn tất | 0 lỗi")
@@ -128,6 +134,8 @@ class EditorApplication(object):
         self._configure_window()
         self._build_styles()
         self._build_layout()
+        self.finalize_button.configure(text="Gửi qua Telegram", command=self._send_session_via_telegram)
+        self._start_embedded_telegram_bot_if_configured()
         self._add_row()
         self.root.after(self.config.ui_poll_interval_ms, self._poll_events)
 
@@ -136,6 +144,23 @@ class EditorApplication(object):
         self.root.geometry("1460x900")
         self.root.minsize(1220, 780)
         self.root.configure(bg=PALETTE["bg"])
+
+    def _start_embedded_telegram_bot_if_configured(self) -> None:
+        if not self.config.telegram_bot_token or self.telegram_bot_thread is not None:
+            return
+        try:
+            self.telegram_bot_service = TelegramBotService(config=self.config, logger=self.logger)
+        except Exception as exc:
+            self.logger.exception("Unable to start embedded Telegram bot.")
+            self._append_log("Không thể khởi động bot Telegram nền: %s" % exc)
+            return
+        self.telegram_bot_thread = threading.Thread(
+            target=self.telegram_bot_service.serve_forever,
+            daemon=True,
+            name="auto-editor-telegram-bot",
+        )
+        self.telegram_bot_thread.start()
+        self._append_log("Bot Telegram nền đã được khởi động cùng UI.")
 
     def _build_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -259,6 +284,9 @@ class EditorApplication(object):
         ttk.Label(summary, textvariable=self.summary_counts_var, style="Body.TLabel").pack(anchor="w", pady=(8, 0))
         ttk.Label(summary, text="Output session", style="Head.TLabel").pack(anchor="w", pady=(18, 0))
         ttk.Label(summary, textvariable=self.summary_path_var, style="Body.TLabel", wraplength=360, justify="left").pack(anchor="w", pady=(8, 0))
+        ttk.Label(summary, text="Telegram Chat ID", style="Head.TLabel").pack(anchor="w", pady=(18, 0))
+        self.telegram_chat_id_entry = ttk.Entry(summary, textvariable=self.telegram_chat_id_var)
+        self.telegram_chat_id_entry.pack(fill="x", pady=(8, 0))
         action_row = ttk.Frame(summary, style="Card.TFrame")
         action_row.pack(fill="x", pady=(10, 0))
         action_row.columnconfigure(0, weight=1)
@@ -633,6 +661,26 @@ class EditorApplication(object):
         self._set_session_status("running", "Đang lưu toàn bộ video đã duyệt vào output cuối.")
         threading.Thread(target=self._finalize_session_worker, daemon=True).start()
 
+    def _send_session_via_telegram(self) -> None:
+        if self.running or self.latest_result is None or not self.review_ready:
+            return
+        chat_id = self._normalize_telegram_chat_id(self.telegram_chat_id_var.get())
+        if chat_id is None:
+            messagebox.showerror("Thiếu Telegram Chat ID", "Nhập Telegram Chat ID hợp lệ trước khi gửi.")
+            return
+        self._set_running_state(True)
+        self._set_session_status("running", "Đang gửi các video đã duyệt qua Telegram.")
+        threading.Thread(target=self._send_session_via_telegram_worker, args=(chat_id,), daemon=True).start()
+
+    def _send_session_via_telegram_worker(self, chat_id: int) -> None:
+        try:
+            if self.telegram_delivery is None:
+                self.telegram_delivery = TelegramDeliveryService(self.config, logger=self.logger)
+            payload = self.telegram_delivery.send_session_result(self.latest_result, chat_id)
+            self._queue_event(SessionEvent(event_type="telegram_delivery_result", payload=payload))
+        except Exception as exc:
+            self._queue_event(SessionEvent(event_type="telegram_delivery_failed", message=str(exc)))
+
     def _finalize_session_worker(self) -> None:
         try:
             result = self.orchestrator.finalize_reviewed_session(self.latest_result, event_callback=self._queue_event)
@@ -700,6 +748,7 @@ class EditorApplication(object):
         self.output_root_entry.configure(state=state)
         self.output_browse_button.configure(state=state)
         self.session_name_entry.configure(state=state)
+        self.telegram_chat_id_entry.configure(state=state)
         for row in self.rows:
             row.url_entry.configure(state=state)
             row.image_entry.configure(state=state)
@@ -820,6 +869,27 @@ class EditorApplication(object):
             messagebox.showerror("Không thể lưu output", event.message or "Không thể lưu session.")
             return
 
+        if event.event_type == "telegram_delivery_result":
+            payload = event.payload or {}
+            self._set_running_state(False)
+            self.review_ready = any(item.status == "completed" for item in (self.latest_result.items if self.latest_result else []))
+            self.finalize_button.configure(state="normal" if self.review_ready else "disabled")
+            self._set_session_status("completed_with_success", "Đã gửi video qua Telegram thành công.")
+            self._append_log("Telegram delivery completed: sent %s video(s)." % payload.get("sent_count", 0))
+            messagebox.showinfo(
+                "Đã gửi qua Telegram",
+                "Đã gửi %s video sang chat %s." % (payload.get("sent_count", 0), payload.get("chat_id", "")),
+            )
+            return
+        if event.event_type == "telegram_delivery_failed":
+            self._set_running_state(False)
+            self.review_ready = True
+            self.finalize_button.configure(state="normal")
+            self._append_log("Telegram delivery failed: %s" % (event.message or ""))
+            self._set_session_status("completed_with_partial_failure", event.message or "Không thể gửi session qua Telegram.")
+            messagebox.showerror("Không thể gửi Telegram", event.message or "Không thể gửi session qua Telegram.")
+            return
+
     def _finalize_result(self, result: Optional[SessionResult], message: Optional[str] = None) -> None:
         self.latest_result = result
         self._set_running_state(False)
@@ -930,6 +1000,15 @@ class EditorApplication(object):
         except Exception as exc:
             self.logger.exception("Unable to open path %s", path_value)
             messagebox.showerror("Không thể mở thư mục", str(exc))
+
+    def _normalize_telegram_chat_id(self, value: str) -> Optional[int]:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return None
+        try:
+            return int(normalized)
+        except ValueError:
+            return None
 
     def _find_row_by_id(self, row_id: str) -> Optional[SessionRowWidgets]:
         for row in self.rows:

@@ -181,6 +181,37 @@ class SourceDownloaderTests(unittest.TestCase):
         self.assertEqual(selected_path, hd_path.resolve())
         self.assertEqual(selected_media.get("quality"), "hd_no_watermark")
 
+    def test_select_lazy_down_video_prefers_longer_video_over_short_preview(self):
+        preview_path = self.base_dir / "video_preview.mp4"
+        full_path = self.base_dir / "video_full.mp4"
+        preview_path.write_text("preview", encoding="utf-8")
+        full_path.write_text("full", encoding="utf-8")
+        payload = {
+            "medias": [
+                {
+                    "type": "video",
+                    "quality": "hd_no_watermark",
+                    "width": 1080,
+                    "height": 1920,
+                    "filesize": 1500000,
+                    "duration": 2.8,
+                    "localPath": str(preview_path),
+                },
+                {
+                    "type": "video",
+                    "quality": "play",
+                    "width": 720,
+                    "height": 1280,
+                    "filesize": 4200000,
+                    "duration": 14.6,
+                    "localPath": str(full_path),
+                },
+            ]
+        }
+        selected_path, selected_media = self.downloader._select_lazy_down_video(payload, self.base_dir)
+        self.assertEqual(selected_path, full_path.resolve())
+        self.assertEqual(selected_media.get("duration"), 14.6)
+
     def test_find_lazy_down_json_path_reads_json_path_from_stdout(self):
         manifest_path = self.base_dir / "lazy_result_tiktok_123.json"
         manifest_path.write_text(json.dumps({"medias": []}), encoding="utf-8")

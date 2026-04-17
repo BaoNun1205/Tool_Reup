@@ -10,3 +10,4 @@ output/
 assets/
 work/
 tmp/
+telegram_bot_token.txt

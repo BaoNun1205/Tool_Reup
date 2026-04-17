@@ -10,6 +10,7 @@ import unittest
 import queue
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.ui.app import EditorApplication
@@ -36,6 +37,28 @@ class FakeButton(object):
 
 
 class EditorApplicationTests(unittest.TestCase):
+    def test_starts_embedded_telegram_bot_when_token_is_configured(self):
+        app = EditorApplication.__new__(EditorApplication)
+        app.config = PipelineConfig(telegram_bot_token="token")
+        app.logger = mock.Mock()
+        app.telegram_bot_service = None
+        app.telegram_bot_thread = None
+        logged_messages = []
+        app._append_log = lambda message, reset=False: logged_messages.append(message)
+
+        fake_thread = mock.Mock()
+        fake_thread.start = mock.Mock()
+        fake_service = mock.Mock()
+
+        with mock.patch("auto_tiktok_editor.ui.app.TelegramBotService", return_value=fake_service):
+            with mock.patch("auto_tiktok_editor.ui.app.threading.Thread", return_value=fake_thread):
+                app._start_embedded_telegram_bot_if_configured()
+
+        self.assertIs(app.telegram_bot_service, fake_service)
+        self.assertIs(app.telegram_bot_thread, fake_thread)
+        fake_thread.start.assert_called_once()
+        self.assertTrue(any("Bot Telegram nền" in message for message in logged_messages))
+
     def test_blur_percent_defaults_to_config_fade_ratio(self):
         app = EditorApplication.__new__(EditorApplication)
         app.config = PipelineConfig(split_separator_fade_ratio=0.50)

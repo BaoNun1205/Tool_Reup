@@ -358,17 +358,36 @@ class SourceDownloader(object):
                 continue
             if candidate_path.suffix.lower() not in VIDEO_EXTENSIONS:
                 continue
+            duration_seconds = self._coerce_duration_seconds(
+                media.get("duration")
+                or media.get("videoDuration")
+                or media.get("durationSeconds")
+                or media.get("length")
+            )
             quality_rank = LAZY_DOWN_VIDEO_QUALITY_ORDER.get(str(media.get("quality") or "").lower(), 0)
             width = int(media.get("width") or 0)
             height = int(media.get("height") or 0)
             filesize = int(media.get("filesize") or 0)
-            video_candidates.append(((quality_rank, width * height, filesize), candidate_path.resolve(), media))
+            # Thu tu uu tien: video day du thoi luong > chat luong > do phan giai > kich thuoc file.
+            video_candidates.append(((duration_seconds, quality_rank, width * height, filesize), candidate_path.resolve(), media))
         if video_candidates:
             video_candidates.sort(key=lambda item: item[0], reverse=True)
             _score, selected_path, selected_media = video_candidates[0]
             return selected_path, selected_media
         fallback_path = self._resolve_downloaded_file("", destination_dir)
         return fallback_path, {}
+
+    def _coerce_duration_seconds(self, value) -> float:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if numeric <= 0:
+            return 0.0
+        # lazy-down co the tra ve duration theo milliseconds trong mot so payload.
+        if numeric >= 1000.0:
+            return numeric / 1000.0
+        return numeric
 
     def _cleanup_destination_dir(self, destination_dir: Path) -> None:
         for path in destination_dir.iterdir():
