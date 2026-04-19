@@ -92,6 +92,7 @@ class TelegramBotServiceTests(unittest.TestCase):
             base_dir = Path(temp_dir.name)
             client = FakeTelegramClient(base_dir)
             config = PipelineConfig(
+                allow_local_telegram=True,
                 telegram_bot_token="token",
                 telegram_input_root=base_dir / "telegram_inputs",
             )
@@ -128,6 +129,7 @@ class TelegramBotServiceTests(unittest.TestCase):
             client = FakeTelegramClient(base_dir)
             job_runner = FakeTelegramJobRunner(video_path)
             config = PipelineConfig(
+                allow_local_telegram=True,
                 telegram_bot_token="token",
                 telegram_input_root=base_dir / "telegram_inputs",
                 default_output_root=base_dir / "output",
@@ -178,6 +180,7 @@ class TelegramBotServiceTests(unittest.TestCase):
             base_dir = Path(temp_dir.name)
             client = FakeTelegramClient(base_dir)
             config = PipelineConfig(
+                allow_local_telegram=True,
                 telegram_bot_token="token",
                 telegram_input_root=base_dir / "telegram_inputs",
                 telegram_allowed_chat_ids=(999,),
@@ -214,6 +217,7 @@ class TelegramBotServiceTests(unittest.TestCase):
             job_runner = FakeTelegramJobRunner(video_path)
             executor = DeferredExecutor()
             config = PipelineConfig(
+                allow_local_telegram=True,
                 telegram_bot_token="token",
                 telegram_input_root=base_dir / "telegram_inputs",
                 default_output_root=base_dir / "output",

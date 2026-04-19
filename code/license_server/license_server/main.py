@@ -1,0 +1,12 @@
+from __future__ import annotations
+
+import uvicorn
+
+
+def main() -> int:
+    uvicorn.run("license_server.app.api:app", host="0.0.0.0", port=8787, reload=False)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

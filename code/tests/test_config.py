@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 from auto_tiktok_editor.config import PipelineConfig
+from auto_tiktok_editor.telegram_settings import TelegramRuntimeSettings
 
 
 class PipelineConfigTests(unittest.TestCase):
@@ -23,11 +24,13 @@ class PipelineConfigTests(unittest.TestCase):
         old_telegram_interval = os.environ.get("AUTO_EDITOR_TELEGRAM_POLL_INTERVAL_SECONDS")
         old_telegram_chat_ids = os.environ.get("AUTO_EDITOR_TELEGRAM_ALLOWED_CHAT_IDS")
         old_telegram_delivery_chat_id = os.environ.get("AUTO_EDITOR_TELEGRAM_DELIVERY_CHAT_ID")
+        old_allow_local_telegram = os.environ.get("AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM")
         try:
             os.environ["AUTO_EDITOR_FFMPEG_BIN"] = "custom-ffmpeg"
             os.environ["AUTO_EDITOR_FFPROBE_BIN"] = "custom-ffprobe"
             os.environ["AUTO_EDITOR_YTDLP_BIN"] = "custom-ytdlp"
             os.environ["AUTO_EDITOR_LAZY_DOWN_ONLY"] = "false"
+            os.environ["AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM"] = "true"
             os.environ["AUTO_EDITOR_TELEGRAM_BOT_TOKEN"] = "bot-token"
             os.environ["AUTO_EDITOR_TELEGRAM_POLL_TIMEOUT_SECONDS"] = "55"
             os.environ["AUTO_EDITOR_TELEGRAM_POLL_INTERVAL_SECONDS"] = "4"
@@ -53,6 +56,7 @@ class PipelineConfigTests(unittest.TestCase):
             self._restore("AUTO_EDITOR_TELEGRAM_POLL_INTERVAL_SECONDS", old_telegram_interval)
             self._restore("AUTO_EDITOR_TELEGRAM_ALLOWED_CHAT_IDS", old_telegram_chat_ids)
             self._restore("AUTO_EDITOR_TELEGRAM_DELIVERY_CHAT_ID", old_telegram_delivery_chat_id)
+            self._restore("AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM", old_allow_local_telegram)
 
     def test_build_job_id_has_prefix_and_suffix(self):
         config = PipelineConfig()
@@ -67,12 +71,37 @@ class PipelineConfigTests(unittest.TestCase):
         self.assertGreaterEqual(len(session_id), 18)
 
     def test_from_env_falls_back_to_local_telegram_token_file(self):
-        with mock.patch.dict(os.environ, {"AUTO_EDITOR_TELEGRAM_BOT_TOKEN": ""}, clear=False):
+        with mock.patch.dict(
+            os.environ,
+            {"AUTO_EDITOR_TELEGRAM_BOT_TOKEN": "", "AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM": "true"},
+            clear=False,
+        ):
             with mock.patch("auto_tiktok_editor.config.TELEGRAM_BOT_TOKEN_FILE") as token_file:
                 token_file.exists.return_value = True
                 token_file.read_text.return_value = "file-token\n"
                 config = PipelineConfig.from_env()
         self.assertEqual(config.telegram_bot_token, "file-token")
+
+    def test_from_env_loads_saved_telegram_runtime_settings(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AUTO_EDITOR_TELEGRAM_BOT_TOKEN": "",
+                "AUTO_EDITOR_TELEGRAM_DELIVERY_CHAT_ID": "",
+                "AUTO_EDITOR_TELEGRAM_ALLOWED_CHAT_IDS": "",
+                "AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM": "false",
+            },
+            clear=False,
+        ):
+            with mock.patch("auto_tiktok_editor.config._resolve_telegram_bot_token", return_value=""), mock.patch(
+                "auto_tiktok_editor.config.load_telegram_runtime_settings",
+                return_value=TelegramRuntimeSettings(bot_token="saved-token", delivery_chat_id="123456"),
+            ):
+                config = PipelineConfig.from_env()
+        self.assertTrue(config.allow_local_telegram)
+        self.assertEqual(config.telegram_bot_token, "saved-token")
+        self.assertEqual(config.telegram_delivery_chat_id, "123456")
+        self.assertEqual(config.telegram_allowed_chat_ids, (123456,))
 
     def _restore(self, name, value):
         if value is None:

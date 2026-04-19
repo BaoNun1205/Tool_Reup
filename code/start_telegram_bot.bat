@@ -1,9 +1,9 @@
 @echo off
 setlocal
 
-set "SCRIPT_DIR=%~dp0"
-powershell -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_telegram_bot.ps1"
 echo.
+echo Ban thuong mai da tat Telegram local tren may khach.
+echo Neu can bot Telegram, hay chuyen no sang server rieng cua admin.
 pause
 
 endlocal

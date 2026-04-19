@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from auto_tiktok_editor.app.telegram_bot import TelegramBotClient
+from auto_tiktok_editor.commercial_runtime import ensure_local_telegram_allowed
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import ItemProcessResult, SessionResult
 
@@ -22,6 +23,7 @@ class TelegramDeliveryService(object):
         logger: Optional[logging.Logger] = None,
     ):
         self.config = config or PipelineConfig.from_env()
+        ensure_local_telegram_allowed(self.config, surface="telegram-delivery")
         self.logger = logger or logging.getLogger("auto_tiktok_editor.telegram.delivery")
         self.client = client or TelegramBotClient(self.config.telegram_bot_token, logger=self.logger)
 

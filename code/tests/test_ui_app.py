@@ -39,7 +39,7 @@ class FakeButton(object):
 class EditorApplicationTests(unittest.TestCase):
     def test_starts_embedded_telegram_bot_when_token_is_configured(self):
         app = EditorApplication.__new__(EditorApplication)
-        app.config = PipelineConfig(telegram_bot_token="token")
+        app.config = PipelineConfig(telegram_bot_token="token", allow_local_telegram=True)
         app.logger = mock.Mock()
         app.telegram_bot_service = None
         app.telegram_bot_thread = None
@@ -58,6 +58,19 @@ class EditorApplicationTests(unittest.TestCase):
         self.assertIs(app.telegram_bot_thread, fake_thread)
         fake_thread.start.assert_called_once()
         self.assertTrue(any("Bot Telegram nền" in message for message in logged_messages))
+
+    def test_runtime_telegram_config_uses_ui_values_and_locks_chat_allowlist(self):
+        app = EditorApplication.__new__(EditorApplication)
+        app.config = PipelineConfig(commercial_mode=True)
+        app.telegram_bot_token_var = FakeVar("bot-token")
+        app.telegram_chat_id_var = FakeVar("123456789")
+
+        runtime_config = app._runtime_telegram_config()
+
+        self.assertTrue(runtime_config.allow_local_telegram)
+        self.assertEqual(runtime_config.telegram_bot_token, "bot-token")
+        self.assertEqual(runtime_config.telegram_delivery_chat_id, "123456789")
+        self.assertEqual(runtime_config.telegram_allowed_chat_ids, (123456789,))
 
     def test_blur_percent_defaults_to_config_fade_ratio(self):
         app = EditorApplication.__new__(EditorApplication)

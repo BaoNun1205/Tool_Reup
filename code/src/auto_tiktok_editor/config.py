@@ -6,8 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 import os
 import shutil
+import sys
 import time
 import uuid
+
+from auto_tiktok_editor.telegram_settings import load_telegram_runtime_settings
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -128,6 +131,10 @@ def _resolve_telegram_bot_token() -> str:
     except OSError:
         return ""
     return ""
+
+
+def _runtime_is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False) or globals().get("__compiled__", False))
 
 
 @dataclass(frozen=True)
@@ -263,6 +270,10 @@ class PipelineConfig:
     )
 
     # Cau hinh Telegram bot polling.
+    commercial_mode: bool = True
+    allow_local_telegram: bool = False
+    require_frozen_build: bool = False
+    runtime_is_frozen: bool = False
     telegram_bot_token: str = ""
     telegram_poll_timeout_seconds: int = 30
     telegram_poll_interval_seconds: int = 2
@@ -282,6 +293,23 @@ class PipelineConfig:
     def from_env(cls):
         configured_output_root = os.getenv("AUTO_EDITOR_OUTPUT_ROOT")
         output_root = Path(configured_output_root).expanduser().resolve() if configured_output_root else PROJECT_ROOT / "output"
+        telegram_runtime_settings = load_telegram_runtime_settings()
+        commercial_mode = _env_flag("AUTO_EDITOR_COMMERCIAL_MODE", True)
+        env_allow_local_telegram = _env_flag("AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM", False)
+        resolved_telegram_bot_token = _resolve_telegram_bot_token() or telegram_runtime_settings.bot_token
+        resolved_telegram_delivery_chat_id = (
+            os.getenv("AUTO_EDITOR_TELEGRAM_DELIVERY_CHAT_ID", "").strip()
+            or telegram_runtime_settings.delivery_chat_id
+        )
+        allow_local_telegram = env_allow_local_telegram or bool(resolved_telegram_bot_token)
+        telegram_allowed_chat_ids = _env_chat_ids("AUTO_EDITOR_TELEGRAM_ALLOWED_CHAT_IDS")
+        if not telegram_allowed_chat_ids and resolved_telegram_delivery_chat_id:
+            try:
+                telegram_allowed_chat_ids = (int(resolved_telegram_delivery_chat_id),)
+            except ValueError:
+                telegram_allowed_chat_ids = ()
+        require_frozen_build = _env_flag("AUTO_EDITOR_REQUIRE_FROZEN_BUILD", False)
+        runtime_is_frozen = _runtime_is_frozen()
         return cls(
             ffmpeg_bin=_resolve_tool(
                 "AUTO_EDITOR_FFMPEG_BIN",
@@ -324,14 +352,18 @@ class PipelineConfig:
             android_device_serial=os.getenv("AUTO_EDITOR_ANDROID_DEVICE_SERIAL", "").strip(),
             android_device_video_dir=os.getenv("AUTO_EDITOR_ANDROID_VIDEO_DIR", "/sdcard/Movies/AutoTikTokEditor").strip()
             or "/sdcard/Movies/AutoTikTokEditor",
-            telegram_bot_token=_resolve_telegram_bot_token(),
+            commercial_mode=commercial_mode,
+            allow_local_telegram=allow_local_telegram,
+            require_frozen_build=require_frozen_build,
+            runtime_is_frozen=runtime_is_frozen,
+            telegram_bot_token=resolved_telegram_bot_token if allow_local_telegram else "",
             telegram_poll_timeout_seconds=max(1, _env_int("AUTO_EDITOR_TELEGRAM_POLL_TIMEOUT_SECONDS", 30)),
             telegram_poll_interval_seconds=max(1, _env_int("AUTO_EDITOR_TELEGRAM_POLL_INTERVAL_SECONDS", 2)),
             telegram_input_root=Path(
                 os.getenv("AUTO_EDITOR_TELEGRAM_INPUT_ROOT", str(output_root / "_telegram_inputs"))
             ).expanduser().resolve(),
-            telegram_allowed_chat_ids=_env_chat_ids("AUTO_EDITOR_TELEGRAM_ALLOWED_CHAT_IDS"),
-            telegram_delivery_chat_id=os.getenv("AUTO_EDITOR_TELEGRAM_DELIVERY_CHAT_ID", "").strip(),
+            telegram_allowed_chat_ids=telegram_allowed_chat_ids if allow_local_telegram else (),
+            telegram_delivery_chat_id=resolved_telegram_delivery_chat_id if allow_local_telegram else "",
         )
 
     def build_job_id(self):

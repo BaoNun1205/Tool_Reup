@@ -1,5 +1,9 @@
 $ErrorActionPreference = "Stop"
 
+Write-Host "Ban thuong mai da tat Telegram local tren may khach."
+Write-Host "Neu can bot Telegram, hay chuyen no sang server rieng cua admin."
+exit 1
+
 $projectRoot = $PSScriptRoot
 $venvActivate = Join-Path $projectRoot ".venv\Scripts\Activate.ps1"
 $tokenFile = Join-Path $projectRoot "telegram_bot_token.txt"

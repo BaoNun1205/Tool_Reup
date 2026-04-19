@@ -8,10 +8,20 @@ version = "0.1.0"
 description = "MVP auto TikTok video editor for product overlay workflows"
 readme = "README.md"
 requires-python = ">=3.8"
-dependencies = []
+dependencies = [
+  "PyNaCl>=1.5,<2",
+]
+
+[project.optional-dependencies]
+build = [
+  "Nuitka>=2.7,<3",
+  "ordered-set>=4.1,<5",
+  "zstandard>=0.22,<1; platform_system == 'Windows'",
+]
 
 [project.scripts]
 auto-tiktok-editor = "auto_tiktok_editor.cli:main"
+auto-tiktok-editor-commercial = "auto_tiktok_editor.commercial_entry:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

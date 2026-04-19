@@ -18,6 +18,7 @@ from auto_tiktok_editor.exceptions import EditorError, SessionValidationError
 
 
 EventCallback = Optional[Callable[[SessionEvent], None]]
+LicenseCheckpoint = Optional[Callable[[], None]]
 
 
 class ItemPipelineRunner(object):
@@ -25,11 +26,13 @@ class ItemPipelineRunner(object):
         self,
         config: Optional[PipelineConfig] = None,
         services: Optional[PipelineServices] = None,
+        license_checkpoint: LicenseCheckpoint = None,
         logger: Optional[logging.Logger] = None,
     ):
         self.config = config or PipelineConfig.from_env()
         self.logger = logger or logging.getLogger("auto_tiktok_editor")
         self.services = services or build_default_services(self.config)
+        self.license_checkpoint = license_checkpoint
 
     def run(
         self,
@@ -260,6 +263,7 @@ class ItemPipelineRunner(object):
         stage: str,
         event_callback: EventCallback,
     ) -> None:
+        self._checkpoint_license()
         recorder.transition(stage)
         self._emit(
             event_callback,
@@ -310,6 +314,10 @@ class ItemPipelineRunner(object):
         if callback is not None:
             callback(event)
 
+    def _checkpoint_license(self) -> None:
+        if self.license_checkpoint is not None:
+            self.license_checkpoint()
+
 
 class SessionOrchestrator(object):
     def __init__(
@@ -318,13 +326,20 @@ class SessionOrchestrator(object):
         services: Optional[PipelineServices] = None,
         session_validator: Optional[SessionValidator] = None,
         item_runner: Optional[ItemPipelineRunner] = None,
+        license_checkpoint: LicenseCheckpoint = None,
         logger: Optional[logging.Logger] = None,
     ):
         self.config = config or PipelineConfig.from_env()
         self.logger = logger or logging.getLogger("auto_tiktok_editor")
         self.services = services or build_default_services(self.config)
         self.session_validator = session_validator or SessionValidator(self.services.validator, self.config)
-        self.item_runner = item_runner or ItemPipelineRunner(self.config, self.services, logger=self.logger)
+        self.license_checkpoint = license_checkpoint
+        self.item_runner = item_runner or ItemPipelineRunner(
+            self.config,
+            self.services,
+            license_checkpoint=license_checkpoint,
+            logger=self.logger,
+        )
         self._last_session_cookies_file = None
 
     def run(
@@ -349,6 +364,7 @@ class SessionOrchestrator(object):
             ),
         )
         try:
+            self._checkpoint_license()
             recorder.transition("validating_session")
             self._emit(
                 event_callback,
@@ -361,6 +377,7 @@ class SessionOrchestrator(object):
                 ),
             )
             validated_session = self.session_validator.validate(session_spec)
+            self._checkpoint_license()
             self._last_session_cookies_file = validated_session.session_spec.cookies_file
             for warning in validated_session.warnings:
                 recorder.warning(warning)
@@ -827,3 +844,7 @@ class SessionOrchestrator(object):
     def _emit(self, callback: EventCallback, event: SessionEvent) -> None:
         if callback is not None:
             callback(event)
+
+    def _checkpoint_license(self) -> None:
+        if self.license_checkpoint is not None:
+            self.license_checkpoint()

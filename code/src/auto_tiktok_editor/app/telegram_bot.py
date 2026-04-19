@@ -18,6 +18,7 @@ from urllib.request import Request, urlopen
 import uuid
 
 from auto_tiktok_editor.app.orchestrator import SessionOrchestrator
+from auto_tiktok_editor.commercial_runtime import ensure_local_telegram_allowed
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import SessionItemSpec, SessionSpec
 
@@ -155,11 +156,16 @@ class TelegramJobRunner(object):
         self,
         config: Optional[PipelineConfig] = None,
         orchestrator: Optional[SessionOrchestrator] = None,
+        license_checkpoint=None,
         logger: Optional[logging.Logger] = None,
     ):
         self.config = config or PipelineConfig.from_env()
         self.logger = logger or logging.getLogger("auto_tiktok_editor.telegram")
-        self.orchestrator = orchestrator or SessionOrchestrator(config=self.config, logger=self.logger)
+        self.orchestrator = orchestrator or SessionOrchestrator(
+            config=self.config,
+            license_checkpoint=license_checkpoint,
+            logger=self.logger,
+        )
 
     def run(self, chat_id: int, source_video_url: str, product_image_path: Path) -> TelegramJobResult:
         session_spec = SessionSpec(
@@ -202,24 +208,38 @@ class TelegramBotService(object):
         config: Optional[PipelineConfig] = None,
         client: Optional[TelegramBotClient] = None,
         job_runner: Optional[TelegramJobRunner] = None,
+        runtime_checkpoint=None,
         logger: Optional[logging.Logger] = None,
         executor: Optional[ThreadPoolExecutor] = None,
     ):
         self.config = config or PipelineConfig.from_env()
+        ensure_local_telegram_allowed(self.config, surface="telegram-bot-service")
         self.logger = logger or logging.getLogger("auto_tiktok_editor.telegram")
         self.client = client or TelegramBotClient(self.config.telegram_bot_token, logger=self.logger)
-        self.job_runner = job_runner or TelegramJobRunner(self.config, logger=self.logger)
+        self.runtime_checkpoint = runtime_checkpoint
+        self.job_runner = job_runner or TelegramJobRunner(
+            self.config,
+            license_checkpoint=runtime_checkpoint,
+            logger=self.logger,
+        )
         self.executor = executor or ThreadPoolExecutor(
             max_workers=max(1, int(self.config.max_parallel_session_items)),
             thread_name_prefix="telegram-job",
         )
         self._chat_states = {}  # type: Dict[int, TelegramConversationState]
         self._state_lock = threading.Lock()
+        self._stop_event = threading.Event()
 
     def serve_forever(self) -> None:
         offset = None
         self.logger.info("Telegram bot worker started.")
-        while True:
+        while not self._stop_event.is_set():
+            if self.runtime_checkpoint is not None:
+                try:
+                    self.runtime_checkpoint()
+                except Exception as exc:
+                    self.logger.error("Telegram bot stopped because the runtime license check failed: %s", exc)
+                    break
             try:
                 updates = self.client.get_updates(offset=offset, timeout_seconds=self.config.telegram_poll_timeout_seconds)
                 for update in updates:
@@ -227,9 +247,16 @@ class TelegramBotService(object):
                     if update_id is not None:
                         offset = int(update_id) + 1
                     self.handle_update(update)
+            except KeyboardInterrupt:
+                raise
             except Exception as exc:
                 self.logger.exception("Telegram polling loop failed: %s", exc)
+                if self._stop_event.is_set():
+                    break
                 time.sleep(max(1, int(self.config.telegram_poll_interval_seconds)))
+
+    def stop(self) -> None:
+        self._stop_event.set()
 
     def handle_update(self, update: Dict[str, object]) -> None:
         message = update.get("message") or update.get("edited_message")

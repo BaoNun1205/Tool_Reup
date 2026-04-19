@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 import logging
 import os
 from pathlib import Path
@@ -16,8 +17,13 @@ from typing import Dict, List, Optional
 from auto_tiktok_editor.app.orchestrator import SessionOrchestrator
 from auto_tiktok_editor.app.telegram_bot import TelegramBotService
 from auto_tiktok_editor.app.telegram_delivery import TelegramDeliveryService
+from auto_tiktok_editor.commercial_runtime import configure_tk_environment, ensure_runtime_allowed
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import SessionEvent, SessionItemSpec, SessionResult, SessionSpec
+from auto_tiktok_editor.license.guard import LicenseGuard
+from auto_tiktok_editor.license.models import VerifiedLicenseSession
+from auto_tiktok_editor.telegram_settings import TelegramRuntimeSettings, clear_telegram_runtime_settings, save_telegram_runtime_settings
+from auto_tiktok_editor.ui.license_dialog import ensure_ui_license_session
 
 
 STAGE_LABELS = {
@@ -83,6 +89,12 @@ STATUS_COLORS = {
 SUPPORTED_BULK_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
 
 
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 @dataclass
 class SessionRowWidgets:
     row_id: str
@@ -107,11 +119,25 @@ class SessionRowWidgets:
 
 
 class EditorApplication(object):
-    def __init__(self, root: tk.Tk, config: Optional[PipelineConfig] = None, orchestrator: Optional[SessionOrchestrator] = None, logger: Optional[logging.Logger] = None):
+    def __init__(
+        self,
+        root: tk.Tk,
+        config: Optional[PipelineConfig] = None,
+        orchestrator: Optional[SessionOrchestrator] = None,
+        logger: Optional[logging.Logger] = None,
+        license_guard: Optional[LicenseGuard] = None,
+        license_session: Optional[VerifiedLicenseSession] = None,
+    ):
         self.root = root
         self.config = config or PipelineConfig.from_env()
-        self.orchestrator = orchestrator or SessionOrchestrator(self.config)
         self.logger = logger or logging.getLogger("auto_tiktok_editor.ui")
+        self.license_guard = license_guard
+        self.license_session = license_session
+        self.orchestrator = orchestrator or SessionOrchestrator(
+            self.config,
+            license_checkpoint=self._license_runtime_checkpoint if self.license_guard is not None else None,
+            logger=self.logger,
+        )
         self.event_queue = queue.Queue()
         self.session_rerun_queue = queue.Queue()
         self.rows: List[SessionRowWidgets] = []
@@ -120,13 +146,22 @@ class EditorApplication(object):
         self.latest_result: Optional[SessionResult] = None
         self.current_session_dir: Optional[str] = None
         self.review_ready = False
+        self.reauthenticate_requested = False
+        self.license_reauthentication_required = False
+        self.license_warning_message = ""
         self.bulk_import_window: Optional[tk.Toplevel] = None
         self.telegram_bot_service = None  # type: Optional[TelegramBotService]
         self.telegram_bot_thread = None  # type: Optional[threading.Thread]
         self.telegram_delivery = None  # type: Optional[TelegramDeliveryService]
+        self.telegram_token_entry = None
+        self.telegram_chat_id_entry = None
+        self.telegram_status_label = None
         self.session_name_var = tk.StringVar()
         self.output_root_var = tk.StringVar(value=str(self.config.default_output_root))
+        self.telegram_bot_token_var = tk.StringVar(value=str(self.config.telegram_bot_token or ""))
         self.telegram_chat_id_var = tk.StringVar(value=str(self.config.telegram_delivery_chat_id or ""))
+        self.telegram_status_var = tk.StringVar(value=self._telegram_status_text())
+        self.license_summary_var = tk.StringVar(value=self._license_summary_text())
         self.session_status_var = tk.StringVar(value=STATUS_LABELS["draft"])
         self.session_detail_var = tk.StringVar(value="Tạo danh sách item rồi bấm Chạy session.")
         self.summary_counts_var = tk.StringVar(value="0 item | 0 hoàn tất | 0 lỗi")
@@ -134,10 +169,16 @@ class EditorApplication(object):
         self._configure_window()
         self._build_styles()
         self._build_layout()
-        self.finalize_button.configure(text="Gửi qua Telegram", command=self._send_session_via_telegram)
-        self._start_embedded_telegram_bot_if_configured()
+        if self._supports_local_telegram_configuration():
+            self.finalize_button.configure(text="Gửi qua Telegram", command=self._send_session_via_telegram)
+            self._start_embedded_telegram_bot_if_configured()
         self._add_row()
         self.root.after(self.config.ui_poll_interval_ms, self._poll_events)
+        if self.license_guard is not None:
+            self.root.after(
+                max(30, int(self.license_guard.config.heartbeat_interval_seconds)) * 1000,
+                self._poll_license_heartbeat,
+            )
 
     def _configure_window(self) -> None:
         self.root.title("Auto TikTok Video Editor")
@@ -146,10 +187,18 @@ class EditorApplication(object):
         self.root.configure(bg=PALETTE["bg"])
 
     def _start_embedded_telegram_bot_if_configured(self) -> None:
-        if not self.config.telegram_bot_token or self.telegram_bot_thread is not None:
+        runtime_config = self._runtime_telegram_config()
+        if not runtime_config.allow_local_telegram:
             return
+        if not runtime_config.telegram_bot_token or self.telegram_bot_thread is not None:
+            return
+        license_guard = getattr(self, "license_guard", None)
         try:
-            self.telegram_bot_service = TelegramBotService(config=self.config, logger=self.logger)
+            self.telegram_bot_service = TelegramBotService(
+                config=runtime_config,
+                runtime_checkpoint=self._license_runtime_checkpoint if license_guard is not None else None,
+                logger=self.logger,
+            )
         except Exception as exc:
             self.logger.exception("Unable to start embedded Telegram bot.")
             self._append_log("Không thể khởi động bot Telegram nền: %s" % exc)
@@ -160,7 +209,81 @@ class EditorApplication(object):
             name="auto-editor-telegram-bot",
         )
         self.telegram_bot_thread.start()
+        if hasattr(self, "telegram_status_var"):
+            self.telegram_status_var.set("Bot Telegram riêng của bạn đang chạy nền.")
         self._append_log("Bot Telegram nền đã được khởi động cùng UI.")
+
+    def _supports_local_telegram_configuration(self) -> bool:
+        return bool(self.config.allow_local_telegram or self.config.commercial_mode or self.config.telegram_bot_token)
+
+    def _runtime_telegram_config(self) -> PipelineConfig:
+        bot_token = self.telegram_bot_token_var.get().strip() if hasattr(self, "telegram_bot_token_var") else str(self.config.telegram_bot_token or "").strip()
+        delivery_chat_id = self.telegram_chat_id_var.get().strip() if hasattr(self, "telegram_chat_id_var") else str(self.config.telegram_delivery_chat_id or "").strip()
+        allowed_chat_ids = ()
+        if delivery_chat_id:
+            try:
+                allowed_chat_ids = (int(delivery_chat_id),)
+            except ValueError:
+                allowed_chat_ids = ()
+        return replace(
+            self.config,
+            allow_local_telegram=bool(bot_token),
+            telegram_bot_token=bot_token,
+            telegram_delivery_chat_id=delivery_chat_id,
+            telegram_allowed_chat_ids=allowed_chat_ids,
+        )
+
+    def _telegram_status_text(self) -> str:
+        if self.config.telegram_bot_token:
+            if getattr(self, "telegram_bot_thread", None) is not None:
+                return "Bot Telegram riêng của bạn đang chạy nền."
+            return "Đã có cấu hình Telegram riêng. App sẽ tự khởi động bot khi mở."
+        return "Nhập bot token và chat ID của riêng bạn để bật Telegram trên máy này."
+
+    def _save_telegram_settings(self) -> None:
+        token = self.telegram_bot_token_var.get().strip()
+        delivery_chat_id = self.telegram_chat_id_var.get().strip()
+        if not token:
+            clear_telegram_runtime_settings()
+            self.config = replace(
+                self.config,
+                allow_local_telegram=False,
+                telegram_bot_token="",
+                telegram_delivery_chat_id="",
+                telegram_allowed_chat_ids=(),
+            )
+            self._stop_embedded_telegram_bot()
+            self.telegram_status_var.set("Đã tắt Telegram riêng trên máy này.")
+            self._append_log("Đã xóa cấu hình Telegram riêng khỏi máy này.")
+            return
+        if self._normalize_telegram_chat_id(delivery_chat_id) is None:
+            messagebox.showerror("Telegram Chat ID chưa hợp lệ", "Nhập Telegram Chat ID dạng số nguyên hợp lệ.")
+            return
+        save_telegram_runtime_settings(
+            TelegramRuntimeSettings(
+                bot_token=token,
+                delivery_chat_id=delivery_chat_id,
+            )
+        )
+        self.config = self._runtime_telegram_config()
+        self.telegram_status_var.set("Đã lưu cấu hình Telegram riêng. Bot sẽ được khởi động trên máy này.")
+        self._append_log("Đã lưu cấu hình Telegram riêng cho khách hàng hiện tại.")
+        self._restart_embedded_telegram_bot()
+
+    def _stop_embedded_telegram_bot(self) -> None:
+        if self.telegram_bot_service is not None:
+            try:
+                self.telegram_bot_service.stop()
+            except Exception:
+                self.logger.exception("Unable to stop embedded Telegram bot cleanly.")
+        if self.telegram_bot_thread is not None and self.telegram_bot_thread.is_alive():
+            self.telegram_bot_thread.join(timeout=1.0)
+        self.telegram_bot_service = None
+        self.telegram_bot_thread = None
+
+    def _restart_embedded_telegram_bot(self) -> None:
+        self._stop_embedded_telegram_bot()
+        self._start_embedded_telegram_bot_if_configured()
 
     def _build_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -206,7 +329,11 @@ class EditorApplication(object):
 
         hero = ttk.Frame(outer, style="Hero.TFrame", padding=26)
         hero.pack(fill="x")
-        ttk.Label(hero, text="Auto TikTok Video Editor", style="HeroTitle.TLabel").pack(anchor="w")
+        hero_header = ttk.Frame(hero, style="Hero.TFrame")
+        hero_header.pack(fill="x")
+        ttk.Label(hero_header, text="Auto TikTok Video Editor", style="HeroTitle.TLabel").pack(side="left", anchor="w")
+        self.logout_button = ttk.Button(hero_header, text="Đăng xuất", style="Secondary.TButton", command=self._logout_and_relogin)
+        self.logout_button.pack(side="right", anchor="e")
         ttk.Label(
             hero,
             text="Nhập nhiều cặp link TikTok và ảnh sản phẩm, rồi chạy session tuần tự với trạng thái rõ cho từng item.",
@@ -214,6 +341,15 @@ class EditorApplication(object):
             wraplength=920,
             justify="left",
         ).pack(anchor="w", pady=(10, 0))
+
+        if self.license_session is not None:
+            ttk.Label(
+                hero,
+                textvariable=self.license_summary_var,
+                style="HeroText.TLabel",
+                wraplength=920,
+                justify="left",
+            ).pack(anchor="w", pady=(12, 0))
 
         body = ttk.Panedwindow(outer, orient="horizontal")
         body.pack(fill="both", expand=True, pady=(18, 0))
@@ -263,6 +399,7 @@ class EditorApplication(object):
         container = ttk.Frame(parent, style="Card.TFrame")
         container.pack(fill="both", expand=True)
         canvas = tk.Canvas(container, background=PALETTE["card"], highlightthickness=0, bd=0)
+        self.rows_canvas = canvas
         scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
         self.rows_host = ttk.Frame(canvas, style="Card.TFrame")
         self.rows_host.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
@@ -271,33 +408,64 @@ class EditorApplication(object):
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
         canvas.bind("<Configure>", lambda event: canvas.itemconfigure(self.rows_window_id, width=event.width))
+        self._bind_rows_mousewheel(canvas)
+        self._bind_rows_mousewheel(self.rows_host)
 
     def _build_summary_panel(self, parent: ttk.Frame) -> None:
-        summary = ttk.LabelFrame(parent, text="Tổng quan session", style="Panel.TLabelframe", padding=16)
+        summary = ttk.LabelFrame(parent, text="Tổng quan session", style="Panel.TLabelframe", padding=0)
         summary.pack(fill="both", expand=True)
-        ttk.Label(summary, text="Trạng thái session", style="Head.TLabel").pack(anchor="w")
-        self.session_chip = tk.Label(summary, text=STATUS_LABELS["draft"], font=("Segoe UI Semibold", 9, "bold"), padx=14, pady=7, bd=0)
-        self.session_chip.pack(anchor="w", pady=(8, 0))
-        self._set_chip_style(self.session_chip, "draft")
-        ttk.Label(summary, textvariable=self.session_detail_var, style="Body.TLabel", wraplength=360, justify="left").pack(anchor="w", pady=(10, 0))
-        ttk.Label(summary, text="Tổng quan", style="Head.TLabel").pack(anchor="w", pady=(18, 0))
-        ttk.Label(summary, textvariable=self.summary_counts_var, style="Body.TLabel").pack(anchor="w", pady=(8, 0))
-        ttk.Label(summary, text="Output session", style="Head.TLabel").pack(anchor="w", pady=(18, 0))
-        ttk.Label(summary, textvariable=self.summary_path_var, style="Body.TLabel", wraplength=360, justify="left").pack(anchor="w", pady=(8, 0))
-        ttk.Label(summary, text="Telegram Chat ID", style="Head.TLabel").pack(anchor="w", pady=(18, 0))
-        self.telegram_chat_id_entry = ttk.Entry(summary, textvariable=self.telegram_chat_id_var)
-        self.telegram_chat_id_entry.pack(fill="x", pady=(8, 0))
-        action_row = ttk.Frame(summary, style="Card.TFrame")
+        container = ttk.Frame(summary, style="Card.TFrame")
+        container.pack(fill="both", expand=True)
+        canvas = tk.Canvas(container, background=PALETTE["card"], highlightthickness=0, bd=0)
+        self.summary_canvas = canvas
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        self.summary_host = ttk.Frame(canvas, style="Card.TFrame", padding=16)
+        self.summary_host.bind("<Configure>", lambda event: canvas.configure(scrollregion=canvas.bbox("all")))
+        self.summary_window_id = canvas.create_window((0, 0), window=self.summary_host, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(self.summary_window_id, width=event.width))
+        self._bind_summary_mousewheel(canvas)
+        self._bind_summary_mousewheel(self.summary_host)
+        self.session_chip = None
+        ttk.Label(self.summary_host, text="Tổng quan", style="Head.TLabel").pack(anchor="w")
+        ttk.Label(self.summary_host, textvariable=self.summary_counts_var, style="Body.TLabel").pack(anchor="w", pady=(8, 0))
+        ttk.Label(self.summary_host, text="Output session", style="Head.TLabel").pack(anchor="w", pady=(18, 0))
+        ttk.Label(self.summary_host, textvariable=self.summary_path_var, style="Body.TLabel", wraplength=360, justify="left").pack(anchor="w", pady=(8, 0))
+        if self._supports_local_telegram_configuration():
+            ttk.Label(self.summary_host, text="Telegram Bot Token", style="Head.TLabel").pack(anchor="w", pady=(18, 0))
+            self.telegram_token_entry = ttk.Entry(self.summary_host, textvariable=self.telegram_bot_token_var)
+            self.telegram_token_entry.pack(fill="x", pady=(8, 0))
+            ttk.Label(self.summary_host, text="Telegram Chat ID", style="Head.TLabel").pack(anchor="w", pady=(14, 0))
+            self.telegram_chat_id_entry = ttk.Entry(self.summary_host, textvariable=self.telegram_chat_id_var)
+            self.telegram_chat_id_entry.pack(fill="x", pady=(8, 0))
+            ttk.Button(
+                self.summary_host,
+                text="Lưu cấu hình Telegram",
+                style="Secondary.TButton",
+                command=self._save_telegram_settings,
+            ).pack(anchor="w", pady=(12, 0))
+            self.telegram_status_label = ttk.Label(
+                self.summary_host,
+                textvariable=self.telegram_status_var,
+                style="Body.TLabel",
+                wraplength=360,
+                justify="left",
+            )
+            self.telegram_status_label.pack(anchor="w", pady=(10, 0))
+        action_row = ttk.Frame(self.summary_host, style="Card.TFrame")
         action_row.pack(fill="x", pady=(10, 0))
         action_row.columnconfigure(0, weight=1)
+        action_row.columnconfigure(1, weight=1)
         self.open_session_button = ttk.Button(action_row, text="Mở thư mục session", style="Secondary.TButton", command=lambda: self._open_path(self.current_session_dir), state="disabled")
         self.open_session_button.grid(row=0, column=0, sticky="w")
         self.finalize_button = ttk.Button(action_row, text="OK lưu vào output", style="Primary.TButton", command=self._approve_session_outputs, state="disabled")
         self.finalize_button.grid(row=0, column=1, sticky="e")
 
-        log_box = ttk.LabelFrame(summary, text="Nhật ký hoạt động", style="Panel.TLabelframe", padding=14)
-        log_box.pack(fill="both", expand=True, pady=(18, 0))
-        self.log_text = tk.Text(log_box, height=14, wrap="word", relief="flat", bg=PALETTE["log_bg"], fg=PALETTE["text"], insertbackground=PALETTE["text"], font=("Consolas", 10), padx=12, pady=12)
+        log_box = ttk.LabelFrame(self.summary_host, text="Nhật ký hoạt động", style="Panel.TLabelframe", padding=14)
+        log_box.pack(fill="x", expand=True, pady=(18, 0))
+        self.log_text = tk.Text(log_box, height=20, wrap="word", relief="flat", bg=PALETTE["log_bg"], fg=PALETTE["text"], insertbackground=PALETTE["text"], font=("Consolas", 10), padx=12, pady=12)
         self.log_text.pack(fill="both", expand=True)
         self.log_text.configure(state="disabled")
     def _add_row(self) -> None:
@@ -358,6 +526,7 @@ class EditorApplication(object):
         self._set_chip_style(status_chip, "draft")
 
         self.rows.append(SessionRowWidgets(row_id, frame, index_var, url_var, image_var, opacity_var, opacity_label_var, status_var, detail_var, url_entry, image_entry, opacity_scale, browse_button, remove_button, open_button, rerun_button, status_chip))
+        self._bind_rows_mousewheel(frame)
         self._renumber_rows()
 
     def _remove_row(self, row_id: str) -> None:
@@ -662,6 +831,10 @@ class EditorApplication(object):
         threading.Thread(target=self._finalize_session_worker, daemon=True).start()
 
     def _send_session_via_telegram(self) -> None:
+        runtime_config = self._runtime_telegram_config()
+        if not runtime_config.allow_local_telegram:
+            messagebox.showinfo("Chưa cấu hình Telegram", "Nhập bot token và chat ID của riêng bạn rồi bấm Lưu cấu hình Telegram trước khi gửi.")
+            return
         if self.running or self.latest_result is None or not self.review_ready:
             return
         chat_id = self._normalize_telegram_chat_id(self.telegram_chat_id_var.get())
@@ -670,12 +843,11 @@ class EditorApplication(object):
             return
         self._set_running_state(True)
         self._set_session_status("running", "Đang gửi các video đã duyệt qua Telegram.")
-        threading.Thread(target=self._send_session_via_telegram_worker, args=(chat_id,), daemon=True).start()
+        threading.Thread(target=self._send_session_via_telegram_worker, args=(chat_id, runtime_config), daemon=True).start()
 
-    def _send_session_via_telegram_worker(self, chat_id: int) -> None:
+    def _send_session_via_telegram_worker(self, chat_id: int, runtime_config: PipelineConfig) -> None:
         try:
-            if self.telegram_delivery is None:
-                self.telegram_delivery = TelegramDeliveryService(self.config, logger=self.logger)
+            self.telegram_delivery = TelegramDeliveryService(runtime_config, logger=self.logger)
             payload = self.telegram_delivery.send_session_result(self.latest_result, chat_id)
             self._queue_event(SessionEvent(event_type="telegram_delivery_result", payload=payload))
         except Exception as exc:
@@ -748,7 +920,10 @@ class EditorApplication(object):
         self.output_root_entry.configure(state=state)
         self.output_browse_button.configure(state=state)
         self.session_name_entry.configure(state=state)
-        self.telegram_chat_id_entry.configure(state=state)
+        if self.telegram_token_entry is not None:
+            self.telegram_token_entry.configure(state=state)
+        if self.telegram_chat_id_entry is not None:
+            self.telegram_chat_id_entry.configure(state=state)
         for row in self.rows:
             row.url_entry.configure(state=state)
             row.image_entry.configure(state=state)
@@ -782,6 +957,24 @@ class EditorApplication(object):
                 break
             self._handle_event(event)
         self.root.after(self.config.ui_poll_interval_ms, self._poll_events)
+
+    def _poll_license_heartbeat(self) -> None:
+        if self.license_guard is None:
+            return
+        if self.license_reauthentication_required:
+            return
+        try:
+            session = self.license_guard.heartbeat()
+            self.license_session = session
+            self.license_summary_var.set(self._license_summary_text())
+        except Exception as exc:
+            self.logger.exception("License heartbeat failed.")
+            self._handle_runtime_license_invalid(str(exc))
+            return
+        self.root.after(
+            max(30, int(self.license_guard.config.heartbeat_interval_seconds)) * 1000,
+            self._poll_license_heartbeat,
+        )
 
     def _handle_event(self, event: SessionEvent) -> None:
         if event.event_type == "session_started":
@@ -840,6 +1033,10 @@ class EditorApplication(object):
             self._append_log("Session completed.")
             return
         if event.event_type == "session_failed":
+            if self._should_reauthenticate_from_message(event.message):
+                self._append_log("Session yêu cầu đăng nhập lại: %s" % (event.message or ""))
+                self._handle_runtime_license_invalid(event.message or "Phiên đăng nhập hiện tại không còn hợp lệ.")
+                return
             self._set_session_status("failed_session", event.message or "Session thất bại.")
             self._append_log("Session failed: %s" % (event.message or ""))
             return
@@ -947,8 +1144,9 @@ class EditorApplication(object):
     def _set_session_status(self, status: str, detail: str) -> None:
         self.session_status_var.set(STATUS_LABELS.get(status, status))
         self.session_detail_var.set(detail)
-        self.session_chip.configure(text=self.session_status_var.get())
-        self._set_chip_style(self.session_chip, status)
+        if self.session_chip is not None:
+            self.session_chip.configure(text=self.session_status_var.get())
+            self._set_chip_style(self.session_chip, status)
 
     def _set_chip_style(self, widget: tk.Label, status: str) -> None:
         bg, fg = STATUS_COLORS.get(status, STATUS_COLORS["draft"])
@@ -1021,10 +1219,150 @@ class EditorApplication(object):
             return None
         return self.rows[index] if 0 <= index < len(self.rows) else None
 
+    def _bind_rows_mousewheel(self, widget: tk.Widget) -> None:
+        widget.bind("<MouseWheel>", self._on_rows_mousewheel, add="+")
+        widget.bind("<Button-4>", self._on_rows_mousewheel, add="+")
+        widget.bind("<Button-5>", self._on_rows_mousewheel, add="+")
+        for child in widget.winfo_children():
+            self._bind_rows_mousewheel(child)
 
-def launch_ui(config: Optional[PipelineConfig] = None) -> int:
-    root = tk.Tk()
-    EditorApplication(root, config=config)
-    root.mainloop()
-    return 0
+    def _on_rows_mousewheel(self, event: tk.Event) -> str:
+        canvas = getattr(self, "rows_canvas", None)
+        if canvas is None:
+            return "break"
+        if getattr(event, "num", None) == 4:
+            delta = -1
+        elif getattr(event, "num", None) == 5:
+            delta = 1
+        else:
+            raw_delta = getattr(event, "delta", 0)
+            if raw_delta == 0:
+                return "break"
+            delta = -1 * int(raw_delta / 120) if abs(raw_delta) >= 120 else (-1 if raw_delta > 0 else 1)
+        canvas.yview_scroll(delta, "units")
+        return "break"
+
+    def _bind_summary_mousewheel(self, widget: tk.Widget) -> None:
+        widget.bind("<MouseWheel>", self._on_summary_mousewheel, add="+")
+        widget.bind("<Button-4>", self._on_summary_mousewheel, add="+")
+        widget.bind("<Button-5>", self._on_summary_mousewheel, add="+")
+        for child in widget.winfo_children():
+            self._bind_summary_mousewheel(child)
+
+    def _on_summary_mousewheel(self, event: tk.Event) -> str:
+        canvas = getattr(self, "summary_canvas", None)
+        if canvas is None:
+            return "break"
+        if getattr(event, "num", None) == 4:
+            delta = -1
+        elif getattr(event, "num", None) == 5:
+            delta = 1
+        else:
+            raw_delta = getattr(event, "delta", 0)
+            if raw_delta == 0:
+                return "break"
+            delta = -1 * int(raw_delta / 120) if abs(raw_delta) >= 120 else (-1 if raw_delta > 0 else 1)
+        canvas.yview_scroll(delta, "units")
+        return "break"
+
+    def _logout_and_relogin(self) -> None:
+        if self.license_guard is not None:
+            try:
+                self.license_guard.logout()
+            except Exception:
+                self.logger.exception("Logout failed.")
+        self._stop_embedded_telegram_bot()
+        self.reauthenticate_requested = True
+        self.root.destroy()
+
+    def _handle_runtime_license_invalid(self, reason: str) -> None:
+        if self.license_reauthentication_required:
+            return
+        self.license_reauthentication_required = True
+        self.license_warning_message = reason
+        self.running = False
+        self._stop_embedded_telegram_bot()
+        self._set_session_status("failed_session", reason)
+        self._append_log("License/runtime check failed: %s" % reason)
+        self.run_button.configure(state="disabled")
+        self.finalize_button.configure(state="disabled")
+        self.bulk_import_button.configure(state="disabled")
+        self.add_row_button.configure(state="disabled")
+        self.output_root_entry.configure(state="disabled")
+        self.output_browse_button.configure(state="disabled")
+        self.session_name_entry.configure(state="disabled")
+        if self.telegram_token_entry is not None:
+            self.telegram_token_entry.configure(state="disabled")
+        if self.telegram_chat_id_entry is not None:
+            self.telegram_chat_id_entry.configure(state="disabled")
+        for row in self.rows:
+            row.url_entry.configure(state="disabled")
+            row.image_entry.configure(state="disabled")
+            row.opacity_scale.configure(state="disabled")
+            row.browse_button.configure(state="disabled")
+            row.remove_button.configure(state="disabled")
+            row.rerun_button.configure(state="disabled")
+        messagebox.showwarning(
+            "Phiên đã hết hiệu lực",
+            "Tài khoản hiện tại đã bị khóa, hết hạn, hoặc không còn hợp lệ.\n\nChi tiết: %s\n\nBấm 'Đăng xuất' để đăng nhập lại." % reason,
+        )
+
+    def _license_runtime_checkpoint(self) -> None:
+        if self.license_guard is None:
+            return
+        self.license_session = self.license_guard.heartbeat()
+
+    def _should_reauthenticate_from_message(self, message: Optional[str]) -> bool:
+        normalized = str(message or "").strip().lower()
+        if not normalized:
+            return False
+        triggers = (
+            "đăng nhập lại",
+            "không còn hợp lệ",
+            "invalid access token signature",
+            "access token expired",
+            "session is no longer active",
+            "session expired",
+            "license has expired",
+        )
+        return any(trigger in normalized for trigger in triggers)
+
+    def _redirect_to_login(self, reason: str) -> None:
+        self.reauthenticate_requested = True
+        self.running = False
+        messagebox.showwarning(
+            "Cần đăng nhập lại",
+            "Phiên sử dụng hiện tại không còn hợp lệ.\n\nChi tiết: %s" % reason,
+        )
+        self.root.destroy()
+
+    def _license_summary_text(self) -> str:
+        if self.license_session is None:
+            return "Chua co phien dang nhap."
+        license_expires_at = _as_utc(self.license_session.license_expires_at)
+        remaining = license_expires_at - datetime.now(timezone.utc)
+        remaining_days = max(0, int((remaining.total_seconds() + 86399) // 86400))
+        expires_label = license_expires_at.strftime("%d/%m/%Y")
+        return "Tài khoản: %s | Gói: %s | Còn %s ngày | Hết hạn: %s" % (
+            self.license_session.username,
+            self.license_session.plan_name,
+            remaining_days,
+            expires_label,
+        )
+
+
+def launch_ui(config: Optional[PipelineConfig] = None, license_guard: Optional[LicenseGuard] = None) -> int:
+    runtime_config = config or PipelineConfig.from_env()
+    ensure_runtime_allowed(runtime_config, surface="ui")
+    configure_tk_environment()
+    guard = license_guard or LicenseGuard()
+    while True:
+        session = ensure_ui_license_session(guard, logger=logging.getLogger("auto_tiktok_editor.license_ui"))
+        if session is None:
+            return 1
+        root = tk.Tk()
+        app = EditorApplication(root, config=runtime_config, license_guard=guard, license_session=session)
+        root.mainloop()
+        if getattr(app, "reauthenticate_requested", False) is not True:
+            return 0
 
