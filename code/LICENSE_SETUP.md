@@ -103,8 +103,22 @@ Biến môi trường tối thiểu trên Render:
 - `AUTO_EDITOR_LICENSE_PUBLIC_BASE_URL`
 - `AUTO_EDITOR_LICENSE_SIGNING_SEED_B64`
 - `AUTO_EDITOR_LICENSE_ADMIN_SESSION_SECRET`
+- `AUTO_EDITOR_BOOTSTRAP_ADMIN_USERNAME`
+- `AUTO_EDITOR_BOOTSTRAP_ADMIN_PASSWORD`
 
 `AUTO_EDITOR_LICENSE_SIGNING_SEED_B64` phải là giá trị cố định trong production. Không được để server tự sinh seed mỗi lần restart.
+
+Nếu máy local không kết nối được tới Supabase Postgres, bạn có thể bootstrap admin ngay trên Render bằng 2 biến:
+
+```text
+AUTO_EDITOR_BOOTSTRAP_ADMIN_USERNAME=baonun1205
+AUTO_EDITOR_BOOTSTRAP_ADMIN_PASSWORD=Bb@120503
+```
+
+Khi service khởi động, server sẽ tự:
+
+- tạo admin nếu chưa tồn tại
+- hoặc cập nhật lại tài khoản đó thành admin đang active với mật khẩu mới nhất từ env
 
 ## UptimeRobot
 

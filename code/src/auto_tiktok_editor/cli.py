@@ -16,6 +16,10 @@ from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import SessionItemSpec, SessionSpec
 
 
+def _requires_license(config: PipelineConfig) -> bool:
+    return bool(config.commercial_mode)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Auto TikTok Editor MVP")
     parser.add_argument("--log-level", default="INFO", help="Python log level")
@@ -64,10 +68,10 @@ def load_session_spec(manifest_path: Path, config: PipelineConfig) -> SessionSpe
 def run_headless_session(manifest_path: Path) -> int:
     config = PipelineConfig.from_env()
     _ensure_runtime_policy(config, "run-session")
-    guard = LicenseGuard()
-    if _require_cached_license_session(guard, "run-session") is None:
+    guard = LicenseGuard() if _requires_license(config) else None
+    if guard is not None and _require_cached_license_session(guard, "run-session") is None:
         return 1
-    orchestrator = SessionOrchestrator(config=config, license_checkpoint=guard.heartbeat)
+    orchestrator = SessionOrchestrator(config=config, license_checkpoint=guard.heartbeat if guard is not None else None)
     result = orchestrator.run(load_session_spec(manifest_path, config))
     print(json.dumps(result.summary, indent=2, ensure_ascii=False))
     return 0 if result.status in ("completed_with_success", "completed_with_partial_failure") else 1
@@ -105,10 +109,10 @@ def main(argv=None) -> int:
 
         _ensure_runtime_policy(config, "telegram-bot")
         _ensure_local_telegram_policy(config, "telegram-bot")
-        guard = LicenseGuard()
-        if _require_cached_license_session(guard, "telegram-bot") is None:
+        guard = LicenseGuard() if _requires_license(config) else None
+        if guard is not None and _require_cached_license_session(guard, "telegram-bot") is None:
             return 1
-        service = TelegramBotService(config=config, runtime_checkpoint=guard.heartbeat)
+        service = TelegramBotService(config=config, runtime_checkpoint=guard.heartbeat if guard is not None else None)
         service.serve_forever()
         return 0
     parser.error("Unknown command.")

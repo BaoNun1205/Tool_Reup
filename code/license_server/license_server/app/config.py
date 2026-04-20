@@ -43,6 +43,8 @@ class LicenseServerConfig:
     admin_session_secret: str = ""
     admin_session_cookie_name: str = "auto_editor_admin_session"
     admin_session_ttl_hours: int = 12
+    bootstrap_admin_username: str = ""
+    bootstrap_admin_password: str = ""
 
     @classmethod
     def from_env(cls) -> "LicenseServerConfig":
@@ -61,6 +63,8 @@ class LicenseServerConfig:
             admin_session_secret=_env_str("AUTO_EDITOR_LICENSE_ADMIN_SESSION_SECRET", ""),
             admin_session_cookie_name=_env_str("AUTO_EDITOR_LICENSE_ADMIN_SESSION_COOKIE_NAME", "auto_editor_admin_session"),
             admin_session_ttl_hours=max(1, _env_int("AUTO_EDITOR_LICENSE_ADMIN_SESSION_TTL_HOURS", 12)),
+            bootstrap_admin_username=_env_str("AUTO_EDITOR_BOOTSTRAP_ADMIN_USERNAME", ""),
+            bootstrap_admin_password=_env_str("AUTO_EDITOR_BOOTSTRAP_ADMIN_PASSWORD", ""),
         )
 
     def load_signing_seed(self) -> Optional[bytes]:

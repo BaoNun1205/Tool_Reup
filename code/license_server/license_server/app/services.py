@@ -89,6 +89,25 @@ class LicenseService:
         self._log_event(event_type="user_created", actor_user_id=record.id, target_type="user", target_id=record.id)
         return record
 
+    def ensure_admin_user(self, username: str, password: str) -> tuple[UserAccount, bool]:
+        normalized_username = username.strip().lower()
+        existing = self.get_user_by_username(normalized_username)
+        if existing is None:
+            return self.create_user(normalized_username, password, is_admin=True), True
+        password_hash, password_salt = hash_password(password)
+        existing.password_hash = password_hash
+        existing.password_salt = password_salt
+        existing.is_admin = True
+        existing.is_active = True
+        self._log_event(
+            event_type="admin_bootstrap_updated",
+            actor_user_id=existing.id,
+            target_type="user",
+            target_id=existing.id,
+            details={"username": normalized_username},
+        )
+        return existing, False
+
     def issue_license(
         self,
         user: UserAccount,

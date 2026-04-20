@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 from auto_tiktok_editor.cli import _require_cached_license_session
+from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.license.config import LicenseClientConfig
 from auto_tiktok_editor.license.exceptions import LicenseAuthenticationRequired
 from auto_tiktok_editor.license.guard import LicenseGuard
@@ -126,6 +127,21 @@ class CliLicenseTests(unittest.TestCase):
 
 
 class LaunchUiTests(unittest.TestCase):
+    def test_launch_ui_skips_license_when_commercial_mode_is_disabled(self):
+        fake_root = mock.Mock()
+        config = PipelineConfig(commercial_mode=False, allow_local_telegram=True, telegram_bot_token="token-demo")
+
+        with mock.patch("auto_tiktok_editor.ui.app.ensure_ui_license_session") as mocked_login:
+            with mock.patch("auto_tiktok_editor.ui.app.tk.Tk", return_value=fake_root) as mocked_tk:
+                with mock.patch("auto_tiktok_editor.ui.app.EditorApplication") as mocked_app:
+                    exit_code = launch_ui(config=config)
+
+        self.assertEqual(exit_code, 0)
+        mocked_login.assert_not_called()
+        mocked_tk.assert_called_once()
+        mocked_app.assert_called_once_with(fake_root, config=config, license_guard=None, license_session=None)
+        fake_root.mainloop.assert_called_once()
+
     def test_launch_ui_returns_non_zero_when_login_dialog_is_cancelled(self):
         with mock.patch("auto_tiktok_editor.ui.app.ensure_ui_license_session", return_value=None):
             with mock.patch("auto_tiktok_editor.ui.app.tk.Tk") as mocked_tk:

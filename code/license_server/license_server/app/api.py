@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import logging
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from sqlalchemy import text
@@ -8,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from license_server.app.admin_web import router as admin_web_router
 from license_server.app.config import LicenseServerConfig
-from license_server.app.database import create_all, get_config, get_db
+from license_server.app.database import create_all, get_config, get_db, session_scope
 from license_server.app.schemas import (
     AdminCreateUserRequest,
     AdminDeviceListResponse,
@@ -32,12 +33,35 @@ from license_server.app.schemas import (
     RefreshRequest,
 )
 from license_server.app.security import TokenSigner, utcnow
-from license_server.app.services import AdminService, AuthError, AuthService, LicenseError
+from license_server.app.services import AdminService, AuthError, AuthService, LicenseError, LicenseService
 
 
 app = FastAPI(title="Auto TikTok Editor License Server", version="0.1.0")
 create_all()
 app.include_router(admin_web_router)
+logger = logging.getLogger("license_server.bootstrap")
+
+
+def _bootstrap_admin_account() -> None:
+    config = get_config()
+    username = config.bootstrap_admin_username.strip()
+    password = config.bootstrap_admin_password
+    if not username or not password:
+        return
+    with session_scope() as db:
+        service = LicenseService(db, config)
+        user, created = service.ensure_admin_user(username, password)
+        logger.warning(
+            "Bootstrap admin %s for username=%s (user_id=%s).",
+            "created" if created else "updated",
+            user.username,
+            user.id,
+        )
+
+
+@app.on_event("startup")
+def startup_bootstrap() -> None:
+    _bootstrap_admin_account()
 
 
 @app.get("/health")

@@ -63,6 +63,8 @@ uvicorn license_server.app.api:app --host 0.0.0.0 --port 8787 --reload
 - `AUTO_EDITOR_LICENSE_SIGNING_SEED_B64`
 - `AUTO_EDITOR_LICENSE_PUBLIC_BASE_URL`
 - `AUTO_EDITOR_LICENSE_ADMIN_SESSION_SECRET`
+- `AUTO_EDITOR_BOOTSTRAP_ADMIN_USERNAME`
+- `AUTO_EDITOR_BOOTSTRAP_ADMIN_PASSWORD`
 
 ## Lưu ý khi dùng Supabase Postgres
 
@@ -75,3 +77,6 @@ uvicorn license_server.app.api:app --host 0.0.0.0 --port 8787 --reload
 - Trên host free như Render, bắt buộc set `AUTO_EDITOR_LICENSE_SIGNING_SEED_B64` cố định
 - Không dựa vào file seed local cho production
 - Nếu không set `AUTO_EDITOR_LICENSE_SIGNING_SEED_B64`, token có thể đổi khóa sau restart
+- Có thể bootstrap admin trực tiếp trên Render bằng:
+  - `AUTO_EDITOR_BOOTSTRAP_ADMIN_USERNAME`
+  - `AUTO_EDITOR_BOOTSTRAP_ADMIN_PASSWORD`

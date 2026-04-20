@@ -1,9 +1,5 @@
 $ErrorActionPreference = "Stop"
 
-Write-Host "Ban thuong mai da tat Telegram local tren may khach."
-Write-Host "Neu can bot Telegram, hay chuyen no sang server rieng cua admin."
-exit 1
-
 $projectRoot = $PSScriptRoot
 $venvActivate = Join-Path $projectRoot ".venv\Scripts\Activate.ps1"
 $tokenFile = Join-Path $projectRoot "telegram_bot_token.txt"
@@ -34,5 +30,9 @@ else {
     $env:PYTHONPATH = $srcPath
 }
 
-Write-Host "Dang chay Telegram bot..."
+$env:AUTO_EDITOR_COMMERCIAL_MODE = "0"
+$env:AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM = "1"
+$env:AUTO_EDITOR_ALLOW_SOURCE_RUNTIME = "1"
+
+Write-Host "Dang chay Telegram bot local/dev khong can dang nhap..."
 python -m auto_tiktok_editor.cli telegram-bot

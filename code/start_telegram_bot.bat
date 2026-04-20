@@ -1,9 +1,13 @@
 @echo off
 setlocal
 
-echo.
-echo Ban thuong mai da tat Telegram local tren may khach.
-echo Neu can bot Telegram, hay chuyen no sang server rieng cua admin.
-pause
+powershell -ExecutionPolicy Bypass -File "%~dp0start_telegram_bot.ps1"
+set "exit_code=%ERRORLEVEL%"
 
-endlocal
+if not "%exit_code%"=="0" (
+    echo.
+    echo Telegram local launcher da dung voi ma loi %exit_code%.
+    pause
+)
+
+endlocal & exit /b %exit_code%

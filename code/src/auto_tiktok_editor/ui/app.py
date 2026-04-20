@@ -332,8 +332,10 @@ class EditorApplication(object):
         hero_header = ttk.Frame(hero, style="Hero.TFrame")
         hero_header.pack(fill="x")
         ttk.Label(hero_header, text="Auto TikTok Video Editor", style="HeroTitle.TLabel").pack(side="left", anchor="w")
-        self.logout_button = ttk.Button(hero_header, text="Đăng xuất", style="Secondary.TButton", command=self._logout_and_relogin)
-        self.logout_button.pack(side="right", anchor="e")
+        self.logout_button = None
+        if self.license_guard is not None:
+            self.logout_button = ttk.Button(hero_header, text="Đăng xuất", style="Secondary.TButton", command=self._logout_and_relogin)
+            self.logout_button.pack(side="right", anchor="e")
         ttk.Label(
             hero,
             text="Nhập nhiều cặp link TikTok và ảnh sản phẩm, rồi chạy session tuần tự với trạng thái rõ cho từng item.",
@@ -1355,6 +1357,11 @@ def launch_ui(config: Optional[PipelineConfig] = None, license_guard: Optional[L
     runtime_config = config or PipelineConfig.from_env()
     ensure_runtime_allowed(runtime_config, surface="ui")
     configure_tk_environment()
+    if not runtime_config.commercial_mode:
+        root = tk.Tk()
+        EditorApplication(root, config=runtime_config, license_guard=None, license_session=None)
+        root.mainloop()
+        return 0
     guard = license_guard or LicenseGuard()
     while True:
         session = ensure_ui_license_session(guard, logger=logging.getLogger("auto_tiktok_editor.license_ui"))
