@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import timedelta, timezone
 from html import escape
@@ -44,6 +44,16 @@ def _format_dt(value) -> str:
 
 def _badge(text: str, tone: str) -> str:
     return f'<span class="badge {escape(tone)}">{escape(text)}</span>'
+
+
+def _password_input(name: str, field_id: str, *, required: bool = True) -> str:
+    required_attr = " required" if required else ""
+    return f"""
+    <div class="password-field">
+      <input type="password" name="{escape(name)}" id="{escape(field_id)}"{required_attr}>
+      <button type="button" class="password-toggle" data-password-toggle="{escape(field_id)}" aria-label="Hiện mật khẩu">Hiện</button>
+    </div>
+    """
 
 
 def _safe_redirect_target(value: str | None, fallback: str = "/admin") -> str:
@@ -210,6 +220,29 @@ def _page(title: str, body: str, *, current_admin=None, message: str = "", error
           border-radius: 999px;
           color: #d8e8ff;
         }}
+        .password-field {{
+          position: relative;
+          margin-bottom: 12px;
+        }}
+        .password-field input {{
+          margin-bottom: 0;
+          padding-right: 68px;
+        }}
+        .password-toggle {{
+          position: absolute;
+          top: 50%;
+          right: 8px;
+          transform: translateY(-50%);
+          width: auto;
+          min-width: 48px;
+          padding: 7px 10px;
+          border-radius: 10px;
+          border: 1px solid var(--border);
+          background: rgba(99,169,255,.08);
+          color: var(--text);
+          font-size: 12px;
+          font-weight: 600;
+        }}
         .flash {{
           padding: 14px 16px;
           border-radius: 14px;
@@ -292,16 +325,25 @@ def _page(title: str, body: str, *, current_admin=None, message: str = "", error
         }}
         .toolbar {{
           display: grid;
-          grid-template-columns: minmax(220px, 1.5fr) repeat(4, minmax(120px, .8fr)) auto;
+          grid-template-columns: minmax(220px, 1.6fr) repeat(5, minmax(120px, .8fr));
           gap: 10px;
           align-items: end;
         }}
-        .toolbar-actions {{
+        .toolbar-footer {{
+          display: flex;
+          justify-content: flex-end;
+          margin-top: 10px;
+        }}
+        .toolbar-buttons {{
           display: flex;
           gap: 8px;
           align-items: center;
         }}
-        .toolbar-actions a {{
+        .toolbar-buttons button,
+        .toolbar-buttons a {{
+          min-width: 140px;
+        }}
+        .toolbar-buttons a {{
           display: inline-flex;
           justify-content: center;
           align-items: center;
@@ -309,6 +351,7 @@ def _page(title: str, body: str, *, current_admin=None, message: str = "", error
           padding: 11px 14px;
           border-radius: 12px;
           border: 1px solid var(--border);
+          background: transparent;
           color: var(--text);
         }}
         .table-wrap {{ overflow-x: auto; }}
@@ -451,6 +494,16 @@ def _page(title: str, body: str, *, current_admin=None, message: str = "", error
           display: grid;
           gap: 18px;
         }}
+        .detail-actions-grid {{
+          display: grid;
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+          gap: 18px;
+          margin-bottom: 18px;
+        }}
+        .detail-wide-sections {{
+          display: grid;
+          gap: 18px;
+        }}
         .empty-state {{
           padding: 22px;
           border: 1px dashed rgba(144,164,197,.22);
@@ -463,6 +516,7 @@ def _page(title: str, body: str, *, current_admin=None, message: str = "", error
           .stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
           .toolbar {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
           .detail-grid {{ grid-template-columns: 1fr; }}
+          .detail-actions-grid {{ grid-template-columns: 1fr; }}
           .detail-stats {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
         }}
         @media (max-width: 760px) {{
@@ -471,6 +525,9 @@ def _page(title: str, body: str, *, current_admin=None, message: str = "", error
           .topbar-actions {{ width: 100%; justify-content: space-between; }}
           .stats {{ grid-template-columns: 1fr; }}
           .toolbar {{ grid-template-columns: 1fr; }}
+          .toolbar-footer {{ justify-content: stretch; }}
+          .toolbar-buttons {{ width: 100%; flex-direction: column; }}
+          .toolbar-buttons a, .toolbar-buttons button {{ width: 100%; }}
           .detail-stats {{ grid-template-columns: 1fr; }}
           .kv {{ grid-template-columns: 1fr; }}
           .detail-header {{ flex-direction: column; }}
@@ -483,6 +540,18 @@ def _page(title: str, body: str, *, current_admin=None, message: str = "", error
         {flashes}
         {body}
       </div>
+      <script>
+        document.addEventListener("click", function(event) {{
+          const toggle = event.target.closest("[data-password-toggle]");
+          if (!toggle) return;
+          const input = document.getElementById(toggle.getAttribute("data-password-toggle"));
+          if (!input) return;
+          const visible = input.type === "text";
+          input.type = visible ? "password" : "text";
+          toggle.textContent = visible ? "Hiện" : "Ẩn";
+          toggle.setAttribute("aria-label", visible ? "Hiện mật khẩu" : "Ẩn mật khẩu");
+        }});
+      </script>
     </body>
     </html>
     """
@@ -490,7 +559,7 @@ def _page(title: str, body: str, *, current_admin=None, message: str = "", error
 
 
 def _login_page(*, error: str = "", message: str = "") -> HTMLResponse:
-    body = """
+    body = f"""
     <div style="max-width: 500px; margin: 64px auto;">
       <div class="panel">
         <div class="eyebrow">License Server</div>
@@ -500,7 +569,7 @@ def _login_page(*, error: str = "", message: str = "") -> HTMLResponse:
           <label>Tài khoản</label>
           <input type="text" name="username" required>
           <label>Mật khẩu</label>
-          <input type="password" name="password" required>
+          {_password_input("password", "admin-login-password")}
           <button type="submit">Đăng nhập</button>
         </form>
       </div>
@@ -593,7 +662,7 @@ def _render_dashboard(
     <div class="hero-card">
       <div class="eyebrow">License control center</div>
       <h2>Quản lý tài khoản, license và chống chia sẻ</h2>
-      <p>Theo dõi toàn bộ khách hàng đang hoạt động, lọc nhanh theo hạn dùng, phân loại theo vai trò và nhảy thẳng vào trang chi tiết từng user để khóa tài khoản, thu hồi thiết bị hoặc phiên đăng nhập.</p>
+      <p>Theo dõi toàn bộ khách hàng đang hoạt động, lọc nhanh theo hạn dùng và nhảy thẳng vào trang chi tiết từng user để khóa tài khoản, thu hồi thiết bị hoặc phiên đăng nhập.</p>
     </div>
     <div class="stats">
       <div class="stat"><div class="label">Tổng số user</div><div class="value">{total_users}</div></div>
@@ -604,7 +673,7 @@ def _render_dashboard(
     <div class="panel" style="margin-bottom:18px;">
       <div class="eyebrow">Bộ lọc nhanh</div>
       <h3>Tìm kiếm, sắp xếp và phân trang</h3>
-      <form method="get" action="/admin" class="toolbar">
+      <form method="get" action="/admin" class="toolbar" id="admin-filter-form">
         <div>
           <label>Tìm kiếm</label>
           <input type="text" name="search" value="{escape(filters["search"])}" placeholder="username, license code, plan">
@@ -613,12 +682,6 @@ def _render_dashboard(
           <label>Trạng thái user</label>
           <select name="account_status">
             {"".join(f'<option value="{value}"{" selected" if filters["account_status"] == value else ""}>{label}</option>' for value, label in (("all", "Tất cả"), ("active", "Đang hoạt động"), ("disabled", "Đã khóa")))}
-          </select>
-        </div>
-        <div>
-          <label>Vai trò</label>
-          <select name="role">
-            {"".join(f'<option value="{value}"{" selected" if filters["role"] == value else ""}>{label}</option>' for value, label in (("all", "Tất cả"), ("admin", "Quản trị"), ("user", "Khách hàng")))}
           </select>
         </div>
         <div>
@@ -640,22 +703,18 @@ def _render_dashboard(
           </select>
         </div>
         <div>
-          <label>Thứ tự</label>
-          <select name="direction">
-            {"".join(f'<option value="{value}"{" selected" if filters["direction"] == value else ""}>{label}</option>' for value, label in (("desc", "Giảm dần"), ("asc", "Tăng dần")))}
-          </select>
-        </div>
-        <div>
           <label>Số dòng / trang</label>
           <select name="page_size">
             {"".join(f'<option value="{value}"{" selected" if str(filters["page_size"]) == str(value) else ""}>{value}</option>' for value in (10, 20, 50, 100))}
           </select>
         </div>
-        <div class="toolbar-actions">
-          <button type="submit">Áp dụng</button>
+      </form>
+      <div class="toolbar-footer">
+        <div class="toolbar-buttons">
+          <button type="submit" form="admin-filter-form">Áp dụng</button>
           <a href="/admin">Đặt lại</a>
         </div>
-      </form>
+      </div>
       <div class="helper">Bộ lọc hiện tại đang hiển thị {len(users)} user và {len(licenses)} license trong trang này.</div>
     </div>
     <div class="layout">
@@ -667,7 +726,7 @@ def _render_dashboard(
             <label>Username</label>
             <input type="text" name="username" required>
             <label>Mật khẩu</label>
-            <input type="password" name="password" required>
+            {_password_input("password", "create-user-password")}
             <label><input type="checkbox" name="is_admin" value="true" style="width:auto;margin-right:8px;"> Cấp quyền quản trị</label>
             <input type="hidden" name="redirect_to" value="{escape(_build_dashboard_query(filters))}">
             <button type="submit">Tạo user</button>
@@ -686,9 +745,9 @@ def _render_dashboard(
             <label>Số ngày</label>
             <input type="number" name="days" min="1" value="30" required>
             <label>Số máy tối đa</label>
-            <input type="number" name="max_devices" min="1" value="1" required>
-            <label>Số phiên đồng thời</label>
-            <input type="number" name="max_concurrent_sessions" min="1" value="1" required>
+            <input type="number" name="max_devices" min="1" max="3" value="1" required>
+            <input type="hidden" name="max_concurrent_sessions" value="1">
+            <div class="helper">Số phiên đồng thời sẽ tự động bằng số máy.</div>
             <label>Ghi chú</label>
             <textarea name="notes" placeholder="Ví dụ: gói tháng, không chia sẻ"></textarea>
             <input type="hidden" name="redirect_to" value="{escape(_build_dashboard_query(filters))}">
@@ -851,125 +910,123 @@ def _render_user_detail(*, current_admin, user, devices, sessions, redirect_to: 
         <a href="/admin">← Về dashboard</a>
       </div>
     </div>
-    <div class="detail-grid">
-      <div class="detail-box">
-        <h4>Tổng quan nhanh</h4>
-        <div class="detail-stats">
-          <div class="detail-stat"><div class="label">Trạng thái user</div><div class="value">{_badge("Đang hoạt động" if user.is_active else "Đã khóa", "green" if user.is_active else "red")}</div></div>
-          <div class="detail-stat"><div class="label">Vai trò</div><div class="value">{_badge("Quản trị" if user.is_admin else "Khách hàng", "blue" if user.is_admin else "amber")}</div></div>
-          <div class="detail-stat"><div class="label">Thiết bị active</div><div class="value">{active_devices}</div></div>
-          <div class="detail-stat"><div class="label">Phiên active</div><div class="value">{active_sessions}</div></div>
-        </div>
-      </div>
-      <div class="detail-box">
-        <h4>Thông tin tài khoản</h4>
+    <div class="detail-actions-grid">
+      <div class="panel">
+        <div class="eyebrow">Thông tin tài khoản</div>
+        <h3>Tổng quan user</h3>
         <div class="kv">
           <div class="muted">Username</div><div>{escape(user.username)}</div>
+          <div class="muted">Trạng thái user</div><div>{_badge("Đang hoạt động" if user.is_active else "Đã khóa", "green" if user.is_active else "red")}</div>
+          <div class="muted">Vai trò</div><div>{_badge("Quản trị" if user.is_admin else "Khách hàng", "blue" if user.is_admin else "amber")}</div>
           <div class="muted">Ngày tạo</div><div>{escape(_format_dt(user.created_at))}</div>
           <div class="muted">License hiện tại</div><div><code>{escape(current_license.license_code if current_license else "-")}</code></div>
           <div class="muted">Gói hiện tại</div><div>{escape(current_license.plan_name if current_license else "-")}</div>
           <div class="muted">Hạn dùng</div><div>{escape(_format_dt(current_license.expires_at) if current_license else "-")}</div>
           <div class="muted">Giới hạn</div><div>{escape(f"{current_license.max_devices} máy / {current_license.max_concurrent_sessions} phiên" if current_license else "-")}</div>
+          <div class="muted">Thiết bị active</div><div>{active_devices}</div>
+          <div class="muted">Phiên active</div><div>{active_sessions}</div>
         </div>
+      </div>
+      <div class="panel">
+        <div class="eyebrow">Quản lý tài khoản</div>
+        <h3>Thao tác tài khoản và mật khẩu</h3>
+        <form method="post" action="/admin/users/{escape(user.id)}/status" style="margin-bottom:16px;">
+          <label>Trạng thái mới</label>
+          <input type="hidden" name="is_active" value={"false" if user.is_active else "true"}>
+          <input type="hidden" name="redirect_to" value="{escape(redirect_to)}">
+          <button type="submit">{'Khóa tài khoản' if user.is_active else 'Mở lại tài khoản'}</button>
+        </form>
+        <form method="post" action="/admin/users/{escape(user.id)}/password">
+          <input type="hidden" name="redirect_to" value="{escape(redirect_to)}">
+          <label>Mật khẩu mới</label>
+          {_password_input("password", f"reset-password-{user.id}")}
+          <button type="submit" class="secondary">Cập nhật mật khẩu</button>
+        </form>
+      </div>
+      <div class="panel">
+        <div class="eyebrow">License mới</div>
+        <h3>Cấp thêm license cho user này</h3>
+        <form method="post" action="/admin/licenses/issue">
+          <input type="hidden" name="user_id" value="{escape(user.id)}">
+          <input type="hidden" name="redirect_to" value="{escape(redirect_to)}">
+          <label>Gói dịch vụ</label>
+          <input type="text" name="plan_name" value="standard" required>
+          <label>Số ngày</label>
+          <input type="number" name="days" min="1" value="30" required>
+          <label>Số máy tối đa</label>
+          <input type="number" name="max_devices" min="1" max="3" value="1" required>
+          <input type="hidden" name="max_concurrent_sessions" value="1">
+          <div class="helper">Số phiên đồng thời sẽ tự động bằng số máy.</div>
+          <label>Ghi chú</label>
+          <textarea name="notes" placeholder="Ví dụ: gia hạn tháng tiếp theo"></textarea>
+          <button type="submit">Cấp license mới</button>
+        </form>
       </div>
     </div>
-    <div class="layout" style="grid-template-columns: 360px minmax(0, 1fr);">
-      <div class="stack">
-        <div class="panel">
-          <div class="eyebrow">Thao tác tài khoản</div>
-          <h3>Bật / khóa user</h3>
-          <form method="post" action="/admin/users/{escape(user.id)}/status">
-            <label>Trạng thái mới</label>
-            <input type="hidden" name="is_active" value={"false" if user.is_active else "true"}>
-            <input type="hidden" name="redirect_to" value="{escape(redirect_to)}">
-            <button type="submit">{'Khóa tài khoản' if user.is_active else 'Mở lại tài khoản'}</button>
-          </form>
-        </div>
-        <div class="panel">
-          <div class="eyebrow">License mới</div>
-          <h3>Cấp thêm license cho user này</h3>
-          <form method="post" action="/admin/licenses/issue">
-            <input type="hidden" name="user_id" value="{escape(user.id)}">
-            <input type="hidden" name="redirect_to" value="{escape(redirect_to)}">
-            <label>Gói dịch vụ</label>
-            <input type="text" name="plan_name" value="standard" required>
-            <label>Số ngày</label>
-            <input type="number" name="days" min="1" value="30" required>
-            <label>Số máy tối đa</label>
-            <input type="number" name="max_devices" min="1" value="1" required>
-            <label>Số phiên đồng thời</label>
-            <input type="number" name="max_concurrent_sessions" min="1" value="1" required>
-            <label>Ghi chú</label>
-            <textarea name="notes" placeholder="Ví dụ: gia hạn tháng tiếp theo"></textarea>
-            <button type="submit">Cấp license mới</button>
-          </form>
+    <div class="detail-wide-sections">
+      <div class="panel">
+        <div class="eyebrow">Lịch sử license</div>
+        <h3>Toàn bộ licenses</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Code</th>
+                <th>Gói</th>
+                <th>Trạng thái</th>
+                <th>Hết hạn</th>
+                <th>Giới hạn</th>
+                <th>Thao tác</th>
+              </tr>
+            </thead>
+            <tbody>
+              {"".join(license_rows) or '<tr><td colspan="6" class="muted">User này chưa có license.</td></tr>'}
+            </tbody>
+          </table>
         </div>
       </div>
-      <div class="section-grid">
-        <div class="panel">
-          <div class="eyebrow">Lịch sử license</div>
-          <h3>Toàn bộ licenses</h3>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Code</th>
-                  <th>Gói</th>
-                  <th>Trạng thái</th>
-                  <th>Hết hạn</th>
-                  <th>Giới hạn</th>
-                  <th>Thao tác</th>
-                </tr>
-              </thead>
-              <tbody>
-                {"".join(license_rows) or '<tr><td colspan="6" class="muted">User này chưa có license.</td></tr>'}
-              </tbody>
-            </table>
-          </div>
+      <div class="panel">
+        <div class="eyebrow">Thiết bị đã bind</div>
+        <h3>Devices</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Label</th>
+                <th>Fingerprint</th>
+                <th>Trạng thái</th>
+                <th>Lần đầu thấy</th>
+                <th>Lần cuối thấy</th>
+                <th>Phiên bản app</th>
+                <th>Thao tác</th>
+              </tr>
+            </thead>
+            <tbody>
+              {"".join(device_rows) or '<tr><td colspan="7" class="muted">User này chưa có thiết bị nào.</td></tr>'}
+            </tbody>
+          </table>
         </div>
-        <div class="panel">
-          <div class="eyebrow">Thiết bị đã bind</div>
-          <h3>Devices</h3>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Label</th>
-                  <th>Fingerprint</th>
-                  <th>Trạng thái</th>
-                  <th>Lần đầu thấy</th>
-                  <th>Lần cuối thấy</th>
-                  <th>Phiên bản app</th>
-                  <th>Thao tác</th>
-                </tr>
-              </thead>
-              <tbody>
-                {"".join(device_rows) or '<tr><td colspan="7" class="muted">User này chưa có thiết bị nào.</td></tr>'}
-              </tbody>
-            </table>
-          </div>
-        </div>
-        <div class="panel">
-          <div class="eyebrow">Phiên đăng nhập</div>
-          <h3>Sessions</h3>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>Session ID</th>
-                  <th>Device ID</th>
-                  <th>Trạng thái</th>
-                  <th>Tạo lúc</th>
-                  <th>Last seen</th>
-                  <th>Refresh hết hạn</th>
-                  <th>Thao tác</th>
-                </tr>
-              </thead>
-              <tbody>
-                {"".join(session_rows) or '<tr><td colspan="7" class="muted">User này chưa có session nào.</td></tr>'}
-              </tbody>
-            </table>
-          </div>
+      </div>
+      <div class="panel">
+        <div class="eyebrow">Phiên đăng nhập</div>
+        <h3>Sessions</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Session ID</th>
+                <th>Device ID</th>
+                <th>Trạng thái</th>
+                <th>Tạo lúc</th>
+                <th>Last seen</th>
+                <th>Refresh hết hạn</th>
+                <th>Thao tác</th>
+              </tr>
+            </thead>
+            <tbody>
+              {"".join(session_rows) or '<tr><td colspan="7" class="muted">User này chưa có session nào.</td></tr>'}
+            </tbody>
+          </table>
         </div>
       </div>
     </div>
@@ -1190,6 +1247,21 @@ async def admin_set_user_status(request: Request, user_id: str, db: Session = De
     return _redirect_with_flash(redirect_to, message="Đã cập nhật trạng thái user.")
 
 
+@router.post("/admin/users/{user_id}/password")
+async def admin_reset_user_password(request: Request, user_id: str, db: Session = Depends(get_db), config: LicenseServerConfig = Depends(get_config)) -> RedirectResponse:
+    current_admin, redirect = _require_admin_user(request, db, config)
+    if redirect is not None:
+        return redirect
+    form = await request.form()
+    redirect_to = _safe_redirect_target(form.get("redirect_to"), f"/admin/users/{user_id}")
+    service = AdminService(db, config)
+    try:
+        service.reset_user_password(user_id=user_id, password=str(form.get("password") or ""))
+    except (LicenseError, ValueError) as exc:
+        return _redirect_with_flash(redirect_to, error=str(exc))
+    return _redirect_with_flash(redirect_to, message="Đã cập nhật mật khẩu user.")
+
+
 @router.post("/admin/licenses/issue")
 async def admin_issue_license(request: Request, db: Session = Depends(get_db), config: LicenseServerConfig = Depends(get_config)) -> RedirectResponse:
     current_admin, redirect = _require_admin_user(request, db, config)
@@ -1198,13 +1270,14 @@ async def admin_issue_license(request: Request, db: Session = Depends(get_db), c
     form = await request.form()
     redirect_to = _safe_redirect_target(form.get("redirect_to"))
     service = AdminService(db, config)
+    max_devices = int(str(form.get("max_devices") or "1"))
     try:
         service.issue_license(
             user_id=str(form.get("user_id") or "").strip(),
             plan_name=str(form.get("plan_name") or "standard").strip() or "standard",
             days=int(str(form.get("days") or "30")),
-            max_devices=int(str(form.get("max_devices") or "1")),
-            max_concurrent_sessions=int(str(form.get("max_concurrent_sessions") or "1")),
+            max_devices=max_devices,
+            max_concurrent_sessions=max_devices,
             notes=str(form.get("notes") or "").strip() or None,
         )
     except (LicenseError, ValueError) as exc:

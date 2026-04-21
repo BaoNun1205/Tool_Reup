@@ -44,6 +44,7 @@ class LicenseLoginDialog(object):
 
         self.username_var = tk.StringVar()
         self.password_var = tk.StringVar()
+        self.password_visible_var = tk.BooleanVar(value=False)
         self.status_var = tk.StringVar(value="Đang kiểm tra online phiên đăng nhập trên máy này...")
         self.logger.info("License login dialog opened.")
 
@@ -136,8 +137,18 @@ class LicenseLoginDialog(object):
         self.username_entry.grid(row=3, column=0, sticky="ew", pady=(8, 14))
 
         ttk.Label(card, text="Mật khẩu", style="Field.TLabel").grid(row=4, column=0, sticky="w")
-        self.password_entry = ttk.Entry(card, textvariable=self.password_var, show="*")
-        self.password_entry.grid(row=5, column=0, sticky="ew", pady=(8, 14))
+        password_row = ttk.Frame(card, style="Card.TFrame")
+        password_row.grid(row=5, column=0, sticky="ew", pady=(8, 14))
+        password_row.columnconfigure(0, weight=1)
+        self.password_entry = ttk.Entry(password_row, textvariable=self.password_var, show="*")
+        self.password_entry.grid(row=0, column=0, sticky="ew")
+        self.password_toggle_button = ttk.Button(
+            password_row,
+            text="Hiện",
+            style="Secondary.TButton",
+            command=self._toggle_password_visibility,
+        )
+        self.password_toggle_button.grid(row=0, column=1, padx=(10, 0))
 
         ttk.Label(
             card,
@@ -158,6 +169,12 @@ class LicenseLoginDialog(object):
         self.login_button.grid(row=0, column=1, sticky="e")
 
         self.root.bind("<Return>", lambda event: self._submit())
+
+    def _toggle_password_visibility(self) -> None:
+        is_visible = not self.password_visible_var.get()
+        self.password_visible_var.set(is_visible)
+        self.password_entry.configure(show="" if is_visible else "*")
+        self.password_toggle_button.configure(text="Ẩn" if is_visible else "Hiện")
 
     def _try_cached_session(self) -> None:
         self.logger.info("Trying cached license session.")

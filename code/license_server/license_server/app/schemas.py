@@ -74,8 +74,8 @@ class AdminIssueLicenseRequest(BaseModel):
     user_id: str = Field(min_length=36, max_length=36)
     plan_name: str = Field(default="standard", min_length=1, max_length=64)
     days: int = Field(ge=1, le=3650)
-    max_devices: int = Field(default=1, ge=1, le=20)
-    max_concurrent_sessions: int = Field(default=1, ge=1, le=20)
+    max_devices: int = Field(default=1, ge=1, le=3)
+    max_concurrent_sessions: Optional[int] = Field(default=None, ge=1, le=3)
     notes: Optional[str] = Field(default=None, max_length=2000)
 
 
@@ -89,6 +89,10 @@ class AdminSetLicenseStatusRequest(BaseModel):
 
 class AdminSetUserStatusRequest(BaseModel):
     is_active: bool
+
+
+class AdminResetPasswordRequest(BaseModel):
+    password: str = Field(min_length=6, max_length=256)
 
 
 class AdminRevokeRequest(BaseModel):

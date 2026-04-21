@@ -108,6 +108,21 @@ class LicenseService:
         )
         return existing, False
 
+    def reset_user_password(self, user: UserAccount, password: str) -> UserAccount:
+        if len(str(password or "")) < 6:
+            raise LicenseError("Password must be at least 6 characters long.")
+        password_hash, password_salt = hash_password(password)
+        user.password_hash = password_hash
+        user.password_salt = password_salt
+        self._log_event(
+            event_type="password_reset",
+            actor_user_id=user.id,
+            target_type="user",
+            target_id=user.id,
+            details={"username": user.username},
+        )
+        return user
+
     def issue_license(
         self,
         user: UserAccount,
@@ -118,14 +133,16 @@ class LicenseService:
         max_concurrent_sessions: int,
         notes: str | None = None,
     ) -> LicenseRecord:
+        normalized_max_devices = min(3, max(1, int(max_devices)))
+        normalized_max_sessions = normalized_max_devices
         record = LicenseRecord(
             user_id=user.id,
             license_code=create_license_code(),
             status="active",
             plan_name=plan_name,
             expires_at=utcnow() + timedelta(days=max(1, days)),
-            max_devices=max(1, max_devices),
-            max_concurrent_sessions=max(1, max_concurrent_sessions),
+            max_devices=normalized_max_devices,
+            max_concurrent_sessions=normalized_max_sessions,
             notes=notes,
         )
         self.db.add(record)
@@ -135,7 +152,12 @@ class LicenseService:
             actor_user_id=user.id,
             target_type="license",
             target_id=record.id,
-            details={"plan_name": plan_name, "days": days, "max_devices": max_devices, "max_concurrent_sessions": max_concurrent_sessions},
+            details={
+                "plan_name": plan_name,
+                "days": days,
+                "max_devices": normalized_max_devices,
+                "max_concurrent_sessions": normalized_max_sessions,
+            },
         )
         return record
 
@@ -335,6 +357,10 @@ class AdminService:
         if not is_active:
             self.revoke_sessions_for_user(user_id, reason="user_disabled")
         return record
+
+    def reset_user_password(self, *, user_id: str, password: str) -> UserAccount:
+        record = self.license_service.get_user(user_id)
+        return self.license_service.reset_user_password(record, password)
 
     def revoke_device(self, *, device_id: str, reason: str | None) -> DeviceRecord:
         record = self.license_service.get_device(device_id)

@@ -6,14 +6,57 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 import os
+import tempfile
 import unittest
 from unittest import mock
 
 from auto_tiktok_editor.config import PipelineConfig
+from auto_tiktok_editor.commercial_entry import COMMERCIAL_LICENSE_SERVER_URL
 from auto_tiktok_editor.telegram_settings import TelegramRuntimeSettings
+from auto_tiktok_editor.license.config import LicenseClientConfig
 
 
 class PipelineConfigTests(unittest.TestCase):
+    def test_commercial_license_server_url_default_can_be_applied(self):
+        previous = os.environ.get("AUTO_EDITOR_LICENSE_SERVER_URL")
+        try:
+            os.environ.pop("AUTO_EDITOR_LICENSE_SERVER_URL", None)
+            os.environ.setdefault("AUTO_EDITOR_LICENSE_SERVER_URL", COMMERCIAL_LICENSE_SERVER_URL)
+            config = LicenseClientConfig.from_env()
+            self.assertEqual(config.server_base_url, COMMERCIAL_LICENSE_SERVER_URL)
+        finally:
+            self._restore("AUTO_EDITOR_LICENSE_SERVER_URL", previous)
+
+    def test_from_env_prefers_bundled_runtime_tools_when_frozen(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            tools_dir = Path(temp_dir.name) / "tools"
+            tools_dir.mkdir(parents=True, exist_ok=True)
+            bundled = {
+                "tools/ffmpeg.exe": str(tools_dir / "ffmpeg.exe"),
+                "tools/ffprobe.exe": str(tools_dir / "ffprobe.exe"),
+                "tools/yt-dlp.exe": str(tools_dir / "yt-dlp.exe"),
+                "tools/lazy-down.cmd": str(tools_dir / "lazy-down.cmd"),
+            }
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "AUTO_EDITOR_FFMPEG_BIN": "",
+                    "AUTO_EDITOR_FFPROBE_BIN": "",
+                    "AUTO_EDITOR_YTDLP_BIN": "",
+                    "AUTO_EDITOR_LAZY_DOWN_BIN": "",
+                },
+                clear=False,
+            ):
+                with mock.patch("auto_tiktok_editor.config._find_runtime_binary", side_effect=lambda relative: bundled.get(relative)):
+                    config = PipelineConfig.from_env()
+            self.assertEqual(config.ffmpeg_bin, bundled["tools/ffmpeg.exe"])
+            self.assertEqual(config.ffprobe_bin, bundled["tools/ffprobe.exe"])
+            self.assertEqual(config.ytdlp_bin, bundled["tools/yt-dlp.exe"])
+            self.assertEqual(config.lazy_down_bin, bundled["tools/lazy-down.cmd"])
+        finally:
+            temp_dir.cleanup()
+
     def test_from_env_overrides_binary_names(self):
         old_ffmpeg = os.environ.get("AUTO_EDITOR_FFMPEG_BIN")
         old_ffprobe = os.environ.get("AUTO_EDITOR_FFPROBE_BIN")

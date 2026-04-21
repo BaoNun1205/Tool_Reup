@@ -19,6 +19,7 @@ from license_server.app.schemas import (
     AdminLicenseListResponse,
     AdminLicenseSummary,
     AdminRevokeRequest,
+    AdminResetPasswordRequest,
     AdminSessionListResponse,
     AdminSessionSummary,
     AdminSetLicenseStatusRequest,
@@ -67,12 +68,13 @@ def startup_bootstrap() -> None:
 @app.get("/health")
 def healthcheck(db: Session = Depends(get_db), config: LicenseServerConfig = Depends(get_config)) -> dict:
     try:
-        db.execute(text("SELECT 1"))
+        probe = db.execute(text("SELECT 1")).scalar_one()
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Database is unavailable.") from exc
     return {
         "status": "ok",
         "database": "ok",
+        "db_probe": probe,
         "server_time": utcnow(),
         "public_base_url": config.public_base_url,
     }
@@ -339,6 +341,21 @@ def admin_set_user_status(
     return _serialize_user(service, user)
 
 
+@app.post("/api/v1/admin/users/{user_id}/password", response_model=AdminUserSummary)
+def admin_reset_user_password(
+    user_id: str,
+    payload: AdminResetPasswordRequest,
+    db: Session = Depends(get_db),
+    config: LicenseServerConfig = Depends(get_config),
+    signer: TokenSigner = Depends(get_signer),
+    authorization: str | None = Header(default=None),
+) -> AdminUserSummary:
+    _require_admin_user(authorization, db, config, signer)
+    service = AdminService(db, config)
+    user = service.reset_user_password(user_id=user_id, password=payload.password)
+    return _serialize_user(service, user)
+
+
 @app.get("/api/v1/admin/licenses", response_model=AdminLicenseListResponse)
 def admin_list_licenses(
     db: Session = Depends(get_db),
@@ -370,7 +387,7 @@ def admin_issue_license(
             plan_name=payload.plan_name,
             days=payload.days,
             max_devices=payload.max_devices,
-            max_concurrent_sessions=payload.max_concurrent_sessions,
+            max_concurrent_sessions=payload.max_concurrent_sessions or payload.max_devices,
             notes=payload.notes,
         )
     except LicenseError as exc:

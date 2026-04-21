@@ -22,7 +22,6 @@ def _build_parser() -> argparse.ArgumentParser:
     issue_license.add_argument("--days", required=True, type=int)
     issue_license.add_argument("--plan", default="standard")
     issue_license.add_argument("--max-devices", default=1, type=int)
-    issue_license.add_argument("--max-concurrent-sessions", default=1, type=int)
     issue_license.add_argument("--notes", default="")
     return parser
 
@@ -51,7 +50,7 @@ def main(argv=None) -> int:
                 plan_name=args.plan,
                 days=args.days,
                 max_devices=args.max_devices,
-                max_concurrent_sessions=args.max_concurrent_sessions,
+                max_concurrent_sessions=args.max_devices,
                 notes=args.notes or None,
             )
             print(

@@ -11,6 +11,9 @@ from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.ui.app import launch_ui
 
 
+COMMERCIAL_LICENSE_SERVER_URL = "https://auto-tiktok-license-server.onrender.com"
+
+
 def _log_file_path() -> Path:
     local_app_data = os.getenv("LOCALAPPDATA", "").strip()
     if local_app_data:
@@ -25,6 +28,12 @@ def _log_file_path() -> Path:
 def main() -> int:
     os.environ["AUTO_EDITOR_COMMERCIAL_MODE"] = "1"
     os.environ["AUTO_EDITOR_REQUIRE_FROZEN_BUILD"] = "1"
+    os.environ.setdefault("AUTO_EDITOR_LICENSE_SERVER_URL", COMMERCIAL_LICENSE_SERVER_URL)
+    runtime_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None
+    if runtime_dir is not None:
+        bundled_playwright = runtime_dir / "tools" / "ms-playwright"
+        if bundled_playwright.exists():
+            os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", str(bundled_playwright))
     log_path = _log_file_path()
     with log_path.open("a", encoding="utf-8") as handle:
         handle.write("BOOT commercial_entry main()\n")

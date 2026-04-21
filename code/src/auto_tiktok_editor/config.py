@@ -16,12 +16,32 @@ from auto_tiktok_editor.telegram_settings import load_telegram_runtime_settings
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 VENV_SCRIPTS = PROJECT_ROOT / ".venv" / "Scripts"
 TELEGRAM_BOT_TOKEN_FILE = PROJECT_ROOT / "telegram_bot_token.txt"
+VENDOR_TOOLS = PROJECT_ROOT / "vendor" / "tools"
+
+
+def _runtime_root() -> Path | None:
+    if getattr(sys, "frozen", False) or globals().get("__compiled__", False):
+        return Path(sys.executable).resolve().parent
+    return None
+
+
+def _find_runtime_binary(relative_path: str):
+    runtime_root = _runtime_root()
+    if runtime_root is None:
+        return None
+    candidate = runtime_root / relative_path
+    if candidate.exists():
+        return str(candidate)
+    return None
 
 
 def _find_project_binary(executable_name):
     candidate = VENV_SCRIPTS / executable_name
     if candidate.exists():
         return str(candidate)
+    vendor_candidate = VENDOR_TOOLS / executable_name
+    if vendor_candidate.exists():
+        return str(vendor_candidate)
     return None
 
 
@@ -71,6 +91,9 @@ def _resolve_tool(env_var, default_name, project_executable, winget_patterns, ex
     configured = os.getenv(env_var)
     if configured:
         return configured
+    runtime_binary = _find_runtime_binary("tools/%s" % executable_name)
+    if runtime_binary:
+        return runtime_binary
     project_binary = _find_project_binary(project_executable)
     if project_binary:
         return project_binary
@@ -341,6 +364,7 @@ class PipelineConfig:
             ),
             adb_bin=(
                 os.getenv("AUTO_EDITOR_ADB_BIN")
+                or _find_runtime_binary("tools/adb.exe")
                 or _find_project_binary("adb.exe")
                 or shutil.which("adb")
                 or _find_android_sdk_adb()
