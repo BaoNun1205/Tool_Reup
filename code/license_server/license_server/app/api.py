@@ -65,7 +65,7 @@ def startup_bootstrap() -> None:
     _bootstrap_admin_account()
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def healthcheck(db: Session = Depends(get_db), config: LicenseServerConfig = Depends(get_config)) -> dict:
     try:
         probe = db.execute(text("SELECT 1")).scalar_one()
