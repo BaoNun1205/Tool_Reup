@@ -17,15 +17,54 @@ from auto_tiktok_editor.license.config import LicenseClientConfig
 
 
 class PipelineConfigTests(unittest.TestCase):
-    def test_commercial_license_server_url_default_can_be_applied(self):
-        previous = os.environ.get("AUTO_EDITOR_LICENSE_SERVER_URL")
+    def test_license_client_config_uses_localhost_in_local_mode(self):
+        previous_url = os.environ.get("AUTO_EDITOR_LICENSE_SERVER_URL")
+        previous_mode = os.environ.get("AUTO_EDITOR_COMMERCIAL_MODE")
         try:
             os.environ.pop("AUTO_EDITOR_LICENSE_SERVER_URL", None)
+            os.environ["AUTO_EDITOR_COMMERCIAL_MODE"] = "0"
+            config = LicenseClientConfig.from_env()
+            self.assertEqual(config.server_base_url, "http://127.0.0.1:8787")
+        finally:
+            self._restore("AUTO_EDITOR_LICENSE_SERVER_URL", previous_url)
+            self._restore("AUTO_EDITOR_COMMERCIAL_MODE", previous_mode)
+
+    def test_commercial_license_server_url_default_can_be_applied(self):
+        previous = os.environ.get("AUTO_EDITOR_LICENSE_SERVER_URL")
+        previous_mode = os.environ.get("AUTO_EDITOR_COMMERCIAL_MODE")
+        try:
+            os.environ.pop("AUTO_EDITOR_LICENSE_SERVER_URL", None)
+            os.environ["AUTO_EDITOR_COMMERCIAL_MODE"] = "1"
             os.environ.setdefault("AUTO_EDITOR_LICENSE_SERVER_URL", COMMERCIAL_LICENSE_SERVER_URL)
             config = LicenseClientConfig.from_env()
             self.assertEqual(config.server_base_url, COMMERCIAL_LICENSE_SERVER_URL)
         finally:
             self._restore("AUTO_EDITOR_LICENSE_SERVER_URL", previous)
+            self._restore("AUTO_EDITOR_COMMERCIAL_MODE", previous_mode)
+
+    def test_commercial_license_client_config_requires_online_server_url(self):
+        previous_url = os.environ.get("AUTO_EDITOR_LICENSE_SERVER_URL")
+        previous_mode = os.environ.get("AUTO_EDITOR_COMMERCIAL_MODE")
+        try:
+            os.environ.pop("AUTO_EDITOR_LICENSE_SERVER_URL", None)
+            os.environ["AUTO_EDITOR_COMMERCIAL_MODE"] = "1"
+            with self.assertRaises(ValueError):
+                LicenseClientConfig.from_env()
+        finally:
+            self._restore("AUTO_EDITOR_LICENSE_SERVER_URL", previous_url)
+            self._restore("AUTO_EDITOR_COMMERCIAL_MODE", previous_mode)
+
+    def test_commercial_license_client_config_rejects_localhost_url(self):
+        previous_url = os.environ.get("AUTO_EDITOR_LICENSE_SERVER_URL")
+        previous_mode = os.environ.get("AUTO_EDITOR_COMMERCIAL_MODE")
+        try:
+            os.environ["AUTO_EDITOR_LICENSE_SERVER_URL"] = "http://127.0.0.1:8787"
+            os.environ["AUTO_EDITOR_COMMERCIAL_MODE"] = "1"
+            with self.assertRaises(ValueError):
+                LicenseClientConfig.from_env()
+        finally:
+            self._restore("AUTO_EDITOR_LICENSE_SERVER_URL", previous_url)
+            self._restore("AUTO_EDITOR_COMMERCIAL_MODE", previous_mode)
 
     def test_from_env_prefers_bundled_runtime_tools_when_frozen(self):
         temp_dir = tempfile.TemporaryDirectory()

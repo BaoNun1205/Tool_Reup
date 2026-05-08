@@ -39,6 +39,7 @@ Script se:
 ## Luu y van hanh
 
 - Khong ship `telegram_bot_token.txt` cho khach.
+- Co the ship file `telegram_client_settings.json` rong de khach tu dien `bot_token` va `delivery_chat_id`; app se tu nap lai moi lan mo.
 - Khong ship source code cho khach.
 - Khi phat hanh, nen dong goi ca thu muc `commercial_entry.dist` thanh `.zip` hoac installer rieng.
 - Neu can build tu source de test truoc khi dong goi, script build tu dong bat `AUTO_EDITOR_ALLOW_SOURCE_RUNTIME=1` trong luc build.

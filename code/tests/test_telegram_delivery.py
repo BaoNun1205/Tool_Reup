@@ -11,22 +11,29 @@ import unittest
 from auto_tiktok_editor.app.telegram_delivery import TelegramDeliveryService
 from auto_tiktok_editor.domain.models import JobArtifacts, ItemProcessResult, SessionResult
 
+TEST_TEMP_ROOT = ROOT / "_tmp_tests"
+TEST_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def _temporary_directory():
+    return tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT))
+
 
 class FakeTelegramClient(object):
     def __init__(self):
         self.sent_messages = []
-        self.sent_videos = []
+        self.sent_documents = []
 
     def send_message(self, chat_id, text):
         self.sent_messages.append((chat_id, text))
 
-    def send_video(self, chat_id, video_path, caption=None):
-        self.sent_videos.append((chat_id, Path(video_path), caption))
+    def send_document(self, chat_id, document_path, caption=None, filename=None):
+        self.sent_documents.append((chat_id, Path(document_path), caption, filename))
 
 
 class TelegramDeliveryServiceTests(unittest.TestCase):
     def test_send_session_result_sends_completed_videos_in_order(self):
-        temp_dir = tempfile.TemporaryDirectory()
+        temp_dir = _temporary_directory()
         try:
             base_dir = Path(temp_dir.name)
             video_a = base_dir / "a.mp4"
@@ -82,8 +89,8 @@ class TelegramDeliveryServiceTests(unittest.TestCase):
             payload = service.send_session_result(result, 123456)
 
             self.assertEqual(payload["sent_count"], 2)
-            self.assertEqual(client.sent_videos[0], (123456, video_a, "Title A"))
-            self.assertEqual(client.sent_videos[1], (123456, video_b, "Title B"))
+            self.assertEqual(client.sent_documents[0], (123456, video_a, "Title A", "video_final.mp4"))
+            self.assertEqual(client.sent_documents[1], (123456, video_b, "Title B", "video_final.mp4"))
             self.assertTrue(any("Đã gửi 2 video" in text for _, text in client.sent_messages))
         finally:
             temp_dir.cleanup()

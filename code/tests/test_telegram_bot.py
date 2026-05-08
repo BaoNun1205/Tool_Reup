@@ -8,15 +8,22 @@ if str(SRC) not in sys.path:
 import tempfile
 import unittest
 
-from auto_tiktok_editor.app.telegram_bot import TelegramBotService, TelegramJobResult
+from auto_tiktok_editor.app.telegram_bot import TelegramBotService, TelegramConversationState, TelegramJobResult
 from auto_tiktok_editor.config import PipelineConfig
+
+TEST_TEMP_ROOT = ROOT / "_tmp_tests"
+TEST_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def _temporary_directory():
+    return tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT))
 
 
 class FakeTelegramClient(object):
     def __init__(self, base_dir: Path):
         self.base_dir = base_dir
         self.sent_messages = []
-        self.sent_videos = []
+        self.sent_documents = []
 
     def get_updates(self, offset, timeout_seconds):
         return []
@@ -24,8 +31,8 @@ class FakeTelegramClient(object):
     def send_message(self, chat_id, text):
         self.sent_messages.append((chat_id, text))
 
-    def send_video(self, chat_id, video_path, caption=None):
-        self.sent_videos.append((chat_id, Path(video_path), caption))
+    def send_document(self, chat_id, document_path, caption=None, filename=None):
+        self.sent_documents.append((chat_id, Path(document_path), caption, filename))
 
     def download_file(self, file_id, destination_dir, preferred_name=None):
         destination_dir.mkdir(parents=True, exist_ok=True)
@@ -87,7 +94,7 @@ class DeferredExecutor(object):
 
 class TelegramBotServiceTests(unittest.TestCase):
     def test_myid_command_returns_chat_identity(self):
-        temp_dir = tempfile.TemporaryDirectory()
+        temp_dir = _temporary_directory()
         try:
             base_dir = Path(temp_dir.name)
             client = FakeTelegramClient(base_dir)
@@ -121,7 +128,7 @@ class TelegramBotServiceTests(unittest.TestCase):
             temp_dir.cleanup()
 
     def test_collects_link_and_image_then_replies_with_video_and_title(self):
-        temp_dir = tempfile.TemporaryDirectory()
+        temp_dir = _temporary_directory()
         try:
             base_dir = Path(temp_dir.name)
             video_path = base_dir / "final_video.mp4"
@@ -164,10 +171,11 @@ class TelegramBotServiceTests(unittest.TestCase):
             self.assertEqual(job_runner.calls[0][0], 123)
             self.assertEqual(job_runner.calls[0][1], "https://www.tiktok.com/@store/video/1234567890")
             self.assertTrue(job_runner.calls[0][2].exists())
-            self.assertEqual(len(client.sent_videos), 1)
-            self.assertEqual(client.sent_videos[0][0], 123)
-            self.assertEqual(client.sent_videos[0][1], video_path)
-            self.assertEqual(client.sent_videos[0][2], "Demo source title")
+            self.assertEqual(len(client.sent_documents), 1)
+            self.assertEqual(client.sent_documents[0][0], 123)
+            self.assertEqual(client.sent_documents[0][1], video_path)
+            self.assertEqual(client.sent_documents[0][2], "Demo source title")
+            self.assertEqual(client.sent_documents[0][3], "video_final.mp4")
             self.assertTrue(any("Đã nhận link TikTok" in text for _, text in client.sent_messages))
             self.assertTrue(any("Đã nhận đủ link TikTok và ảnh sản phẩm" in text for _, text in client.sent_messages))
             self.assertFalse(any(text == "Title: Demo source title" for _, text in client.sent_messages))
@@ -175,7 +183,7 @@ class TelegramBotServiceTests(unittest.TestCase):
             temp_dir.cleanup()
 
     def test_rejects_chat_when_allowlist_is_configured(self):
-        temp_dir = tempfile.TemporaryDirectory()
+        temp_dir = _temporary_directory()
         try:
             base_dir = Path(temp_dir.name)
             client = FakeTelegramClient(base_dir)
@@ -203,12 +211,12 @@ class TelegramBotServiceTests(unittest.TestCase):
             )
 
             self.assertEqual(client.sent_messages, [(123, "Chat này chưa được cấp quyền dùng bot.")])
-            self.assertEqual(client.sent_videos, [])
+            self.assertEqual(client.sent_documents, [])
         finally:
             temp_dir.cleanup()
 
     def test_queues_multiple_jobs_for_the_same_chat_and_processes_them_in_order(self):
-        temp_dir = tempfile.TemporaryDirectory()
+        temp_dir = _temporary_directory()
         try:
             base_dir = Path(temp_dir.name)
             video_path = base_dir / "final_video.mp4"
@@ -278,7 +286,72 @@ class TelegramBotServiceTests(unittest.TestCase):
             executor.run_next()
             self.assertEqual(len(job_runner.calls), 2)
             self.assertEqual(job_runner.calls[1][1], "https://www.tiktok.com/@store/video/222")
-            self.assertEqual(len(client.sent_videos), 2)
+            self.assertEqual(len(client.sent_documents), 2)
+            self.assertTrue(all(item[3] == "video_final.mp4" for item in client.sent_documents))
+        finally:
+            temp_dir.cleanup()
+
+    def test_cleanup_command_deletes_media_and_clears_pending_jobs(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            telegram_input_root = base_dir / "telegram_inputs"
+            output_root = base_dir / "output"
+            input_image = telegram_input_root / "chat_123" / "product.jpg"
+            output_video = output_root / "session_001" / "output.mp4"
+            input_image.parent.mkdir(parents=True, exist_ok=True)
+            output_video.parent.mkdir(parents=True, exist_ok=True)
+            input_image.write_text("image", encoding="utf-8")
+            output_video.write_text("video", encoding="utf-8")
+            client = FakeTelegramClient(base_dir)
+            config = PipelineConfig(
+                allow_local_telegram=True,
+                telegram_bot_token="token",
+                telegram_input_root=telegram_input_root,
+                default_output_root=output_root,
+            )
+            service = TelegramBotService(
+                config=config,
+                client=client,
+                job_runner=FakeTelegramJobRunner(base_dir / "unused.mp4"),
+                executor=InlineExecutor(),
+            )
+            service._chat_states[123] = TelegramConversationState(
+                draft_source_video_url="https://www.tiktok.com/@store/video/cleanup",
+            )
+
+            service.handle_update({"message": {"chat": {"id": 123}, "text": "/cleanup"}})
+
+            self.assertFalse(input_image.exists())
+            self.assertFalse(output_video.exists())
+            self.assertIsNone(service._chat_states[123].draft_source_video_url)
+            self.assertEqual(service._chat_states[123].queued_jobs, [])
+            self.assertTrue(any("Hang doi Telegram" in text for _, text in client.sent_messages))
+        finally:
+            temp_dir.cleanup()
+
+    def test_cleanup_command_refuses_while_processing_job_is_running(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            client = FakeTelegramClient(base_dir)
+            config = PipelineConfig(
+                allow_local_telegram=True,
+                telegram_bot_token="token",
+                telegram_input_root=base_dir / "telegram_inputs",
+                default_output_root=base_dir / "output",
+            )
+            service = TelegramBotService(
+                config=config,
+                client=client,
+                job_runner=FakeTelegramJobRunner(base_dir / "unused.mp4"),
+                executor=InlineExecutor(),
+            )
+            service._chat_states[123] = TelegramConversationState(processing=True)
+
+            service.handle_update({"message": {"chat": {"id": 123}, "text": "/cleanup"}})
+
+            self.assertTrue(any("Dang co job Telegram" in text for _, text in client.sent_messages))
         finally:
             temp_dir.cleanup()
 

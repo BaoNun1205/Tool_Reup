@@ -144,10 +144,7 @@ def _env_chat_ids(name: str):
     return tuple(chat_ids)
 
 
-def _resolve_telegram_bot_token() -> str:
-    configured = os.getenv("AUTO_EDITOR_TELEGRAM_BOT_TOKEN", "").strip()
-    if configured:
-        return configured
+def _read_telegram_bot_token_file() -> str:
     try:
         if TELEGRAM_BOT_TOKEN_FILE.exists():
             return TELEGRAM_BOT_TOKEN_FILE.read_text(encoding="utf-8").strip()
@@ -319,7 +316,9 @@ class PipelineConfig:
         telegram_runtime_settings = load_telegram_runtime_settings()
         commercial_mode = _env_flag("AUTO_EDITOR_COMMERCIAL_MODE", True)
         env_allow_local_telegram = _env_flag("AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM", False)
-        resolved_telegram_bot_token = _resolve_telegram_bot_token() or telegram_runtime_settings.bot_token
+        env_telegram_bot_token = os.getenv("AUTO_EDITOR_TELEGRAM_BOT_TOKEN", "").strip()
+        file_telegram_bot_token = _read_telegram_bot_token_file()
+        resolved_telegram_bot_token = env_telegram_bot_token or telegram_runtime_settings.bot_token or file_telegram_bot_token
         resolved_telegram_delivery_chat_id = (
             os.getenv("AUTO_EDITOR_TELEGRAM_DELIVERY_CHAT_ID", "").strip()
             or telegram_runtime_settings.delivery_chat_id

@@ -44,7 +44,12 @@ class TelegramDeliveryService(object):
             if video_path is None or not video_path.exists():
                 skipped.append(item.row_id)
                 continue
-            self.client.send_video(chat_id, video_path, caption=self._build_caption(item))
+            self.client.send_document(
+                chat_id,
+                video_path,
+                caption=self._build_caption(item),
+                filename="video_final.mp4",
+            )
             sent_count += 1
 
         if sent_count == 0:

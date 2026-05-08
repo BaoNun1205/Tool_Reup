@@ -17,6 +17,7 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 import uuid
 
+from auto_tiktok_editor.app.media_cleanup import cleanup_media_storage, format_cleanup_report
 from auto_tiktok_editor.app.orchestrator import SessionOrchestrator
 from auto_tiktok_editor.commercial_runtime import ensure_local_telegram_allowed
 from auto_tiktok_editor.config import PipelineConfig
@@ -74,17 +75,27 @@ class TelegramBotClient(object):
             timeout=30,
         )
 
-    def send_video(self, chat_id: int, video_path: Path, caption: Optional[str] = None) -> None:
-        fields = {"chat_id": str(chat_id), "supports_streaming": "true"}
+    def send_document(
+        self,
+        chat_id: int,
+        document_path: Path,
+        caption: Optional[str] = None,
+        filename: Optional[str] = None,
+    ) -> None:
+        fields = {"chat_id": str(chat_id)}
         if caption:
             fields["caption"] = caption
         self._call_multipart_api(
-            "sendVideo",
+            "sendDocument",
             fields=fields,
-            file_field="video",
-            file_path=video_path,
+            file_field="document",
+            file_path=document_path,
+            upload_filename=filename,
             timeout=300,
         )
+
+    def send_video(self, chat_id: int, video_path: Path, caption: Optional[str] = None) -> None:
+        self.send_document(chat_id, video_path, caption=caption, filename="video_final.mp4")
 
     def download_file(self, file_id: str, destination_dir: Path, preferred_name: Optional[str] = None) -> Path:
         file_info = self._call_json_api("getFile", payload={"file_id": file_id}, timeout=30)
@@ -119,6 +130,7 @@ class TelegramBotClient(object):
         fields: Dict[str, str],
         file_field: str,
         file_path: Path,
+        upload_filename: Optional[str] = None,
         timeout: int = 300,
     ) -> None:
         boundary = "----AutoTelegram%s" % uuid.uuid4().hex
@@ -133,7 +145,7 @@ class TelegramBotClient(object):
         body.extend(
             (
                 'Content-Disposition: form-data; name="%s"; filename="%s"\r\n'
-                % (file_field, file_path.name)
+                % (file_field, upload_filename or file_path.name)
             ).encode("utf-8")
         )
         body.extend(("Content-Type: %s\r\n\r\n" % mime_type).encode("utf-8"))
@@ -227,6 +239,7 @@ class TelegramBotService(object):
             thread_name_prefix="telegram-job",
         )
         self._chat_states = {}  # type: Dict[int, TelegramConversationState]
+        self._recent_chat_ids: List[int] = []
         self._state_lock = threading.Lock()
         self._stop_event = threading.Event()
 
@@ -267,6 +280,7 @@ class TelegramBotService(object):
         if chat_id is None:
             return
         chat_id = int(chat_id)
+        self._remember_chat_id(chat_id)
         if not self._is_chat_allowed(chat_id):
             self.client.send_message(chat_id, "Chat này chưa được cấp quyền dùng bot.")
             return
@@ -281,6 +295,15 @@ class TelegramBotService(object):
             with self._state_lock:
                 self._chat_states.pop(chat_id, None)
             self.client.send_message(chat_id, "Đã xoá dữ liệu tạm và hàng đợi của chat này.")
+            return
+
+        if text_value.startswith("/cleanup"):
+            if self.has_processing_jobs():
+                self.client.send_message(chat_id, "Dang co job Telegram duoc xu ly. Hay doi xong roi thu lai lenh /cleanup.")
+                return
+            self.clear_pending_jobs()
+            report = cleanup_media_storage(self.config)
+            self.client.send_message(chat_id, "%s Hang doi Telegram cung da duoc lam moi." % format_cleanup_report(report))
             return
 
         received_url = self._extract_tiktok_url(text_value)
@@ -341,7 +364,12 @@ class TelegramBotService(object):
                 )
                 return
             caption = result.source_title or "Video đã edit xong."
-            self.client.send_video(chat_id, result.final_video_path, caption=caption)
+            self.client.send_document(
+                chat_id,
+                result.final_video_path,
+                caption=caption,
+                filename="video_final.mp4",
+            )
         except Exception as exc:
             self.logger.exception("Telegram job failed for chat %s.", chat_id)
             self.client.send_message(chat_id, "Có lỗi khi xử lý job: %s" % exc)
@@ -431,7 +459,8 @@ class TelegramBotService(object):
             "Mỗi khi đủ 1 cặp, bot sẽ tự đưa vào hàng đợi và xử lý lần lượt. "
             "Bạn có thể gửi link trước rồi gửi ảnh sau, hoặc gửi ảnh kèm caption chứa link. "
             "Lệnh /myid sẽ trả về Chat ID của bạn. "
-            "Lệnh /reset sẽ xoá input tạm và hàng đợi của chat hiện tại."
+            "Lệnh /reset sẽ xoá input tạm và hàng đợi của chat hiện tại. "
+            "Lệnh /cleanup sẽ xoa toan bo video, anh trong input/output va lam moi hang doi Telegram."
         )
 
     def _chat_identity_text(self, message: Dict[str, object]) -> str:
@@ -446,6 +475,31 @@ class TelegramBotService(object):
         if title:
             lines.append("Tên chat: %s" % title)
         return "\n".join(lines)
+
+    def latest_chat_id(self) -> Optional[int]:
+        with self._state_lock:
+            return self._recent_chat_ids[-1] if self._recent_chat_ids else None
+
+    def has_processing_jobs(self) -> bool:
+        with self._state_lock:
+            return any(state.processing for state in self._chat_states.values())
+
+    def clear_pending_jobs(self) -> None:
+        with self._state_lock:
+            for state in self._chat_states.values():
+                if state.processing:
+                    continue
+                state.draft_source_video_url = None
+                state.draft_product_image_path = None
+                state.queued_jobs = []
+
+    def _remember_chat_id(self, chat_id: int) -> None:
+        with self._state_lock:
+            if chat_id in self._recent_chat_ids:
+                self._recent_chat_ids.remove(chat_id)
+            self._recent_chat_ids.append(chat_id)
+            if len(self._recent_chat_ids) > 10:
+                self._recent_chat_ids = self._recent_chat_ids[-10:]
 
     def _is_chat_allowed(self, chat_id: int) -> bool:
         allowed_chat_ids = tuple(self.config.telegram_allowed_chat_ids or ())

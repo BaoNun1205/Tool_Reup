@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 from auto_tiktok_editor.cli import _require_cached_license_session
+from auto_tiktok_editor.commercial_entry import COMMERCIAL_LICENSE_SERVER_URL
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.license.config import LicenseClientConfig
 from auto_tiktok_editor.license.exceptions import LicenseAuthenticationRequired
@@ -143,9 +144,14 @@ class LaunchUiTests(unittest.TestCase):
         fake_root.mainloop.assert_called_once()
 
     def test_launch_ui_returns_non_zero_when_login_dialog_is_cancelled(self):
-        with mock.patch("auto_tiktok_editor.ui.app.ensure_ui_license_session", return_value=None):
-            with mock.patch("auto_tiktok_editor.ui.app.tk.Tk") as mocked_tk:
-                exit_code = launch_ui()
+        with mock.patch.dict(
+            "os.environ",
+            {"AUTO_EDITOR_LICENSE_SERVER_URL": COMMERCIAL_LICENSE_SERVER_URL, "AUTO_EDITOR_COMMERCIAL_MODE": "1"},
+            clear=False,
+        ):
+            with mock.patch("auto_tiktok_editor.ui.app.ensure_ui_license_session", return_value=None):
+                with mock.patch("auto_tiktok_editor.ui.app.tk.Tk") as mocked_tk:
+                    exit_code = launch_ui()
 
         self.assertEqual(exit_code, 1)
         mocked_tk.assert_not_called()
@@ -164,10 +170,15 @@ class LaunchUiTests(unittest.TestCase):
         )
         fake_root = mock.Mock()
 
-        with mock.patch("auto_tiktok_editor.ui.app.ensure_ui_license_session", return_value=fake_session):
-            with mock.patch("auto_tiktok_editor.ui.app.tk.Tk", return_value=fake_root) as mocked_tk:
-                with mock.patch("auto_tiktok_editor.ui.app.EditorApplication") as mocked_app:
-                    exit_code = launch_ui()
+        with mock.patch.dict(
+            "os.environ",
+            {"AUTO_EDITOR_LICENSE_SERVER_URL": COMMERCIAL_LICENSE_SERVER_URL, "AUTO_EDITOR_COMMERCIAL_MODE": "1"},
+            clear=False,
+        ):
+            with mock.patch("auto_tiktok_editor.ui.app.ensure_ui_license_session", return_value=fake_session):
+                with mock.patch("auto_tiktok_editor.ui.app.tk.Tk", return_value=fake_root) as mocked_tk:
+                    with mock.patch("auto_tiktok_editor.ui.app.EditorApplication") as mocked_app:
+                        exit_code = launch_ui()
 
         self.assertEqual(exit_code, 0)
         mocked_tk.assert_called_once()
@@ -204,19 +215,24 @@ class LaunchUiTests(unittest.TestCase):
         fake_app_two = mock.Mock()
         fake_app_two.reauthenticate_requested = False
 
-        with mock.patch(
-            "auto_tiktok_editor.ui.app.ensure_ui_license_session",
-            side_effect=[session_one, session_two],
+        with mock.patch.dict(
+            "os.environ",
+            {"AUTO_EDITOR_LICENSE_SERVER_URL": COMMERCIAL_LICENSE_SERVER_URL, "AUTO_EDITOR_COMMERCIAL_MODE": "1"},
+            clear=False,
         ):
             with mock.patch(
-                "auto_tiktok_editor.ui.app.tk.Tk",
-                side_effect=[fake_root_one, fake_root_two],
-            ) as mocked_tk:
+                "auto_tiktok_editor.ui.app.ensure_ui_license_session",
+                side_effect=[session_one, session_two],
+            ):
                 with mock.patch(
-                    "auto_tiktok_editor.ui.app.EditorApplication",
-                    side_effect=[fake_app_one, fake_app_two],
-                ) as mocked_app:
-                    exit_code = launch_ui()
+                    "auto_tiktok_editor.ui.app.tk.Tk",
+                    side_effect=[fake_root_one, fake_root_two],
+                ) as mocked_tk:
+                    with mock.patch(
+                        "auto_tiktok_editor.ui.app.EditorApplication",
+                        side_effect=[fake_app_one, fake_app_two],
+                    ) as mocked_app:
+                        exit_code = launch_ui()
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(mocked_tk.call_count, 2)

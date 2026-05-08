@@ -12,8 +12,16 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
+from auto_tiktok_editor.app.media_cleanup import MediaCleanupReport
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.ui.app import EditorApplication
+
+TEST_TEMP_ROOT = ROOT / "_tmp_tests"
+TEST_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def _temporary_directory():
+    return tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT))
 
 
 class FakeVar(object):
@@ -72,6 +80,150 @@ class EditorApplicationTests(unittest.TestCase):
         self.assertEqual(runtime_config.telegram_delivery_chat_id, "123456789")
         self.assertEqual(runtime_config.telegram_allowed_chat_ids, (123456789,))
 
+    def test_runtime_telegram_config_allows_token_without_chat_id(self):
+        app = EditorApplication.__new__(EditorApplication)
+        app.config = PipelineConfig(commercial_mode=True)
+        app.telegram_bot_token_var = FakeVar("bot-token")
+        app.telegram_chat_id_var = FakeVar("")
+
+        runtime_config = app._runtime_telegram_config()
+
+        self.assertTrue(runtime_config.allow_local_telegram)
+        self.assertEqual(runtime_config.telegram_bot_token, "bot-token")
+        self.assertEqual(runtime_config.telegram_delivery_chat_id, "")
+        self.assertEqual(runtime_config.telegram_allowed_chat_ids, ())
+
+    def test_media_cleanup_config_uses_current_output_root_and_updates_default_input_root(self):
+        app = EditorApplication.__new__(EditorApplication)
+        app.config = PipelineConfig(
+            commercial_mode=True,
+            default_output_root=Path("d:/old_output"),
+            telegram_input_root=Path("d:/old_output/_telegram_inputs"),
+        )
+        app.output_root_var = FakeVar("d:/new_output")
+        app.telegram_bot_token_var = FakeVar("bot-token")
+        app.telegram_chat_id_var = FakeVar("")
+
+        cleanup_config = app._media_cleanup_config()
+
+        self.assertEqual(cleanup_config.default_output_root, Path("d:/new_output").resolve())
+        self.assertEqual(cleanup_config.telegram_input_root, Path("d:/new_output/_telegram_inputs").resolve())
+
+    def test_extract_telegram_chat_id_from_latest_update(self):
+        app = EditorApplication.__new__(EditorApplication)
+
+        chat_id = app._extract_chat_id_from_updates(
+            [
+                {"update_id": 1, "message": {"chat": {"id": 111}}},
+                {"update_id": 2, "edited_message": {"chat": {"id": 222}}},
+            ]
+        )
+
+        self.assertEqual(chat_id, 222)
+
+    def test_fetch_telegram_chat_id_worker_queues_result(self):
+        app = EditorApplication.__new__(EditorApplication)
+        queued_events = []
+        client = mock.Mock()
+        client.get_updates.return_value = [{"message": {"chat": {"id": 654321}}}]
+        app.telegram_bot_service = None
+        app._telegram_client = mock.Mock(return_value=client)
+        app._queue_event = lambda event: queued_events.append(event)
+
+        app._fetch_telegram_chat_id_worker()
+
+        self.assertEqual(queued_events[0].event_type, "telegram_chat_id_lookup_result")
+        self.assertEqual(queued_events[0].payload["chat_id"], "654321")
+
+    def test_fetch_telegram_chat_id_worker_prefers_running_bot_state(self):
+        app = EditorApplication.__new__(EditorApplication)
+        queued_events = []
+        app.telegram_bot_service = mock.Mock()
+        app.telegram_bot_service.latest_chat_id.return_value = 777888999
+        app._telegram_client = mock.Mock()
+        app._queue_event = lambda event: queued_events.append(event)
+
+        app._fetch_telegram_chat_id_worker()
+
+        app._telegram_client.assert_not_called()
+        self.assertEqual(queued_events[0].event_type, "telegram_chat_id_lookup_result")
+        self.assertEqual(queued_events[0].payload["chat_id"], "777888999")
+
+    def test_test_telegram_bot_worker_queues_result(self):
+        app = EditorApplication.__new__(EditorApplication)
+        queued_events = []
+        client = mock.Mock()
+        app._telegram_client = mock.Mock(return_value=client)
+        app._queue_event = lambda event: queued_events.append(event)
+
+        app._test_telegram_bot_worker(123456)
+
+        client.send_message.assert_called_once()
+        self.assertEqual(queued_events[0].event_type, "telegram_test_result")
+        self.assertEqual(queued_events[0].payload["chat_id"], "123456")
+
+    def test_cleanup_media_storage_stops_when_telegram_bot_is_processing(self):
+        app = EditorApplication.__new__(EditorApplication)
+        app.running = False
+        app.telegram_bot_service = mock.Mock()
+        app.telegram_bot_service.has_processing_jobs.return_value = True
+
+        with mock.patch("auto_tiktok_editor.ui.app.messagebox.showwarning") as showwarning:
+            app._cleanup_media_storage()
+
+        showwarning.assert_called_once()
+
+    def test_apply_media_cleanup_result_clears_review_state_when_current_session_is_affected(self):
+        app = EditorApplication.__new__(EditorApplication)
+        app.rows = [
+            type(
+                "Row",
+                (),
+                {
+                    "output_dir": "d:/cleanup_root/session_001",
+                    "preview_video_path": "d:/cleanup_root/session_001/output.mp4",
+                    "open_button": FakeButton(),
+                    "rerun_button": FakeButton(),
+                },
+            )()
+        ]
+        app.latest_result = mock.Mock(
+            artifacts=mock.Mock(session_dir=Path("d:/cleanup_root/session_001")),
+            items=[
+                mock.Mock(
+                    output_dir=Path("d:/cleanup_root/session_001"),
+                    artifacts=mock.Mock(final_video_path=Path("d:/cleanup_root/session_001/output.mp4")),
+                )
+            ],
+        )
+        app.review_ready = True
+        app.current_session_dir = "d:/cleanup_root/session_001"
+        app.summary_path_var = FakeVar("old")
+        app.summary_counts_var = FakeVar("old counts")
+        app.open_session_button = FakeButton()
+        app._append_log = lambda *args, **kwargs: None
+        app._set_review_action_buttons_state = lambda: None
+        app._set_session_status = lambda *args, **kwargs: None
+        row_status_updates = []
+        app._set_row_status = lambda row, status, detail: row_status_updates.append((status, detail))
+
+        app._apply_media_cleanup_result(
+            MediaCleanupReport(
+                roots=[Path("d:/cleanup_root")],
+                deleted_files=3,
+            )
+        )
+
+        self.assertIsNone(app.latest_result)
+        self.assertFalse(app.review_ready)
+        self.assertIsNone(app.current_session_dir)
+        self.assertEqual(app.summary_path_var.get(), "Đã dọn video và ảnh trong input/output.")
+        self.assertEqual(app.summary_counts_var.get(), "1 item | đã dọn 3 file media")
+        self.assertEqual(app.open_session_button.state, "disabled")
+        self.assertEqual(app.rows[0].open_button.state, "disabled")
+        self.assertEqual(app.rows[0].rerun_button.state, "disabled")
+        self.assertTrue(any(status == "draft" for status, _ in row_status_updates))
+
     def test_blur_percent_defaults_to_config_fade_ratio(self):
         app = EditorApplication.__new__(EditorApplication)
         app.config = PipelineConfig(split_separator_fade_ratio=0.50)
@@ -120,7 +272,7 @@ class EditorApplicationTests(unittest.TestCase):
         self.assertEqual(row.rerun_button.state, "disabled")
 
     def test_prepare_bulk_import_items_pairs_links_with_images_in_natural_order(self):
-        temp_dir = tempfile.TemporaryDirectory()
+        temp_dir = _temporary_directory()
         try:
             folder = Path(temp_dir.name)
             (folder / "image_10.jpg").write_text("x", encoding="utf-8")
@@ -148,7 +300,7 @@ class EditorApplicationTests(unittest.TestCase):
             temp_dir.cleanup()
 
     def test_prepare_bulk_import_items_requires_matching_counts(self):
-        temp_dir = tempfile.TemporaryDirectory()
+        temp_dir = _temporary_directory()
         try:
             folder = Path(temp_dir.name)
             (folder / "image_1.png").write_text("x", encoding="utf-8")

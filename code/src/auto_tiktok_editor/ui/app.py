@@ -14,8 +14,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from typing import Dict, List, Optional
 
+from auto_tiktok_editor.app.media_cleanup import MediaCleanupReport, cleanup_media_storage, format_cleanup_report
 from auto_tiktok_editor.app.orchestrator import SessionOrchestrator
-from auto_tiktok_editor.app.telegram_bot import TelegramBotService
+from auto_tiktok_editor.app.telegram_bot import TelegramBotClient, TelegramBotService
 from auto_tiktok_editor.app.telegram_delivery import TelegramDeliveryService
 from auto_tiktok_editor.commercial_runtime import configure_tk_environment, ensure_runtime_allowed
 from auto_tiktok_editor.config import PipelineConfig
@@ -156,6 +157,10 @@ class EditorApplication(object):
         self.telegram_token_entry = None
         self.telegram_chat_id_entry = None
         self.telegram_status_label = None
+        self.telegram_fetch_chat_id_button = None
+        self.telegram_test_button = None
+        self.telegram_send_button = None
+        self.cleanup_media_button = None
         self.session_name_var = tk.StringVar()
         self.output_root_var = tk.StringVar(value=str(self.config.default_output_root))
         self.telegram_bot_token_var = tk.StringVar(value=str(self.config.telegram_bot_token or ""))
@@ -170,7 +175,6 @@ class EditorApplication(object):
         self._build_styles()
         self._build_layout()
         if self._supports_local_telegram_configuration():
-            self.finalize_button.configure(text="Gửi qua Telegram", command=self._send_session_via_telegram)
             self._start_embedded_telegram_bot_if_configured()
         self._add_row()
         self.root.after(self.config.ui_poll_interval_ms, self._poll_events)
@@ -233,12 +237,30 @@ class EditorApplication(object):
             telegram_allowed_chat_ids=allowed_chat_ids,
         )
 
+    def _media_cleanup_config(self) -> PipelineConfig:
+        runtime_config = self._runtime_telegram_config()
+        output_root = Path(self.output_root_var.get().strip() or str(self.config.default_output_root)).expanduser().resolve()
+        telegram_input_root = Path(runtime_config.telegram_input_root).expanduser().resolve()
+        default_telegram_input_root = Path(self.config.default_output_root).expanduser().resolve() / "_telegram_inputs"
+        if telegram_input_root == default_telegram_input_root:
+            telegram_input_root = output_root / "_telegram_inputs"
+        return replace(
+            runtime_config,
+            default_output_root=output_root,
+            telegram_input_root=telegram_input_root,
+        )
+
+
     def _telegram_status_text(self) -> str:
         if self.config.telegram_bot_token:
             if getattr(self, "telegram_bot_thread", None) is not None:
-                return "Bot Telegram riêng của bạn đang chạy nền."
-            return "Đã có cấu hình Telegram riêng. App sẽ tự khởi động bot khi mở."
-        return "Nhập bot token và chat ID của riêng bạn để bật Telegram trên máy này."
+                if self.config.telegram_delivery_chat_id:
+                    return "Bot Telegram riêng của bạn đang chạy nền và đã lưu sẵn chat ID để gửi video."
+                return "Bot Telegram riêng của bạn đang chạy nền. Bạn có thể nhập chat ID sau khi lấy được từ bot."
+            if self.config.telegram_delivery_chat_id:
+                return "Đã có cấu hình Telegram riêng. App sẽ tự khởi động bot và dùng chat ID đã lưu khi mở."
+            return "Đã lưu bot token riêng. App sẽ tự khởi động bot khi mở, chat ID có thể nhập sau."
+        return "Nhập bot token của riêng bạn để bật Telegram trên máy này. Chat ID chỉ cần khi muốn gửi video."
 
     def _save_telegram_settings(self) -> None:
         token = self.telegram_bot_token_var.get().strip()
@@ -256,7 +278,7 @@ class EditorApplication(object):
             self.telegram_status_var.set("Đã tắt Telegram riêng trên máy này.")
             self._append_log("Đã xóa cấu hình Telegram riêng khỏi máy này.")
             return
-        if self._normalize_telegram_chat_id(delivery_chat_id) is None:
+        if delivery_chat_id and self._normalize_telegram_chat_id(delivery_chat_id) is None:
             messagebox.showerror("Telegram Chat ID chưa hợp lệ", "Nhập Telegram Chat ID dạng số nguyên hợp lệ.")
             return
         save_telegram_runtime_settings(
@@ -266,8 +288,12 @@ class EditorApplication(object):
             )
         )
         self.config = self._runtime_telegram_config()
-        self.telegram_status_var.set("Đã lưu cấu hình Telegram riêng. Bot sẽ được khởi động trên máy này.")
-        self._append_log("Đã lưu cấu hình Telegram riêng cho khách hàng hiện tại.")
+        if delivery_chat_id:
+            self.telegram_status_var.set("Đã lưu bot token và chat ID Telegram riêng. Bot sẽ được khởi động trên máy này.")
+            self._append_log("Đã lưu cấu hình Telegram riêng và chat ID gửi video.")
+        else:
+            self.telegram_status_var.set("Đã lưu bot token Telegram riêng. Bot sẽ được khởi động trên máy này, chat ID có thể nhập sau.")
+            self._append_log("Đã lưu bot token Telegram riêng cho máy này.")
         self._restart_embedded_telegram_bot()
 
     def _stop_embedded_telegram_bot(self) -> None:
@@ -284,6 +310,97 @@ class EditorApplication(object):
     def _restart_embedded_telegram_bot(self) -> None:
         self._stop_embedded_telegram_bot()
         self._start_embedded_telegram_bot_if_configured()
+
+    def _telegram_client(self) -> TelegramBotClient:
+        token = self.telegram_bot_token_var.get().strip()
+        if not token:
+            raise ValueError("Hãy nhập Telegram Bot Token trước.")
+        return TelegramBotClient(token, logger=self.logger)
+
+    def _extract_chat_id_from_updates(self, updates) -> Optional[int]:
+        if not isinstance(updates, list):
+            return None
+        for update in reversed(updates):
+            if not isinstance(update, dict):
+                continue
+            for key in ("message", "edited_message", "channel_post", "edited_channel_post"):
+                payload = update.get(key)
+                if not isinstance(payload, dict):
+                    continue
+                chat = payload.get("chat")
+                if not isinstance(chat, dict):
+                    continue
+                chat_id = chat.get("id")
+                if chat_id is None:
+                    continue
+                try:
+                    return int(chat_id)
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+    def _fetch_telegram_chat_id(self) -> None:
+        try:
+            self._telegram_client()
+        except Exception as exc:
+            messagebox.showerror("Chưa có Bot Token", str(exc))
+            return
+        self.telegram_status_var.set("Đang lấy chat ID từ bot Telegram...")
+        self._append_log("Đang lấy chat ID từ các update mới nhất của bot Telegram.")
+        threading.Thread(target=self._fetch_telegram_chat_id_worker, daemon=True).start()
+
+    def _fetch_telegram_chat_id_worker(self) -> None:
+        try:
+            chat_id = None
+            if self.telegram_bot_service is not None:
+                chat_id = self.telegram_bot_service.latest_chat_id()
+            if chat_id is None:
+                client = self._telegram_client()
+                updates = client.get_updates(offset=None, timeout_seconds=1)
+                chat_id = self._extract_chat_id_from_updates(updates)
+            if chat_id is None:
+                raise ValueError(
+                    "Chưa thấy tin nhắn nào gửi tới bot. Hãy nhắn /myid hoặc một tin bất kỳ cho bot, "
+                    "đợi bot phản hồi rồi thử lại."
+                )
+            self._queue_event(
+                SessionEvent(
+                    event_type="telegram_chat_id_lookup_result",
+                    payload={"chat_id": str(chat_id)},
+                )
+            )
+        except Exception as exc:
+            self._queue_event(SessionEvent(event_type="telegram_chat_id_lookup_failed", message=str(exc)))
+
+    def _test_telegram_bot(self) -> None:
+        try:
+            self._telegram_client()
+        except Exception as exc:
+            messagebox.showerror("Chưa có Bot Token", str(exc))
+            return
+        chat_id = self._normalize_telegram_chat_id(self.telegram_chat_id_var.get())
+        if chat_id is None:
+            messagebox.showerror("Thiếu Telegram Chat ID", "Nhập Telegram Chat ID hợp lệ trước khi test bot.")
+            return
+        self.telegram_status_var.set("Đang gửi tin nhắn test tới Telegram...")
+        self._append_log("Đang gửi tin nhắn test tới chat %s." % chat_id)
+        threading.Thread(target=self._test_telegram_bot_worker, args=(chat_id,), daemon=True).start()
+
+    def _test_telegram_bot_worker(self, chat_id: int) -> None:
+        try:
+            client = self._telegram_client()
+            client.send_message(
+                chat_id,
+                "Test bot thành công từ Auto TikTok Editor.\nChat ID hiện tại: %s" % chat_id,
+            )
+            self._queue_event(
+                SessionEvent(
+                    event_type="telegram_test_result",
+                    payload={"chat_id": str(chat_id)},
+                )
+            )
+        except Exception as exc:
+            self._queue_event(SessionEvent(event_type="telegram_test_failed", message=str(exc)))
 
     def _build_styles(self) -> None:
         style = ttk.Style(self.root)
@@ -389,7 +506,7 @@ class EditorApplication(object):
         self.add_row_button = ttk.Button(actions, text="+ Thêm dòng", style="Secondary.TButton", command=self._add_row)
         self.add_row_button.grid(row=0, column=0, sticky="w")
         self.run_button = ttk.Button(actions, text="Chạy session", style="Primary.TButton", command=self._start_session)
-        self.bulk_import_button = ttk.Button(actions, text="Nh\u1eadp h\u00e0ng lo\u1ea1t", style="Secondary.TButton", command=self._open_bulk_import_dialog)
+        self.bulk_import_button = ttk.Button(actions, text="Nhập hàng loạt", style="Secondary.TButton", command=self._open_bulk_import_dialog)
         self.bulk_import_button.grid(row=0, column=1, sticky="w", padx=(12, 0))
         self.run_button.grid(row=0, column=2, sticky="e")
 
@@ -439,15 +556,34 @@ class EditorApplication(object):
             ttk.Label(self.summary_host, text="Telegram Bot Token", style="Head.TLabel").pack(anchor="w", pady=(18, 0))
             self.telegram_token_entry = ttk.Entry(self.summary_host, textvariable=self.telegram_bot_token_var)
             self.telegram_token_entry.pack(fill="x", pady=(8, 0))
-            ttk.Label(self.summary_host, text="Telegram Chat ID", style="Head.TLabel").pack(anchor="w", pady=(14, 0))
+            ttk.Label(self.summary_host, text="Telegram Chat ID (Gõ /myid)", style="Head.TLabel").pack(anchor="w", pady=(14, 0))
             self.telegram_chat_id_entry = ttk.Entry(self.summary_host, textvariable=self.telegram_chat_id_var)
             self.telegram_chat_id_entry.pack(fill="x", pady=(8, 0))
+            telegram_actions = ttk.Frame(self.summary_host, style="Card.TFrame")
+            telegram_actions.pack(fill="x", pady=(12, 0))
+            telegram_actions.columnconfigure(0, weight=1)
+            telegram_actions.columnconfigure(1, weight=1)
+            telegram_actions.columnconfigure(2, weight=1)
             ttk.Button(
-                self.summary_host,
+                telegram_actions,
                 text="Lưu cấu hình Telegram",
                 style="Secondary.TButton",
                 command=self._save_telegram_settings,
-            ).pack(anchor="w", pady=(12, 0))
+            ).grid(row=0, column=0, sticky="w")
+            self.telegram_fetch_chat_id_button = ttk.Button(
+                telegram_actions,
+                text="Lấy Chat ID",
+                style="Secondary.TButton",
+                command=self._fetch_telegram_chat_id,
+            )
+            self.telegram_fetch_chat_id_button.grid(row=0, column=1, sticky="w", padx=(10, 0))
+            self.telegram_test_button = ttk.Button(
+                telegram_actions,
+                text="Test bot",
+                style="Secondary.TButton",
+                command=self._test_telegram_bot,
+            )
+            self.telegram_test_button.grid(row=0, column=2, sticky="e")
             self.telegram_status_label = ttk.Label(
                 self.summary_host,
                 textvariable=self.telegram_status_var,
@@ -459,11 +595,30 @@ class EditorApplication(object):
         action_row = ttk.Frame(self.summary_host, style="Card.TFrame")
         action_row.pack(fill="x", pady=(10, 0))
         action_row.columnconfigure(0, weight=1)
-        action_row.columnconfigure(1, weight=1)
-        self.open_session_button = ttk.Button(action_row, text="Mở thư mục session", style="Secondary.TButton", command=lambda: self._open_path(self.current_session_dir), state="disabled")
-        self.open_session_button.grid(row=0, column=0, sticky="w")
-        self.finalize_button = ttk.Button(action_row, text="OK lưu vào output", style="Primary.TButton", command=self._approve_session_outputs, state="disabled")
-        self.finalize_button.grid(row=0, column=1, sticky="e")
+        left_actions = ttk.Frame(action_row, style="Card.TFrame")
+        left_actions.grid(row=0, column=0, sticky="w")
+        self.open_session_button = ttk.Button(left_actions, text="Mở thư mục session", style="Secondary.TButton", command=lambda: self._open_path(self.current_session_dir), state="disabled")
+        self.open_session_button.pack(side="left")
+        self.cleanup_media_button = ttk.Button(
+            left_actions,
+            text="Xóa media input/output",
+            style="Secondary.TButton",
+            command=self._cleanup_media_storage,
+        )
+        self.cleanup_media_button.pack(side="left", padx=(10, 0))
+        review_actions = ttk.Frame(action_row, style="Card.TFrame")
+        review_actions.grid(row=0, column=1, sticky="e")
+        self.finalize_button = ttk.Button(review_actions, text="Lưu vào output", style="Primary.TButton", command=self._approve_session_outputs, state="disabled")
+        self.finalize_button.pack(side="left")
+        if self._supports_local_telegram_configuration():
+            self.telegram_send_button = ttk.Button(
+                review_actions,
+                text="Gửi qua Telegram",
+                style="Secondary.TButton",
+                command=self._send_session_via_telegram,
+                state="disabled",
+            )
+            self.telegram_send_button.pack(side="left", padx=(10, 0))
 
         log_box = ttk.LabelFrame(self.summary_host, text="Nhật ký hoạt động", style="Panel.TLabelframe", padding=14)
         log_box.pack(fill="x", expand=True, pady=(18, 0))
@@ -577,7 +732,7 @@ class EditorApplication(object):
             return
         dialog = tk.Toplevel(self.root)
         self.bulk_import_window = dialog
-        dialog.title("Nh\u1eadp h\u00e0ng lo\u1ea1t")
+        dialog.title("Nhập hàng loạt")
         dialog.geometry("860x680")
         dialog.minsize(760, 560)
         dialog.transient(self.root)
@@ -586,10 +741,10 @@ class EditorApplication(object):
 
         container = ttk.Frame(dialog, style="Card.TFrame", padding=18)
         container.pack(fill="both", expand=True)
-        ttk.Label(container, text="Nh\u1eadp h\u00e0ng lo\u1ea1t video v\u00e0 \u1ea3nh theo th\u1ee9 t\u1ef1", style="Head.TLabel").pack(anchor="w")
+        ttk.Label(container, text="Nhập hàng loạt video và ảnh theo thứ tự", style="Head.TLabel").pack(anchor="w")
         ttk.Label(
             container,
-            text="D\u00e1n m\u1ed7i link video tr\u00ean m\u1ed9t d\u00f2ng. \u1ede d\u01b0\u1edbi ch\u1ecdn folder \u1ea3nh, app s\u1ebd gh\u00e9p \u1ea3nh th\u1ee9 1 cho video th\u1ee9 1, \u1ea3nh th\u1ee9 2 cho video th\u1ee9 2, v\u00e0 ti\u1ebfp t\u1ee5c theo th\u1ee9 t\u1ef1.",
+            text="Dán mỗi link video trên một dòng. Ở dưới chọn folder ảnh, app sẽ ghép ảnh thứ 1 cho video thứ 1, ảnh thứ 2 cho video thứ 2, và tiếp tục theo thứ tự.",
             style="Body.TLabel",
             wraplength=780,
             justify="left",
@@ -649,11 +804,11 @@ class EditorApplication(object):
         folder_box = ttk.Frame(container, style="Card.TFrame")
         folder_box.pack(fill="x", pady=(16, 0))
         folder_box.columnconfigure(0, weight=1)
-        ttk.Label(folder_box, text="Folder \u1ea3nh theo th\u1ee9 t\u1ef1", style="Head.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(folder_box, text="Folder ảnh theo thứ tự", style="Head.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Entry(folder_box, textvariable=folder_var).grid(row=1, column=0, sticky="ew", pady=(8, 0))
         ttk.Button(
             folder_box,
-            text="Ch\u1ecdn folder \u1ea3nh",
+            text="Chọn folder ảnh",
             style="Secondary.TButton",
             command=lambda: self._browse_bulk_image_folder(folder_var),
         ).grid(row=1, column=1, sticky="e", padx=(12, 0), pady=(8, 0))
@@ -661,10 +816,10 @@ class EditorApplication(object):
         action_row = ttk.Frame(container, style="Card.TFrame")
         action_row.pack(fill="x", pady=(18, 0))
         action_row.columnconfigure(0, weight=1)
-        ttk.Button(action_row, text="\u0110\u00f3ng", style="Ghost.TButton", command=self._close_bulk_import_dialog).grid(row=0, column=0, sticky="w")
+        ttk.Button(action_row, text="Đóng", style="Ghost.TButton", command=self._close_bulk_import_dialog).grid(row=0, column=0, sticky="w")
         ttk.Button(
             action_row,
-            text="\u00c1p d\u1ee5ng v\u00e0o danh s\u00e1ch",
+            text="Áp dụng vào danh sách",
             style="Primary.TButton",
             command=lambda: self._submit_bulk_import(url_text, folder_var),
         ).grid(row=0, column=1, sticky="e")
@@ -680,7 +835,7 @@ class EditorApplication(object):
         self.bulk_import_window = None
 
     def _browse_bulk_image_folder(self, folder_var: tk.StringVar) -> None:
-        selected = filedialog.askdirectory(title="Ch\u1ecdn folder \u1ea3nh cho nh\u1eadp h\u00e0ng lo\u1ea1t")
+        selected = filedialog.askdirectory(title="Chọn folder ảnh cho nhập hàng loạt")
         if selected:
             folder_var.set(selected)
 
@@ -720,7 +875,7 @@ class EditorApplication(object):
         try:
             bulk_items = self._prepare_bulk_import_items(url_text.get("1.0", "end-1c"), folder_var.get())
         except ValueError as exc:
-            messagebox.showerror("Kh\u00f4ng th\u1ec3 nh\u1eadp h\u00e0ng lo\u1ea1t", str(exc))
+            messagebox.showerror("Không thể nhập hàng loạt", str(exc))
             return
         self._apply_bulk_import_items(bulk_items)
         self._close_bulk_import_dialog()
@@ -728,20 +883,20 @@ class EditorApplication(object):
     def _prepare_bulk_import_items(self, raw_text: str, folder_path_text: str) -> List[tuple[str, Path]]:
         video_urls = [line.strip() for line in raw_text.splitlines() if line.strip()]
         if not video_urls:
-            raise ValueError("H\u00e3y nh\u1eadp \u00edt nh\u1ea5t 1 link video, m\u1ed7i d\u00f2ng 1 link.")
+            raise ValueError("Hãy nhập ít nhất 1 link video, mỗi dòng 1 link.")
         if len(video_urls) > self.config.max_session_items:
-            raise ValueError("S\u1ed1 link v\u01b0\u1ee3t qu\u00e1 gi\u1edbi h\u1ea1n %d item c\u1ee7a session." % self.config.max_session_items)
+            raise ValueError("Số link vượt quá giới hạn %d item của session." % self.config.max_session_items)
         if not folder_path_text or not folder_path_text.strip():
-            raise ValueError("H\u00e3y ch\u1ecdn folder \u1ea3nh tr\u01b0\u1edbc khi \u00e1p d\u1ee5ng.")
+            raise ValueError("Hãy chọn folder ảnh trước khi áp dụng.")
         folder_path = Path(folder_path_text).expanduser().resolve()
         if not folder_path.exists() or not folder_path.is_dir():
-            raise ValueError("Folder \u1ea3nh kh\u00f4ng t\u1ed3n t\u1ea1i ho\u1eb7c kh\u00f4ng h\u1ee3p l\u1ec7.")
+            raise ValueError("Folder ảnh không tồn tại hoặc không hợp lệ.")
         image_paths = self._list_bulk_image_paths(folder_path)
         if not image_paths:
-            raise ValueError("Folder \u1ea3nh kh\u00f4ng c\u00f3 file PNG, JPG ho\u1eb7c JPEG.")
+            raise ValueError("Folder ảnh không có file PNG, JPG hoặc JPEG.")
         if len(image_paths) != len(video_urls):
             raise ValueError(
-                "S\u1ed1 link video (%d) v\u00e0 s\u1ed1 \u1ea3nh trong folder (%d) ph\u1ea3i b\u1eb1ng nhau."
+                "Số link video (%d) và số ảnh trong folder (%d) phải bằng nhau."
                 % (len(video_urls), len(image_paths))
             )
         return list(zip(video_urls, image_paths))
@@ -772,9 +927,9 @@ class EditorApplication(object):
         self.latest_result = None
         self.current_session_dir = None
         self.review_ready = False
-        self.summary_path_var.set("Ch\u01b0a c\u00f3 output session.")
+        self.summary_path_var.set("Chưa có output session.")
         self.open_session_button.configure(state="disabled")
-        self.finalize_button.configure(state="disabled")
+        self._set_review_action_buttons_state()
         self._ensure_row_count(len(bulk_items))
         for index, (video_url, image_path) in enumerate(bulk_items):
             row = self.rows[index]
@@ -783,10 +938,10 @@ class EditorApplication(object):
             row.output_dir = None
             row.preview_video_path = None
             row.open_button.configure(state="disabled")
-            self._set_row_status(row, "draft", "\u0110\u00e3 n\u1ea1p t\u1eeb ch\u1ebf \u0111\u1ed9 nh\u1eadp h\u00e0ng lo\u1ea1t.")
-        self._set_session_status("draft", "\u0110\u00e3 n\u1ea1p %d item t\u1eeb ch\u1ebf \u0111\u1ed9 nh\u1eadp h\u00e0ng lo\u1ea1t." % len(bulk_items))
-        self.summary_counts_var.set("%d item | 0 ho\u00e0n t\u1ea5t | 0 l\u1ed7i" % len(bulk_items))
-        self._append_log("\u0110\u00e3 n\u1ea1p %d item t\u1eeb nh\u1eadp h\u00e0ng lo\u1ea1t." % len(bulk_items), reset=True)
+            self._set_row_status(row, "draft", "Đã nạp từ chế độ nhập hàng loạt.")
+        self._set_session_status("draft", "Đã nạp %d item từ chế độ nhập hàng loạt." % len(bulk_items))
+        self.summary_counts_var.set("%d item | 0 hoàn tất | 0 lỗi" % len(bulk_items))
+        self._append_log("Đã nạp %d item từ nhập hàng loạt." % len(bulk_items), reset=True)
 
     def _ensure_row_count(self, target_count: int) -> None:
         while len(self.rows) < target_count:
@@ -855,6 +1010,33 @@ class EditorApplication(object):
         except Exception as exc:
             self._queue_event(SessionEvent(event_type="telegram_delivery_failed", message=str(exc)))
 
+    def _cleanup_media_storage(self) -> None:
+        if self.running:
+            return
+        if self.telegram_bot_service is not None and self.telegram_bot_service.has_processing_jobs():
+            messagebox.showwarning(
+                "Bot Telegram đang xử lý",
+                "Bot Telegram vẫn đang chạy job. Hãy đợi xong rồi xóa media để tránh đụng file đang dùng.",
+            )
+            return
+        if not messagebox.askyesno(
+            "Xóa media input/output",
+            "Thao tác này sẽ xóa toàn bộ video và ảnh trong input/output, đồng thời làm mới hàng đợi Telegram đang chờ. Bạn có chắc muốn tiếp tục không?",
+        ):
+            return
+        self._set_running_state(True)
+        self._set_session_status("running", "Đang xóa video và ảnh trong input/output.")
+        threading.Thread(target=self._cleanup_media_storage_worker, daemon=True).start()
+
+    def _cleanup_media_storage_worker(self) -> None:
+        try:
+            if self.telegram_bot_service is not None:
+                self.telegram_bot_service.clear_pending_jobs()
+            report = cleanup_media_storage(self._media_cleanup_config())
+            self._queue_event(SessionEvent(event_type="media_cleanup_result", payload={"report": report}))
+        except Exception as exc:
+            self._queue_event(SessionEvent(event_type="media_cleanup_failed", message=str(exc)))
+
     def _finalize_session_worker(self) -> None:
         try:
             result = self.orchestrator.finalize_reviewed_session(self.latest_result, event_callback=self._queue_event)
@@ -876,8 +1058,8 @@ class EditorApplication(object):
         )
         if self.running:
             row.rerun_button.configure(state="disabled")
-            self._set_row_status(row, "processing", "\u0110ang x\u1ebfp y\u00eau c\u1ea7u t\u1ea1o l\u1ea1i cho item n\u00e0y.")
-            self._set_session_status("running", "\u0110ang t\u1ea1o l\u1ea1i item %d trong khi c\u00e1c item kh\u00e1c v\u1eabn ti\u1ebfp t\u1ee5c ch\u1ea1y." % (row_index + 1))
+            self._set_row_status(row, "processing", "Đang xếp yêu cầu tạo lại cho item này.")
+            self._set_session_status("running", "Đang tạo lại item %d trong khi các item khác vẫn tiếp tục chạy." % (row_index + 1))
             self._append_log("Queued rerun for item %d while session is still running." % (row_index + 1))
             self.session_rerun_queue.put((row_index, item_spec))
             return
@@ -903,7 +1085,7 @@ class EditorApplication(object):
 
     def _clear_all_row_states_for_run(self) -> None:
         self.review_ready = False
-        self.finalize_button.configure(state="disabled")
+        self._set_review_action_buttons_state()
         for row in self.rows:
             row.output_dir = None
             row.preview_video_path = None
@@ -912,6 +1094,49 @@ class EditorApplication(object):
             self._set_row_status(row, "queued", "Đang chờ trong hàng đợi.")
         self.summary_counts_var.set("%d item | 0 hoàn tất | 0 lỗi" % len(self.rows))
         self._append_log("Session queued with %d item(s)." % len(self.rows), reset=True)
+
+    def _apply_media_cleanup_result(self, report: Optional[MediaCleanupReport]) -> None:
+        report = report or MediaCleanupReport()
+        self._append_log("Media cleanup completed: %s" % format_cleanup_report(report))
+        if self._current_review_is_affected_by_cleanup(report):
+            self.latest_result = None
+            self.review_ready = False
+            self.current_session_dir = None
+            self.summary_path_var.set("Đã dọn video và ảnh trong input/output.")
+            self.summary_counts_var.set("%d item | đã dọn %d file media" % (len(self.rows), report.deleted_files))
+            self.open_session_button.configure(state="disabled")
+            for row in self.rows:
+                row.output_dir = None
+                row.preview_video_path = None
+                row.open_button.configure(state="disabled")
+                row.rerun_button.configure(state="disabled")
+                self._set_row_status(row, "draft", "Media output đã được xóa. Chạy lại session để tạo preview mới.")
+        self._set_review_action_buttons_state()
+        self._set_session_status("draft", "Đã dọn media trong input/output.")
+
+    def _current_review_is_affected_by_cleanup(self, report: MediaCleanupReport) -> bool:
+        cleanup_roots = tuple(Path(root).expanduser().resolve() for root in (report.roots or []))
+        if not cleanup_roots:
+            return False
+        candidate_paths = []  # type: List[Path]
+        if self.current_session_dir:
+            candidate_paths.append(Path(self.current_session_dir))
+        if self.latest_result is not None:
+            if self.latest_result.artifacts and self.latest_result.artifacts.session_dir:
+                candidate_paths.append(Path(self.latest_result.artifacts.session_dir))
+            for item in self.latest_result.items:
+                candidate_paths.append(Path(item.output_dir))
+                if item.artifacts and item.artifacts.final_video_path:
+                    candidate_paths.append(Path(item.artifacts.final_video_path))
+        for path in candidate_paths:
+            resolved = path.expanduser().resolve()
+            for root in cleanup_roots:
+                try:
+                    resolved.relative_to(root)
+                    return True
+                except ValueError:
+                    continue
+        return False
 
     def _set_running_state(self, is_running: bool) -> None:
         self.running = is_running
@@ -922,10 +1147,16 @@ class EditorApplication(object):
         self.output_root_entry.configure(state=state)
         self.output_browse_button.configure(state=state)
         self.session_name_entry.configure(state=state)
+        if self.cleanup_media_button is not None:
+            self.cleanup_media_button.configure(state=state)
         if self.telegram_token_entry is not None:
             self.telegram_token_entry.configure(state=state)
         if self.telegram_chat_id_entry is not None:
             self.telegram_chat_id_entry.configure(state=state)
+        if self.telegram_fetch_chat_id_button is not None:
+            self.telegram_fetch_chat_id_button.configure(state=state)
+        if self.telegram_test_button is not None:
+            self.telegram_test_button.configure(state=state)
         for row in self.rows:
             row.url_entry.configure(state=state)
             row.image_entry.configure(state=state)
@@ -933,10 +1164,13 @@ class EditorApplication(object):
             row.browse_button.configure(state=state)
             row.remove_button.configure(state=state)
             row.rerun_button.configure(state=self._rerun_button_state(row, is_running))
-        if is_running:
-            self.finalize_button.configure(state="disabled")
-        else:
-            self.finalize_button.configure(state="normal" if self.review_ready else "disabled")
+        self._set_review_action_buttons_state()
+
+    def _set_review_action_buttons_state(self) -> None:
+        state = "normal" if self.review_ready and not self.running else "disabled"
+        self.finalize_button.configure(state=state)
+        if self.telegram_send_button is not None:
+            self.telegram_send_button.configure(state=state)
 
     def _rerun_button_state(self, row: SessionRowWidgets, is_running: Optional[bool] = None) -> str:
         current_running = self.running if is_running is None else is_running
@@ -1063,7 +1297,7 @@ class EditorApplication(object):
         if event.event_type == "review_finalize_failed":
             self._set_running_state(False)
             self.review_ready = True
-            self.finalize_button.configure(state="normal")
+            self._set_review_action_buttons_state()
             self._append_log("Finalize failed: %s" % (event.message or ""))
             messagebox.showerror("Không thể lưu output", event.message or "Không thể lưu session.")
             return
@@ -1072,7 +1306,7 @@ class EditorApplication(object):
             payload = event.payload or {}
             self._set_running_state(False)
             self.review_ready = any(item.status == "completed" for item in (self.latest_result.items if self.latest_result else []))
-            self.finalize_button.configure(state="normal" if self.review_ready else "disabled")
+            self._set_review_action_buttons_state()
             self._set_session_status("completed_with_success", "Đã gửi video qua Telegram thành công.")
             self._append_log("Telegram delivery completed: sent %s video(s)." % payload.get("sent_count", 0))
             messagebox.showinfo(
@@ -1083,10 +1317,45 @@ class EditorApplication(object):
         if event.event_type == "telegram_delivery_failed":
             self._set_running_state(False)
             self.review_ready = True
-            self.finalize_button.configure(state="normal")
+            self._set_review_action_buttons_state()
             self._append_log("Telegram delivery failed: %s" % (event.message or ""))
             self._set_session_status("completed_with_partial_failure", event.message or "Không thể gửi session qua Telegram.")
             messagebox.showerror("Không thể gửi Telegram", event.message or "Không thể gửi session qua Telegram.")
+            return
+        if event.event_type == "media_cleanup_result":
+            report = (event.payload or {}).get("report")
+            self._set_running_state(False)
+            self._apply_media_cleanup_result(report)
+            messagebox.showinfo("Đã dọn media", format_cleanup_report(report or MediaCleanupReport()))
+            return
+        if event.event_type == "media_cleanup_failed":
+            self._set_running_state(False)
+            self._append_log("Media cleanup failed: %s" % (event.message or ""))
+            self._set_session_status("completed_with_partial_failure", event.message or "Không thể dọn media trong input/output.")
+            messagebox.showerror("Không thể dọn media", event.message or "Không thể dọn media trong input/output.")
+            return
+        if event.event_type == "telegram_chat_id_lookup_result":
+            chat_id = str((event.payload or {}).get("chat_id") or "").strip()
+            self.telegram_chat_id_var.set(chat_id)
+            self.telegram_status_var.set("Đã lấy được chat ID từ bot. Bạn có thể lưu lại hoặc gửi test ngay.")
+            self._append_log("Đã lấy được Telegram chat ID: %s" % chat_id)
+            messagebox.showinfo("Đã lấy Chat ID", "Đã tìm thấy chat ID: %s" % chat_id)
+            return
+        if event.event_type == "telegram_chat_id_lookup_failed":
+            self.telegram_status_var.set(event.message or "Không thể lấy chat ID từ bot.")
+            self._append_log("Lấy Telegram chat ID thất bại: %s" % (event.message or ""))
+            messagebox.showerror("Không thể lấy Chat ID", event.message or "Không thể lấy chat ID từ bot.")
+            return
+        if event.event_type == "telegram_test_result":
+            chat_id = str((event.payload or {}).get("chat_id") or "").strip()
+            self.telegram_status_var.set("Đã gửi tin nhắn test Telegram thành công.")
+            self._append_log("Đã gửi tin nhắn test Telegram tới chat %s." % chat_id)
+            messagebox.showinfo("Test bot thành công", "Bot đã gửi được tin nhắn test tới chat %s." % chat_id)
+            return
+        if event.event_type == "telegram_test_failed":
+            self.telegram_status_var.set(event.message or "Không thể gửi tin nhắn test Telegram.")
+            self._append_log("Test bot Telegram thất bại: %s" % (event.message or ""))
+            messagebox.showerror("Test bot thất bại", event.message or "Không thể gửi tin nhắn test Telegram.")
             return
 
     def _finalize_result(self, result: Optional[SessionResult], message: Optional[str] = None) -> None:
@@ -1110,20 +1379,20 @@ class EditorApplication(object):
             self.summary_path_var.set("Session không tạo được thư mục đầu ra.")
         if result.artifacts and result.artifacts.is_finalized:
             self.review_ready = False
-            self.finalize_button.configure(state="disabled")
+            self._set_review_action_buttons_state()
             self._set_session_status(result.status, message or "Session đã được lưu vào output cuối.")
             messagebox.showinfo("Đã lưu output", "Toàn bộ video đã được lưu vào output cuối.")
             return
         self.review_ready = any(item.status == "completed" for item in result.items)
-        self.finalize_button.configure(state="normal" if self.review_ready else "disabled")
+        self._set_review_action_buttons_state()
         if result.status == "completed_with_success":
-            self._set_session_status(result.status, message or "Tất cả video preview đã xong. Xem lại từng item, tạo lại nếu cần, rồi bấm OK để lưu.")
+            self._set_session_status(result.status, message or "Tất cả video preview đã xong. Xem lại từng item, tạo lại nếu cần, rồi bấm Lưu vào output hoặc Gửi qua Telegram.")
             if message is None:
-                messagebox.showinfo("Session sẵn sàng duyệt", "Xem lại từng video preview, nếu ổn thì bấm OK để lưu toàn bộ vào output.")
+                messagebox.showinfo("Session sẵn sàng duyệt", "Xem lại từng video preview, nếu ổn thì bấm Lưu vào output để lưu toàn bộ, hoặc Gửi qua Telegram nếu muốn.")
         elif result.status == "completed_with_partial_failure":
-            self._set_session_status(result.status, message or "Có item lỗi hoặc chưa ưng ý. Bạn có thể tạo lại các item đã xong trước khi lưu.")
+            self._set_session_status(result.status, message or "Có item lỗi hoặc chưa ưng ý. Bạn có thể tạo lại các item đã xong trước khi lưu vào output hoặc gửi Telegram.")
             if message is None:
-                messagebox.showwarning("Session cần duyệt lại", "Có item lỗi hoặc cần xem lại. Bạn có thể tạo lại từng item rồi bấm OK để lưu.")
+                messagebox.showwarning("Session cần duyệt lại", "Có item lỗi hoặc cần xem lại. Bạn có thể tạo lại từng item rồi lưu vào output hoặc gửi Telegram khi đã ổn.")
         elif result.status == "failed_session":
             messagebox.showerror("Session thất bại", "Session không hoàn tất được. Xem nhật ký để biết thêm chi tiết.")
 
@@ -1288,6 +1557,8 @@ class EditorApplication(object):
         self._append_log("License/runtime check failed: %s" % reason)
         self.run_button.configure(state="disabled")
         self.finalize_button.configure(state="disabled")
+        if self.telegram_send_button is not None:
+            self.telegram_send_button.configure(state="disabled")
         self.bulk_import_button.configure(state="disabled")
         self.add_row_button.configure(state="disabled")
         self.output_root_entry.configure(state="disabled")

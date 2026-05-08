@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 from pathlib import Path
@@ -23,6 +24,13 @@ def _log_file_path() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().with_name("commercial_startup.log")
     return Path(__file__).resolve().parents[3] / "commercial_startup.log"
+
+
+def _show_startup_error(message: str) -> None:
+    try:
+        ctypes.windll.user32.MessageBoxW(0, message, "Auto TikTok Editor", 0x10)
+    except Exception:
+        pass
 
 
 def main() -> int:
@@ -56,8 +64,13 @@ def main() -> int:
         exit_code = launch_ui(config=config)
         logging.getLogger("auto_tiktok_editor.commercial").info("Commercial UI exited with code %s.", exit_code)
         return exit_code
-    except Exception:
+    except Exception as exc:
         logging.getLogger("auto_tiktok_editor.commercial").exception("Commercial startup failed.")
+        _show_startup_error(
+            "Không thể khởi động bản thương mại.\n\n"
+            "Chi tiết: %s\n\n"
+            "Hãy kiểm tra cấu hình license server online hoặc xem file commercial_startup.log." % exc
+        )
         traceback.print_exc()
         return 1
 
