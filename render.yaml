@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: auto-tiktok-telegram-bot
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./code/Dockerfile
+    dockerContext: ./code
+    autoDeployTrigger: commit
+    healthCheckPath: /health
+    envVars:
+      - key: AUTO_EDITOR_TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: AUTO_EDITOR_TELEGRAM_ALLOWED_CHAT_IDS
+        sync: false
+      - key: AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM
+        value: "1"
+      - key: AUTO_EDITOR_OUTPUT_ROOT
+        value: /tmp/auto-tiktok-output
+      - key: AUTO_EDITOR_TELEGRAM_CLEANUP_AFTER_JOB
+        value: "1"
+      - key: AUTO_EDITOR_LAZY_DOWN_ONLY
+        value: "1"
+      - key: AUTO_EDITOR_MAX_PARALLEL_SESSION_ITEMS
+        value: "1"
+      - key: AUTO_EDITOR_TELEGRAM_AUTO_CLEANUP
+        value: "1"
+      - key: AUTO_EDITOR_TELEGRAM_CLEANUP_INTERVAL_SECONDS
+        value: "21600"
+      - key: AUTO_EDITOR_TELEGRAM_CLEANUP_MAX_AGE_SECONDS
+        value: "3600"

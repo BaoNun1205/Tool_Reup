@@ -151,6 +151,16 @@ output/
 python -m unittest discover -s tests -v
 ```
 
+## Deploy Telegram bot trên Render Free
+
+Nếu chỉ dùng cá nhân qua Telegram, deploy Web Service free trên Render bằng `render.yaml` ở root repo. Service có endpoint `/health` cho UptimeRobot ping, còn bot Telegram chạy nền trong cùng process:
+
+```bash
+auto-tiktok-telegram-web
+```
+
+Video và ảnh tạm nằm trong `/tmp`; gửi xong qua Telegram thì job được xóa. Cấu hình token, allowlist chat ID và cleanup bằng biến môi trường. Xem chi tiết trong `DEPLOY_TELEGRAM_BOT.md`.
+
 ## Giới hạn hiện tại của MVP
 
 - Session chạy tuần tự, chưa có xử lý song song.

@@ -7,32 +7,11 @@ import sys
 from auto_tiktok_editor.config import PipelineConfig
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    value = os.getenv(name)
-    if value is None:
-        return default
-    normalized = value.strip().lower()
-    if normalized in ("1", "true", "yes", "on"):
-        return True
-    if normalized in ("0", "false", "no", "off"):
-        return False
-    return default
-
-
-def ensure_runtime_allowed(config: PipelineConfig, *, surface: str) -> None:
-    if config.require_frozen_build and not config.runtime_is_frozen and not _env_flag("AUTO_EDITOR_ALLOW_SOURCE_RUNTIME", False):
-        raise RuntimeError(
-            "Ban thuong mai chi duoc phep chay tu file .exe dong goi. "
-            "Runtime hien tai cho '%s' dang la source code." % surface
-        )
-
-
 def ensure_local_telegram_allowed(config: PipelineConfig, *, surface: str) -> None:
     if config.allow_local_telegram:
         return
     raise RuntimeError(
-        "Tinh nang Telegram local da bi tat trong ban thuong mai. "
-        "Khong the su dung '%s' tren may khach." % surface
+        "Telegram bot is not configured. Set AUTO_EDITOR_TELEGRAM_BOT_TOKEN before running '%s'." % surface
     )
 
 

@@ -9,7 +9,7 @@ description = "MVP auto TikTok video editor for product overlay workflows"
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
-  "PyNaCl>=1.5,<2",
+  "yt-dlp[default]>=2024.8.6",
 ]
 
 [project.optional-dependencies]
@@ -21,7 +21,8 @@ build = [
 
 [project.scripts]
 auto-tiktok-editor = "auto_tiktok_editor.cli:main"
-auto-tiktok-editor-commercial = "auto_tiktok_editor.commercial_entry:main"
+auto-tiktok-telegram-bot = "auto_tiktok_editor.telegram_worker:main"
+auto-tiktok-telegram-web = "auto_tiktok_editor.telegram_web_service:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

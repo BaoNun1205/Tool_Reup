@@ -7,7 +7,10 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 import tempfile
 import unittest
+import os
+import time
 
+from auto_tiktok_editor.app.media_cleanup import cleanup_media_storage
 from auto_tiktok_editor.app.telegram_bot import TelegramBotService, TelegramConversationState, TelegramJobResult
 from auto_tiktok_editor.config import PipelineConfig
 
@@ -352,6 +355,65 @@ class TelegramBotServiceTests(unittest.TestCase):
             service.handle_update({"message": {"chat": {"id": 123}, "text": "/cleanup"}})
 
             self.assertTrue(any("Dang co job Telegram" in text for _, text in client.sent_messages))
+        finally:
+            temp_dir.cleanup()
+
+    def test_cleanup_media_storage_can_keep_recent_files(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            output_root = base_dir / "output"
+            old_video = output_root / "session_old" / "old.mp4"
+            recent_video = output_root / "session_recent" / "recent.mp4"
+            old_video.parent.mkdir(parents=True, exist_ok=True)
+            recent_video.parent.mkdir(parents=True, exist_ok=True)
+            old_video.write_text("old", encoding="utf-8")
+            recent_video.write_text("recent", encoding="utf-8")
+            old_timestamp = time.time() - 7200
+            os.utime(old_video, (old_timestamp, old_timestamp))
+            config = PipelineConfig(
+                telegram_input_root=base_dir / "telegram_inputs",
+                default_output_root=output_root,
+            )
+
+            report = cleanup_media_storage(config, older_than_seconds=3600)
+
+            self.assertEqual(report.deleted_files, 1)
+            self.assertFalse(old_video.exists())
+            self.assertTrue(recent_video.exists())
+        finally:
+            temp_dir.cleanup()
+
+    def test_auto_cleanup_skips_when_processing_job_is_running(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            output_root = base_dir / "output"
+            old_video = output_root / "session_old" / "old.mp4"
+            old_video.parent.mkdir(parents=True, exist_ok=True)
+            old_video.write_text("old", encoding="utf-8")
+            old_timestamp = time.time() - 7200
+            os.utime(old_video, (old_timestamp, old_timestamp))
+            client = FakeTelegramClient(base_dir)
+            config = PipelineConfig(
+                allow_local_telegram=True,
+                telegram_bot_token="token",
+                telegram_input_root=base_dir / "telegram_inputs",
+                default_output_root=output_root,
+                telegram_cleanup_interval_seconds=60,
+                telegram_cleanup_max_age_seconds=3600,
+            )
+            service = TelegramBotService(
+                config=config,
+                client=client,
+                job_runner=FakeTelegramJobRunner(base_dir / "unused.mp4"),
+                executor=InlineExecutor(),
+            )
+            service._chat_states[123] = TelegramConversationState(processing=True)
+
+            service._maybe_cleanup_expired_media()
+
+            self.assertTrue(old_video.exists())
         finally:
             temp_dir.cleanup()
 

@@ -18,13 +18,10 @@ from auto_tiktok_editor.app.media_cleanup import MediaCleanupReport, cleanup_med
 from auto_tiktok_editor.app.orchestrator import SessionOrchestrator
 from auto_tiktok_editor.app.telegram_bot import TelegramBotClient, TelegramBotService
 from auto_tiktok_editor.app.telegram_delivery import TelegramDeliveryService
-from auto_tiktok_editor.commercial_runtime import configure_tk_environment, ensure_runtime_allowed
+from auto_tiktok_editor.runtime import configure_tk_environment
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import SessionEvent, SessionItemSpec, SessionResult, SessionSpec
-from auto_tiktok_editor.license.guard import LicenseGuard
-from auto_tiktok_editor.license.models import VerifiedLicenseSession
 from auto_tiktok_editor.telegram_settings import TelegramRuntimeSettings, clear_telegram_runtime_settings, save_telegram_runtime_settings
-from auto_tiktok_editor.ui.license_dialog import ensure_ui_license_session
 
 
 STAGE_LABELS = {
@@ -126,19 +123,11 @@ class EditorApplication(object):
         config: Optional[PipelineConfig] = None,
         orchestrator: Optional[SessionOrchestrator] = None,
         logger: Optional[logging.Logger] = None,
-        license_guard: Optional[LicenseGuard] = None,
-        license_session: Optional[VerifiedLicenseSession] = None,
     ):
         self.root = root
         self.config = config or PipelineConfig.from_env()
         self.logger = logger or logging.getLogger("auto_tiktok_editor.ui")
-        self.license_guard = license_guard
-        self.license_session = license_session
-        self.orchestrator = orchestrator or SessionOrchestrator(
-            self.config,
-            license_checkpoint=self._license_runtime_checkpoint if self.license_guard is not None else None,
-            logger=self.logger,
-        )
+        self.orchestrator = orchestrator or SessionOrchestrator(self.config, logger=self.logger)
         self.event_queue = queue.Queue()
         self.session_rerun_queue = queue.Queue()
         self.rows: List[SessionRowWidgets] = []
@@ -148,8 +137,6 @@ class EditorApplication(object):
         self.current_session_dir: Optional[str] = None
         self.review_ready = False
         self.reauthenticate_requested = False
-        self.license_reauthentication_required = False
-        self.license_warning_message = ""
         self.bulk_import_window: Optional[tk.Toplevel] = None
         self.telegram_bot_service = None  # type: Optional[TelegramBotService]
         self.telegram_bot_thread = None  # type: Optional[threading.Thread]
@@ -166,7 +153,6 @@ class EditorApplication(object):
         self.telegram_bot_token_var = tk.StringVar(value=str(self.config.telegram_bot_token or ""))
         self.telegram_chat_id_var = tk.StringVar(value=str(self.config.telegram_delivery_chat_id or ""))
         self.telegram_status_var = tk.StringVar(value=self._telegram_status_text())
-        self.license_summary_var = tk.StringVar(value=self._license_summary_text())
         self.session_status_var = tk.StringVar(value=STATUS_LABELS["draft"])
         self.session_detail_var = tk.StringVar(value="Tạo danh sách item rồi bấm Chạy session.")
         self.summary_counts_var = tk.StringVar(value="0 item | 0 hoàn tất | 0 lỗi")
@@ -178,11 +164,6 @@ class EditorApplication(object):
             self._start_embedded_telegram_bot_if_configured()
         self._add_row()
         self.root.after(self.config.ui_poll_interval_ms, self._poll_events)
-        if self.license_guard is not None:
-            self.root.after(
-                max(30, int(self.license_guard.config.heartbeat_interval_seconds)) * 1000,
-                self._poll_license_heartbeat,
-            )
 
     def _configure_window(self) -> None:
         self.root.title("Auto TikTok Video Editor")
@@ -196,11 +177,9 @@ class EditorApplication(object):
             return
         if not runtime_config.telegram_bot_token or self.telegram_bot_thread is not None:
             return
-        license_guard = getattr(self, "license_guard", None)
         try:
             self.telegram_bot_service = TelegramBotService(
                 config=runtime_config,
-                runtime_checkpoint=self._license_runtime_checkpoint if license_guard is not None else None,
                 logger=self.logger,
             )
         except Exception as exc:
@@ -218,7 +197,7 @@ class EditorApplication(object):
         self._append_log("Bot Telegram nền đã được khởi động cùng UI.")
 
     def _supports_local_telegram_configuration(self) -> bool:
-        return bool(self.config.allow_local_telegram or self.config.commercial_mode or self.config.telegram_bot_token)
+        return bool(self.config.allow_local_telegram or self.config.telegram_bot_token)
 
     def _runtime_telegram_config(self) -> PipelineConfig:
         bot_token = self.telegram_bot_token_var.get().strip() if hasattr(self, "telegram_bot_token_var") else str(self.config.telegram_bot_token or "").strip()
@@ -450,9 +429,6 @@ class EditorApplication(object):
         hero_header.pack(fill="x")
         ttk.Label(hero_header, text="Auto TikTok Video Editor", style="HeroTitle.TLabel").pack(side="left", anchor="w")
         self.logout_button = None
-        if self.license_guard is not None:
-            self.logout_button = ttk.Button(hero_header, text="Đăng xuất", style="Secondary.TButton", command=self._logout_and_relogin)
-            self.logout_button.pack(side="right", anchor="e")
         ttk.Label(
             hero,
             text="Nhập nhiều cặp link TikTok và ảnh sản phẩm, rồi chạy session tuần tự với trạng thái rõ cho từng item.",
@@ -460,15 +436,6 @@ class EditorApplication(object):
             wraplength=920,
             justify="left",
         ).pack(anchor="w", pady=(10, 0))
-
-        if self.license_session is not None:
-            ttk.Label(
-                hero,
-                textvariable=self.license_summary_var,
-                style="HeroText.TLabel",
-                wraplength=920,
-                justify="left",
-            ).pack(anchor="w", pady=(12, 0))
 
         body = ttk.Panedwindow(outer, orient="horizontal")
         body.pack(fill="both", expand=True, pady=(18, 0))
@@ -1194,24 +1161,6 @@ class EditorApplication(object):
             self._handle_event(event)
         self.root.after(self.config.ui_poll_interval_ms, self._poll_events)
 
-    def _poll_license_heartbeat(self) -> None:
-        if self.license_guard is None:
-            return
-        if self.license_reauthentication_required:
-            return
-        try:
-            session = self.license_guard.heartbeat()
-            self.license_session = session
-            self.license_summary_var.set(self._license_summary_text())
-        except Exception as exc:
-            self.logger.exception("License heartbeat failed.")
-            self._handle_runtime_license_invalid(str(exc))
-            return
-        self.root.after(
-            max(30, int(self.license_guard.config.heartbeat_interval_seconds)) * 1000,
-            self._poll_license_heartbeat,
-        )
-
     def _handle_event(self, event: SessionEvent) -> None:
         if event.event_type == "session_started":
             self._set_session_status(event.status or "draft", event.message or "Session đã được tạo.")
@@ -1269,11 +1218,6 @@ class EditorApplication(object):
             self._append_log("Session completed.")
             return
         if event.event_type == "session_failed":
-            if self._should_reauthenticate_from_message(event.message):
-                self._append_log("Session yêu cầu đăng nhập lại: %s" % (event.message or ""))
-                self._handle_runtime_license_invalid(event.message or "Phiên đăng nhập hiện tại không còn hợp lệ.")
-                return
-            self._set_session_status("failed_session", event.message or "Session thất bại.")
             self._append_log("Session failed: %s" % (event.message or ""))
             return
         if event.event_type == "session_finalized":
@@ -1536,111 +1480,11 @@ class EditorApplication(object):
         canvas.yview_scroll(delta, "units")
         return "break"
 
-    def _logout_and_relogin(self) -> None:
-        if self.license_guard is not None:
-            try:
-                self.license_guard.logout()
-            except Exception:
-                self.logger.exception("Logout failed.")
-        self._stop_embedded_telegram_bot()
-        self.reauthenticate_requested = True
-        self.root.destroy()
-
-    def _handle_runtime_license_invalid(self, reason: str) -> None:
-        if self.license_reauthentication_required:
-            return
-        self.license_reauthentication_required = True
-        self.license_warning_message = reason
-        self.running = False
-        self._stop_embedded_telegram_bot()
-        self._set_session_status("failed_session", reason)
-        self._append_log("License/runtime check failed: %s" % reason)
-        self.run_button.configure(state="disabled")
-        self.finalize_button.configure(state="disabled")
-        if self.telegram_send_button is not None:
-            self.telegram_send_button.configure(state="disabled")
-        self.bulk_import_button.configure(state="disabled")
-        self.add_row_button.configure(state="disabled")
-        self.output_root_entry.configure(state="disabled")
-        self.output_browse_button.configure(state="disabled")
-        self.session_name_entry.configure(state="disabled")
-        if self.telegram_token_entry is not None:
-            self.telegram_token_entry.configure(state="disabled")
-        if self.telegram_chat_id_entry is not None:
-            self.telegram_chat_id_entry.configure(state="disabled")
-        for row in self.rows:
-            row.url_entry.configure(state="disabled")
-            row.image_entry.configure(state="disabled")
-            row.opacity_scale.configure(state="disabled")
-            row.browse_button.configure(state="disabled")
-            row.remove_button.configure(state="disabled")
-            row.rerun_button.configure(state="disabled")
-        messagebox.showwarning(
-            "Phiên đã hết hiệu lực",
-            "Tài khoản hiện tại đã bị khóa, hết hạn, hoặc không còn hợp lệ.\n\nChi tiết: %s\n\nBấm 'Đăng xuất' để đăng nhập lại." % reason,
-        )
-
-    def _license_runtime_checkpoint(self) -> None:
-        if self.license_guard is None:
-            return
-        self.license_session = self.license_guard.heartbeat()
-
-    def _should_reauthenticate_from_message(self, message: Optional[str]) -> bool:
-        normalized = str(message or "").strip().lower()
-        if not normalized:
-            return False
-        triggers = (
-            "đăng nhập lại",
-            "không còn hợp lệ",
-            "invalid access token signature",
-            "access token expired",
-            "session is no longer active",
-            "session expired",
-            "license has expired",
-        )
-        return any(trigger in normalized for trigger in triggers)
-
-    def _redirect_to_login(self, reason: str) -> None:
-        self.reauthenticate_requested = True
-        self.running = False
-        messagebox.showwarning(
-            "Cần đăng nhập lại",
-            "Phiên sử dụng hiện tại không còn hợp lệ.\n\nChi tiết: %s" % reason,
-        )
-        self.root.destroy()
-
-    def _license_summary_text(self) -> str:
-        if self.license_session is None:
-            return "Chua co phien dang nhap."
-        license_expires_at = _as_utc(self.license_session.license_expires_at)
-        remaining = license_expires_at - datetime.now(timezone.utc)
-        remaining_days = max(0, int((remaining.total_seconds() + 86399) // 86400))
-        expires_label = license_expires_at.strftime("%d/%m/%Y")
-        return "Tài khoản: %s | Gói: %s | Còn %s ngày | Hết hạn: %s" % (
-            self.license_session.username,
-            self.license_session.plan_name,
-            remaining_days,
-            expires_label,
-        )
-
-
-def launch_ui(config: Optional[PipelineConfig] = None, license_guard: Optional[LicenseGuard] = None) -> int:
+def launch_ui(config: Optional[PipelineConfig] = None) -> int:
     runtime_config = config or PipelineConfig.from_env()
-    ensure_runtime_allowed(runtime_config, surface="ui")
     configure_tk_environment()
-    if not runtime_config.commercial_mode:
-        root = tk.Tk()
-        EditorApplication(root, config=runtime_config, license_guard=None, license_session=None)
-        root.mainloop()
-        return 0
-    guard = license_guard or LicenseGuard()
-    while True:
-        session = ensure_ui_license_session(guard, logger=logging.getLogger("auto_tiktok_editor.license_ui"))
-        if session is None:
-            return 1
-        root = tk.Tk()
-        app = EditorApplication(root, config=runtime_config, license_guard=guard, license_session=session)
-        root.mainloop()
-        if getattr(app, "reauthenticate_requested", False) is not True:
-            return 0
+    root = tk.Tk()
+    EditorApplication(root, config=runtime_config)
+    root.mainloop()
+    return 0
 

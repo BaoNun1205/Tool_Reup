@@ -30,7 +30,6 @@ def _portable_settings_path() -> Path:
 def _prefer_portable_settings_file() -> bool:
     return bool(
         getattr(sys, "frozen", False)
-        or os.getenv("AUTO_EDITOR_COMMERCIAL_MODE", "").strip() == "1"
         or _portable_settings_path().exists()
     )
 

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Set
+import time
+from typing import List, Optional, Set
 
 from auto_tiktok_editor.config import PipelineConfig
 
@@ -42,9 +43,15 @@ class MediaCleanupReport:
     errors: List[str] = field(default_factory=list)
 
 
-def cleanup_media_storage(config: PipelineConfig) -> MediaCleanupReport:
+def cleanup_media_storage(
+    config: PipelineConfig,
+    older_than_seconds: Optional[int] = None,
+) -> MediaCleanupReport:
     report = MediaCleanupReport(roots=_cleanup_roots(config))
     seen_files = set()  # type: Set[Path]
+    cutoff_timestamp = None
+    if older_than_seconds is not None:
+        cutoff_timestamp = time.time() - max(0, int(older_than_seconds))
     for root in report.roots:
         if not root.exists() or not root.is_dir():
             continue
@@ -53,6 +60,13 @@ def cleanup_media_storage(config: PipelineConfig) -> MediaCleanupReport:
                 continue
             if file_path.suffix.lower() not in MEDIA_SUFFIXES:
                 continue
+            if cutoff_timestamp is not None:
+                try:
+                    if file_path.stat().st_mtime > cutoff_timestamp:
+                        continue
+                except OSError as exc:
+                    report.errors.append("%s: %s" % (file_path, exc))
+                    continue
             resolved_path = file_path.resolve()
             if resolved_path in seen_files:
                 continue

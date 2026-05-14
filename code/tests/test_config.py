@@ -11,61 +11,10 @@ import unittest
 from unittest import mock
 
 from auto_tiktok_editor.config import PipelineConfig
-from auto_tiktok_editor.commercial_entry import COMMERCIAL_LICENSE_SERVER_URL
 from auto_tiktok_editor.telegram_settings import TelegramRuntimeSettings
-from auto_tiktok_editor.license.config import LicenseClientConfig
 
 
 class PipelineConfigTests(unittest.TestCase):
-    def test_license_client_config_uses_localhost_in_local_mode(self):
-        previous_url = os.environ.get("AUTO_EDITOR_LICENSE_SERVER_URL")
-        previous_mode = os.environ.get("AUTO_EDITOR_COMMERCIAL_MODE")
-        try:
-            os.environ.pop("AUTO_EDITOR_LICENSE_SERVER_URL", None)
-            os.environ["AUTO_EDITOR_COMMERCIAL_MODE"] = "0"
-            config = LicenseClientConfig.from_env()
-            self.assertEqual(config.server_base_url, "http://127.0.0.1:8787")
-        finally:
-            self._restore("AUTO_EDITOR_LICENSE_SERVER_URL", previous_url)
-            self._restore("AUTO_EDITOR_COMMERCIAL_MODE", previous_mode)
-
-    def test_commercial_license_server_url_default_can_be_applied(self):
-        previous = os.environ.get("AUTO_EDITOR_LICENSE_SERVER_URL")
-        previous_mode = os.environ.get("AUTO_EDITOR_COMMERCIAL_MODE")
-        try:
-            os.environ.pop("AUTO_EDITOR_LICENSE_SERVER_URL", None)
-            os.environ["AUTO_EDITOR_COMMERCIAL_MODE"] = "1"
-            os.environ.setdefault("AUTO_EDITOR_LICENSE_SERVER_URL", COMMERCIAL_LICENSE_SERVER_URL)
-            config = LicenseClientConfig.from_env()
-            self.assertEqual(config.server_base_url, COMMERCIAL_LICENSE_SERVER_URL)
-        finally:
-            self._restore("AUTO_EDITOR_LICENSE_SERVER_URL", previous)
-            self._restore("AUTO_EDITOR_COMMERCIAL_MODE", previous_mode)
-
-    def test_commercial_license_client_config_requires_online_server_url(self):
-        previous_url = os.environ.get("AUTO_EDITOR_LICENSE_SERVER_URL")
-        previous_mode = os.environ.get("AUTO_EDITOR_COMMERCIAL_MODE")
-        try:
-            os.environ.pop("AUTO_EDITOR_LICENSE_SERVER_URL", None)
-            os.environ["AUTO_EDITOR_COMMERCIAL_MODE"] = "1"
-            with self.assertRaises(ValueError):
-                LicenseClientConfig.from_env()
-        finally:
-            self._restore("AUTO_EDITOR_LICENSE_SERVER_URL", previous_url)
-            self._restore("AUTO_EDITOR_COMMERCIAL_MODE", previous_mode)
-
-    def test_commercial_license_client_config_rejects_localhost_url(self):
-        previous_url = os.environ.get("AUTO_EDITOR_LICENSE_SERVER_URL")
-        previous_mode = os.environ.get("AUTO_EDITOR_COMMERCIAL_MODE")
-        try:
-            os.environ["AUTO_EDITOR_LICENSE_SERVER_URL"] = "http://127.0.0.1:8787"
-            os.environ["AUTO_EDITOR_COMMERCIAL_MODE"] = "1"
-            with self.assertRaises(ValueError):
-                LicenseClientConfig.from_env()
-        finally:
-            self._restore("AUTO_EDITOR_LICENSE_SERVER_URL", previous_url)
-            self._restore("AUTO_EDITOR_COMMERCIAL_MODE", previous_mode)
-
     def test_from_env_prefers_bundled_runtime_tools_when_frozen(self):
         temp_dir = tempfile.TemporaryDirectory()
         try:
@@ -107,6 +56,9 @@ class PipelineConfigTests(unittest.TestCase):
         old_telegram_chat_ids = os.environ.get("AUTO_EDITOR_TELEGRAM_ALLOWED_CHAT_IDS")
         old_telegram_delivery_chat_id = os.environ.get("AUTO_EDITOR_TELEGRAM_DELIVERY_CHAT_ID")
         old_allow_local_telegram = os.environ.get("AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM")
+        old_auto_cleanup = os.environ.get("AUTO_EDITOR_TELEGRAM_AUTO_CLEANUP")
+        old_cleanup_interval = os.environ.get("AUTO_EDITOR_TELEGRAM_CLEANUP_INTERVAL_SECONDS")
+        old_cleanup_max_age = os.environ.get("AUTO_EDITOR_TELEGRAM_CLEANUP_MAX_AGE_SECONDS")
         try:
             os.environ["AUTO_EDITOR_FFMPEG_BIN"] = "custom-ffmpeg"
             os.environ["AUTO_EDITOR_FFPROBE_BIN"] = "custom-ffprobe"
@@ -118,6 +70,9 @@ class PipelineConfigTests(unittest.TestCase):
             os.environ["AUTO_EDITOR_TELEGRAM_POLL_INTERVAL_SECONDS"] = "4"
             os.environ["AUTO_EDITOR_TELEGRAM_ALLOWED_CHAT_IDS"] = "123, 456,invalid"
             os.environ["AUTO_EDITOR_TELEGRAM_DELIVERY_CHAT_ID"] = "987654321"
+            os.environ["AUTO_EDITOR_TELEGRAM_AUTO_CLEANUP"] = "false"
+            os.environ["AUTO_EDITOR_TELEGRAM_CLEANUP_INTERVAL_SECONDS"] = "120"
+            os.environ["AUTO_EDITOR_TELEGRAM_CLEANUP_MAX_AGE_SECONDS"] = "7200"
             config = PipelineConfig.from_env()
             self.assertEqual(config.ffmpeg_bin, "custom-ffmpeg")
             self.assertEqual(config.ffprobe_bin, "custom-ffprobe")
@@ -128,6 +83,9 @@ class PipelineConfigTests(unittest.TestCase):
             self.assertEqual(config.telegram_poll_interval_seconds, 4)
             self.assertEqual(config.telegram_allowed_chat_ids, (123, 456))
             self.assertEqual(config.telegram_delivery_chat_id, "987654321")
+            self.assertFalse(config.telegram_auto_cleanup_enabled)
+            self.assertEqual(config.telegram_cleanup_interval_seconds, 120)
+            self.assertEqual(config.telegram_cleanup_max_age_seconds, 7200)
         finally:
             self._restore("AUTO_EDITOR_FFMPEG_BIN", old_ffmpeg)
             self._restore("AUTO_EDITOR_FFPROBE_BIN", old_ffprobe)
@@ -139,6 +97,9 @@ class PipelineConfigTests(unittest.TestCase):
             self._restore("AUTO_EDITOR_TELEGRAM_ALLOWED_CHAT_IDS", old_telegram_chat_ids)
             self._restore("AUTO_EDITOR_TELEGRAM_DELIVERY_CHAT_ID", old_telegram_delivery_chat_id)
             self._restore("AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM", old_allow_local_telegram)
+            self._restore("AUTO_EDITOR_TELEGRAM_AUTO_CLEANUP", old_auto_cleanup)
+            self._restore("AUTO_EDITOR_TELEGRAM_CLEANUP_INTERVAL_SECONDS", old_cleanup_interval)
+            self._restore("AUTO_EDITOR_TELEGRAM_CLEANUP_MAX_AGE_SECONDS", old_cleanup_max_age)
 
     def test_build_job_id_has_prefix_and_suffix(self):
         config = PipelineConfig()

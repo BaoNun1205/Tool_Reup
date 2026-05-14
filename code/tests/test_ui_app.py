@@ -69,7 +69,7 @@ class EditorApplicationTests(unittest.TestCase):
 
     def test_runtime_telegram_config_uses_ui_values_and_locks_chat_allowlist(self):
         app = EditorApplication.__new__(EditorApplication)
-        app.config = PipelineConfig(commercial_mode=True)
+        app.config = PipelineConfig()
         app.telegram_bot_token_var = FakeVar("bot-token")
         app.telegram_chat_id_var = FakeVar("123456789")
 
@@ -82,7 +82,7 @@ class EditorApplicationTests(unittest.TestCase):
 
     def test_runtime_telegram_config_allows_token_without_chat_id(self):
         app = EditorApplication.__new__(EditorApplication)
-        app.config = PipelineConfig(commercial_mode=True)
+        app.config = PipelineConfig()
         app.telegram_bot_token_var = FakeVar("bot-token")
         app.telegram_chat_id_var = FakeVar("")
 
@@ -96,7 +96,6 @@ class EditorApplicationTests(unittest.TestCase):
     def test_media_cleanup_config_uses_current_output_root_and_updates_default_input_root(self):
         app = EditorApplication.__new__(EditorApplication)
         app.config = PipelineConfig(
-            commercial_mode=True,
             default_output_root=Path("d:/old_output"),
             telegram_input_root=Path("d:/old_output/_telegram_inputs"),
         )

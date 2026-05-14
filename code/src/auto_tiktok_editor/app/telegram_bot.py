@@ -9,6 +9,7 @@ import logging
 import mimetypes
 from pathlib import Path
 import re
+import shutil
 import threading
 import time
 from typing import Dict, List, Optional
@@ -19,7 +20,7 @@ import uuid
 
 from auto_tiktok_editor.app.media_cleanup import cleanup_media_storage, format_cleanup_report
 from auto_tiktok_editor.app.orchestrator import SessionOrchestrator
-from auto_tiktok_editor.commercial_runtime import ensure_local_telegram_allowed
+from auto_tiktok_editor.runtime import ensure_local_telegram_allowed
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import SessionItemSpec, SessionSpec
 
@@ -45,6 +46,7 @@ class TelegramConversationState:
 class TelegramJobResult:
     ok: bool
     final_video_path: Optional[Path] = None
+    session_dir: Optional[Path] = None
     source_title: Optional[str] = None
     error: Optional[str] = None
     session_id: Optional[str] = None
@@ -197,6 +199,7 @@ class TelegramJobRunner(object):
             return TelegramJobResult(
                 ok=False,
                 error="Pipeline không trả về item nào cho yêu cầu Telegram này.",
+                session_dir=session_result.artifacts.session_dir if session_result.artifacts else None,
                 session_id=session_result.session_id,
             )
         item_result = session_result.items[0]
@@ -204,11 +207,13 @@ class TelegramJobRunner(object):
             return TelegramJobResult(
                 ok=False,
                 error=item_result.error or "Pipeline không thể hoàn tất video này.",
+                session_dir=session_result.artifacts.session_dir if session_result.artifacts else None,
                 session_id=session_result.session_id,
             )
         return TelegramJobResult(
             ok=True,
             final_video_path=item_result.artifacts.final_video_path,
+            session_dir=session_result.artifacts.session_dir if session_result.artifacts else None,
             source_title=str(item_result.metadata.get("source_title") or "").strip() or None,
             session_id=session_result.session_id,
         )
@@ -242,6 +247,7 @@ class TelegramBotService(object):
         self._recent_chat_ids: List[int] = []
         self._state_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._last_auto_cleanup_at = 0.0
 
     def serve_forever(self) -> None:
         offset = None
@@ -260,6 +266,7 @@ class TelegramBotService(object):
                     if update_id is not None:
                         offset = int(update_id) + 1
                     self.handle_update(update)
+                self._maybe_cleanup_expired_media()
             except KeyboardInterrupt:
                 raise
             except Exception as exc:
@@ -355,6 +362,7 @@ class TelegramBotService(object):
         )
 
     def _run_job_and_reply(self, chat_id: int, source_video_url: str, product_image_path: Path) -> None:
+        result = None
         try:
             result = self.job_runner.run(chat_id, source_video_url, product_image_path)
             if not result.ok or result.final_video_path is None or not result.final_video_path.exists():
@@ -374,6 +382,8 @@ class TelegramBotService(object):
             self.logger.exception("Telegram job failed for chat %s.", chat_id)
             self.client.send_message(chat_id, "Có lỗi khi xử lý job: %s" % exc)
         finally:
+            if self.config.telegram_cleanup_after_job_enabled:
+                self._cleanup_completed_job_files(product_image_path, result)
             with self._state_lock:
                 state = self._chat_states.get(chat_id)
                 if state is not None:
@@ -383,6 +393,48 @@ class TelegramBotService(object):
                     has_follow_up = False
             if has_follow_up:
                 self._maybe_start_job(chat_id)
+
+    def _cleanup_completed_job_files(self, product_image_path: Path, result: Optional[TelegramJobResult]) -> None:
+        paths = []  # type: List[Path]
+        if result is not None and result.session_dir is not None:
+            paths.append(Path(result.session_dir))
+        paths.append(Path(product_image_path))
+        for path in paths:
+            try:
+                self._delete_ephemeral_path(path)
+            except Exception as exc:
+                self.logger.warning("Could not clean Telegram job file %s: %s", path, exc)
+
+    def _delete_ephemeral_path(self, path: Path) -> None:
+        resolved = Path(path).expanduser().resolve()
+        allowed_roots = (
+            Path(self.config.default_output_root).expanduser().resolve(),
+            Path(self.config.telegram_input_root).expanduser().resolve(),
+        )
+        if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+            self.logger.warning("Skip cleanup outside Telegram storage roots: %s", resolved)
+            return
+        if not resolved.exists():
+            return
+        if resolved.is_dir():
+            shutil.rmtree(str(resolved), ignore_errors=True)
+        else:
+            resolved.unlink()
+            self._remove_empty_parent_dirs(resolved.parent, allowed_roots)
+
+    def _remove_empty_parent_dirs(self, start_dir: Path, allowed_roots) -> None:
+        current = Path(start_dir).expanduser().resolve()
+        allowed_roots = tuple(Path(root).expanduser().resolve() for root in allowed_roots)
+        while True:
+            if current in allowed_roots:
+                return
+            if not any(root in current.parents for root in allowed_roots):
+                return
+            try:
+                current.rmdir()
+            except OSError:
+                return
+            current = current.parent
 
     def _download_image_from_message(self, chat_id: int, message: Dict[str, object]) -> Optional[Path]:
         photo_list = message.get("photo")
@@ -492,6 +544,21 @@ class TelegramBotService(object):
                 state.draft_source_video_url = None
                 state.draft_product_image_path = None
                 state.queued_jobs = []
+
+    def _maybe_cleanup_expired_media(self) -> None:
+        if not self.config.telegram_auto_cleanup_enabled:
+            return
+        now = time.time()
+        interval_seconds = max(60, int(self.config.telegram_cleanup_interval_seconds))
+        if self._last_auto_cleanup_at and now - self._last_auto_cleanup_at < interval_seconds:
+            return
+        if self.has_processing_jobs():
+            return
+        self._last_auto_cleanup_at = now
+        max_age_seconds = max(300, int(self.config.telegram_cleanup_max_age_seconds))
+        report = cleanup_media_storage(self.config, older_than_seconds=max_age_seconds)
+        if report.deleted_files or report.errors:
+            self.logger.info("Telegram auto cleanup: %s", format_cleanup_report(report))
 
     def _remember_chat_id(self, chat_id: int) -> None:
         with self._state_lock:

@@ -153,6 +153,10 @@ def _read_telegram_bot_token_file() -> str:
     return ""
 
 
+def _resolve_telegram_bot_token() -> str:
+    return os.getenv("AUTO_EDITOR_TELEGRAM_BOT_TOKEN", "").strip() or _read_telegram_bot_token_file()
+
+
 def _runtime_is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False) or globals().get("__compiled__", False))
 
@@ -290,7 +294,6 @@ class PipelineConfig:
     )
 
     # Cau hinh Telegram bot polling.
-    commercial_mode: bool = True
     allow_local_telegram: bool = False
     require_frozen_build: bool = False
     runtime_is_frozen: bool = False
@@ -300,6 +303,10 @@ class PipelineConfig:
     telegram_input_root: Path = PROJECT_ROOT / "output" / "_telegram_inputs"
     telegram_allowed_chat_ids: tuple = ()
     telegram_delivery_chat_id: str = ""
+    telegram_cleanup_after_job_enabled: bool = False
+    telegram_auto_cleanup_enabled: bool = True
+    telegram_cleanup_interval_seconds: int = 21600
+    telegram_cleanup_max_age_seconds: int = 86400
 
     # Hoan thien audio.
     # Muc loudness muc tieu cho audio da xu ly va audio final.
@@ -314,11 +321,8 @@ class PipelineConfig:
         configured_output_root = os.getenv("AUTO_EDITOR_OUTPUT_ROOT")
         output_root = Path(configured_output_root).expanduser().resolve() if configured_output_root else PROJECT_ROOT / "output"
         telegram_runtime_settings = load_telegram_runtime_settings()
-        commercial_mode = _env_flag("AUTO_EDITOR_COMMERCIAL_MODE", True)
         env_allow_local_telegram = _env_flag("AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM", False)
-        env_telegram_bot_token = os.getenv("AUTO_EDITOR_TELEGRAM_BOT_TOKEN", "").strip()
-        file_telegram_bot_token = _read_telegram_bot_token_file()
-        resolved_telegram_bot_token = env_telegram_bot_token or telegram_runtime_settings.bot_token or file_telegram_bot_token
+        resolved_telegram_bot_token = _resolve_telegram_bot_token() or telegram_runtime_settings.bot_token
         resolved_telegram_delivery_chat_id = (
             os.getenv("AUTO_EDITOR_TELEGRAM_DELIVERY_CHAT_ID", "").strip()
             or telegram_runtime_settings.delivery_chat_id
@@ -372,10 +376,10 @@ class PipelineConfig:
             ),
             download_via_lazy_down_only=_env_flag("AUTO_EDITOR_LAZY_DOWN_ONLY", True),
             default_output_root=output_root,
+            max_parallel_session_items=max(1, _env_int("AUTO_EDITOR_MAX_PARALLEL_SESSION_ITEMS", 1)),
             android_device_serial=os.getenv("AUTO_EDITOR_ANDROID_DEVICE_SERIAL", "").strip(),
             android_device_video_dir=os.getenv("AUTO_EDITOR_ANDROID_VIDEO_DIR", "/sdcard/Movies/AutoTikTokEditor").strip()
             or "/sdcard/Movies/AutoTikTokEditor",
-            commercial_mode=commercial_mode,
             allow_local_telegram=allow_local_telegram,
             require_frozen_build=require_frozen_build,
             runtime_is_frozen=runtime_is_frozen,
@@ -387,6 +391,16 @@ class PipelineConfig:
             ).expanduser().resolve(),
             telegram_allowed_chat_ids=telegram_allowed_chat_ids if allow_local_telegram else (),
             telegram_delivery_chat_id=resolved_telegram_delivery_chat_id if allow_local_telegram else "",
+            telegram_cleanup_after_job_enabled=_env_flag("AUTO_EDITOR_TELEGRAM_CLEANUP_AFTER_JOB", False),
+            telegram_auto_cleanup_enabled=_env_flag("AUTO_EDITOR_TELEGRAM_AUTO_CLEANUP", True),
+            telegram_cleanup_interval_seconds=max(
+                60,
+                _env_int("AUTO_EDITOR_TELEGRAM_CLEANUP_INTERVAL_SECONDS", 21600),
+            ),
+            telegram_cleanup_max_age_seconds=max(
+                300,
+                _env_int("AUTO_EDITOR_TELEGRAM_CLEANUP_MAX_AGE_SECONDS", 86400),
+            ),
         )
 
     def build_job_id(self):
