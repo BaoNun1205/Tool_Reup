@@ -210,18 +210,18 @@ class FinalCompositor(object):
             image_scale_factor,
             getattr(self.config, "split_image_zoom_peak_factor", image_scale_factor),
         )
-        scaled_square_size = max(target_width, self._even_int(overlay_height * image_scale_factor))
-        zoom_peak_square_size = max(
-            scaled_square_size,
+        scaled_image_width = max(target_width, self._even_int(target_width * image_scale_factor))
+        zoom_peak_image_width = max(
+            scaled_image_width,
             target_width,
-            self._even_int(overlay_height * image_zoom_peak_factor),
+            self._even_int(target_width * image_zoom_peak_factor),
         )
+        scaled_image_height = self._even_int(scaled_image_width * 0.75)
         image_frame_height = overlay_height
-        # Khung nhin co dinh duoc chot tai trang thai co so scale 1.1.
-        # Moi frame zoom lon hon chi phong to quanh cung tam nay, sau do crop
-        # lai dung khung co so de an phan du o moi canh.
-        base_frame_width = min(target_width, scaled_square_size)
-        base_frame_height = min(image_frame_height, scaled_square_size)
+        # Anh san pham duoc crop 4:3 roi zoom ben trong khung co dinh
+        # canh day; fade bat dau tai mep tren khung anh.
+        base_frame_width = min(target_width, scaled_image_width)
+        base_frame_height = min(image_frame_height, scaled_image_height)
         separator_alpha_ratio = overlay_spec.separator_max_alpha_ratio
         if separator_alpha_ratio is None:
             separator_alpha_ratio = self.config.split_separator_max_alpha_ratio
@@ -231,13 +231,14 @@ class FinalCompositor(object):
         separator_fade_ratio = max(0.05, min(0.95, float(separator_fade_ratio)))
         fade_gamma = max(0.35, min(2.5, 2.2 - (separator_alpha_ratio * 1.8)))
         image_bg = self._ffmpeg_color(overlay_spec.image_background_color or self.config.split_image_background_color)
-        square_expr = "min(iw\,ih)"
+        crop_width_expr = "min(iw\\,ih*4/3)"
+        crop_height_expr = "min(ih\\,iw*3/4)"
         fade_height_target = max(
             24,
-            int(round(overlay_height * separator_fade_ratio))
+            int(round(base_frame_height * separator_fade_ratio))
             - max(0, int(getattr(self.config, "split_separator_fade_trim_pixels", 0))),
         )
-        fade_start_y = 0
+        fade_start_y = max(0, overlay_height - base_frame_height)
         fade_end_y = min(overlay_height, fade_start_y + fade_height_target)
         fade_height = max(1, fade_end_y - fade_start_y)
         mask_blur = max(12, int(round(fade_height / 16.0)))
@@ -245,9 +246,9 @@ class FinalCompositor(object):
             1.0,
             self.config.target_fps * max(0.1, getattr(self.config, "split_image_zoom_cycle_seconds", 6.0)),
         )
-        image_scale_delta = zoom_peak_square_size - scaled_square_size
+        image_scale_delta = zoom_peak_image_width - scaled_image_width
         image_scale_expr = "%0.4f+%0.4f*(1-abs(2*mod(n\\,%0.4f)/%0.4f-1))" % (
-            scaled_square_size,
+            scaled_image_width,
             image_scale_delta,
             zoom_cycle_frames,
             zoom_cycle_frames,
@@ -264,11 +265,11 @@ class FinalCompositor(object):
         )
         return (
             "[0:v]scale={tw}:-2:flags=lanczos,setsar=1,pad={tw}:{th}:0:0:color=black[basev];"
-            "[2:v]format=rgba,crop='{square}':'{square}':(iw-{square})/2:(ih-{square})/2,"
-            "scale=w='{image_scale_expr}':h='{image_scale_expr}':flags=lanczos:eval=frame,"
-            "crop={base_frame_w}:{base_frame_h}:(iw-{base_frame_w})/2:(ih-{base_frame_h})/2[imgcrop];"
+            "[2:v]format=rgba,crop='{crop_w}':'{crop_h}':(iw-{crop_w})/2:(ih-{crop_h})/2,"
+            "scale=w='{image_scale_expr}':h=-2:flags=lanczos:eval=frame,"
+            "crop={base_frame_w}:{base_frame_h}:(iw-{base_frame_w})/2:ih-{base_frame_h}[imgcrop];"
             "color=color={bg}:size={tw}x{overlay_h},format=rgba[imgbg];"
-            "[imgbg][imgcrop]overlay=0:0:shortest=1:eof_action=pass,format=rgba[bottomsrc];"
+            "[imgbg][imgcrop]overlay=0:H-h:shortest=1:eof_action=pass,format=rgba[bottomsrc];"
             "nullsrc=size={tw}x{overlay_h},format=gray,geq=lum='{mask}'[maskraw];"
             "[maskraw]boxblur={mask_blur}:1[bottommask];"
             "[bottomsrc][bottommask]alphamerge[bottom];"
@@ -282,7 +283,8 @@ class FinalCompositor(object):
             base_frame_w=base_frame_width,
             base_frame_h=base_frame_height,
             image_scale_expr=image_scale_expr,
-            square=square_expr,
+            crop_w=crop_width_expr,
+            crop_h=crop_height_expr,
             mask=mask_expr,
             mask_blur=mask_blur,
         )

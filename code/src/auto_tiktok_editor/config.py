@@ -246,19 +246,16 @@ class PipelineConfig:
     split_separator_fade_ratio: float = 0.50
     # Muc zoom ap dung cho video normalize.
     split_zoom_factor: float = 1.0
-    # Sau khi crop anh san pham ve 1:1, se scale theo ti le nay truoc khi
-    # cat mep tren/duoi va dat sat day.
+    # Sau khi crop anh san pham ve 4:3 o giua anh goc, se scale theo ti le nay.
     split_image_scale_factor: float = 1.1
-    # Muc zoom lon nhat cua anh san pham trong split layout.
+    # Muc zoom lon nhat cua anh san pham trong split layout 4:3.
     split_image_zoom_peak_factor: float = 1.2
-    # Chu ky phong/thu cua anh san pham de tao nhiep zoom mem va deu.
+    # Chu ky phong/thu cua anh san pham de tao nhip zoom mem va deu.
     split_image_zoom_cycle_seconds: float = 6.0
-    # Cat bo mep tren cua anh san pham truoc khi de len video.
+    # Cac thong so trim cu, hien khong ap dung cho crop 4:3.
     split_image_trim_top_ratio: float = 0.10
-    # Cat chinh xac theo pixel o mep tren cua anh trong split layout.
-    split_image_trim_top_pixels: int = 50
-    # Cat chinh xac theo pixel o mep duoi cua anh trong split layout.
-    split_image_trim_bottom_pixels: int = 50
+    split_image_trim_top_pixels: int = 0
+    split_image_trim_bottom_pixels: int = 0
 
     # Can chinh khung video nguon truoc speed va truoc khi cat chunk.
     # So pixel cat o phia tren.
