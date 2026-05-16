@@ -247,9 +247,9 @@ class PipelineConfig:
     # Muc zoom ap dung cho video normalize.
     split_zoom_factor: float = 1.0
     # Sau khi crop anh san pham ve 4:3 o giua anh goc, se scale theo ti le nay.
-    split_image_scale_factor: float = 1.1
+    split_image_scale_factor: float = 1.2
     # Muc zoom lon nhat cua anh san pham trong split layout 4:3.
-    split_image_zoom_peak_factor: float = 1.2
+    split_image_zoom_peak_factor: float = 1.3
     # Chu ky phong/thu cua anh san pham de tao nhip zoom mem va deu.
     split_image_zoom_cycle_seconds: float = 6.0
     # Cac thong so trim cu, hien khong ap dung cho crop 4:3.
