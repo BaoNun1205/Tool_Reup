@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import os
 from pathlib import Path
@@ -100,12 +101,16 @@ class SessionRowWidgets:
     index_var: tk.StringVar
     url_var: tk.StringVar
     image_var: tk.StringVar
+    telegram_bot_token_var: tk.StringVar
+    telegram_chat_id_var: tk.StringVar
     opacity_var: tk.IntVar
     opacity_label_var: tk.StringVar
     status_var: tk.StringVar
     detail_var: tk.StringVar
     url_entry: ttk.Entry
     image_entry: ttk.Entry
+    telegram_token_entry: ttk.Entry
+    telegram_chat_id_entry: ttk.Entry
     opacity_scale: tk.Scale
     browse_button: ttk.Button
     remove_button: ttk.Button
@@ -140,6 +145,9 @@ class EditorApplication(object):
         self.bulk_import_window: Optional[tk.Toplevel] = None
         self.telegram_bot_service = None  # type: Optional[TelegramBotService]
         self.telegram_bot_thread = None  # type: Optional[threading.Thread]
+        self.telegram_bot_services = {}  # type: Dict[str, TelegramBotService]
+        self.telegram_bot_threads = {}  # type: Dict[str, threading.Thread]
+        self.telegram_bot_executor = None  # type: Optional[ThreadPoolExecutor]
         self.telegram_delivery = None  # type: Optional[TelegramDeliveryService]
         self.telegram_token_entry = None
         self.telegram_chat_id_entry = None
@@ -172,32 +180,102 @@ class EditorApplication(object):
         self.root.configure(bg=PALETTE["bg"])
 
     def _start_embedded_telegram_bot_if_configured(self) -> None:
-        runtime_config = self._runtime_telegram_config()
-        if not runtime_config.allow_local_telegram:
+        if not hasattr(self, "telegram_bot_services"):
+            self.telegram_bot_services = {}
+        if not hasattr(self, "telegram_bot_threads"):
+            self.telegram_bot_threads = {}
+        if not hasattr(self, "telegram_bot_executor"):
+            self.telegram_bot_executor = None
+        bot_configs = self._configured_telegram_bot_configs()
+        if not bot_configs:
             return
-        if not runtime_config.telegram_bot_token or self.telegram_bot_thread is not None:
-            return
-        try:
-            self.telegram_bot_service = TelegramBotService(
-                config=runtime_config,
-                logger=self.logger,
+        if self.telegram_bot_executor is None:
+            self.telegram_bot_executor = ThreadPoolExecutor(
+                max_workers=max(1, int(self.config.max_parallel_session_items)),
+                thread_name_prefix="ui-telegram-job",
             )
-        except Exception as exc:
-            self.logger.exception("Unable to start embedded Telegram bot.")
-            self._append_log("Không thể khởi động bot Telegram nền: %s" % exc)
+        started_count = 0
+        for token_key, runtime_config in bot_configs.items():
+            if token_key in self.telegram_bot_threads:
+                continue
+            try:
+                service = TelegramBotService(
+                    config=runtime_config,
+                    logger=self.logger,
+                    executor=self.telegram_bot_executor,
+                )
+            except Exception as exc:
+                self.logger.exception("Unable to start embedded Telegram bot.")
+                self._append_log("Khong the khoi dong bot Telegram nen: %s" % exc)
+                continue
+            thread = threading.Thread(
+                target=service.serve_forever,
+                daemon=True,
+                name="auto-editor-telegram-bot-%s" % (len(self.telegram_bot_threads) + 1),
+            )
+            self.telegram_bot_services[token_key] = service
+            self.telegram_bot_threads[token_key] = thread
+            if self.telegram_bot_service is None:
+                self.telegram_bot_service = service
+                self.telegram_bot_thread = thread
+            thread.start()
+            started_count += 1
+        if started_count == 0:
             return
-        self.telegram_bot_thread = threading.Thread(
-            target=self.telegram_bot_service.serve_forever,
-            daemon=True,
-            name="auto-editor-telegram-bot",
-        )
-        self.telegram_bot_thread.start()
         if hasattr(self, "telegram_status_var"):
-            self.telegram_status_var.set("Bot Telegram riêng của bạn đang chạy nền.")
-        self._append_log("Bot Telegram nền đã được khởi động cùng UI.")
+            self.telegram_status_var.set(
+                "%s bot Telegram dang chay nen. Toi da %s job xu ly cung luc."
+                % (len(self.telegram_bot_threads), max(1, int(self.config.max_parallel_session_items)))
+            )
+        self._append_log("Bot Telegram nền da khoi dong: %s bot dang chay." % started_count)
+
+    def _configured_telegram_bot_configs(self) -> Dict[str, PipelineConfig]:
+        configured = {}
+        chat_ids_by_token = {}  # type: Dict[str, set]
+
+        def add_candidate(token_value: str, chat_id_value: str) -> None:
+            token = str(token_value or "").strip()
+            if not token:
+                return
+            chat_id = self._normalize_telegram_chat_id(chat_id_value)
+            if token not in configured:
+                configured[token] = replace(
+                    self.config,
+                    allow_local_telegram=True,
+                    telegram_bot_token=token,
+                    telegram_delivery_chat_id=str(chat_id or ""),
+                    telegram_allowed_chat_ids=(chat_id,) if chat_id is not None else (),
+                )
+                chat_ids_by_token[token] = set()
+            if chat_id is not None:
+                chat_ids_by_token[token].add(chat_id)
+
+        if hasattr(self, "telegram_bot_token_var"):
+            add_candidate(self.telegram_bot_token_var.get(), self.telegram_chat_id_var.get())
+        else:
+            add_candidate(
+                str(getattr(self.config, "telegram_bot_token", "") or ""),
+                str(getattr(self.config, "telegram_delivery_chat_id", "") or ""),
+            )
+        for row in getattr(self, "rows", []):
+            token_var = getattr(row, "telegram_bot_token_var", None)
+            chat_id_var = getattr(row, "telegram_chat_id_var", None)
+            add_candidate(
+                token_var.get() if token_var is not None else "",
+                chat_id_var.get() if chat_id_var is not None else "",
+            )
+        for token, chat_ids in chat_ids_by_token.items():
+            allowed_chat_ids = tuple(sorted(chat_ids))
+            delivery_chat_id = str(allowed_chat_ids[0]) if allowed_chat_ids else ""
+            configured[token] = replace(
+                configured[token],
+                telegram_allowed_chat_ids=allowed_chat_ids,
+                telegram_delivery_chat_id=delivery_chat_id,
+            )
+        return configured
 
     def _supports_local_telegram_configuration(self) -> bool:
-        return bool(self.config.allow_local_telegram or self.config.telegram_bot_token)
+        return True
 
     def _runtime_telegram_config(self) -> PipelineConfig:
         bot_token = self.telegram_bot_token_var.get().strip() if hasattr(self, "telegram_bot_token_var") else str(self.config.telegram_bot_token or "").strip()
@@ -244,6 +322,12 @@ class EditorApplication(object):
     def _save_telegram_settings(self) -> None:
         token = self.telegram_bot_token_var.get().strip()
         delivery_chat_id = self.telegram_chat_id_var.get().strip()
+        for index, row in enumerate(getattr(self, "rows", []), start=1):
+            row_token = getattr(row, "telegram_bot_token_var", self.telegram_bot_token_var).get().strip()
+            row_chat_id = getattr(row, "telegram_chat_id_var", self.telegram_chat_id_var).get().strip()
+            if row_token and row_chat_id and self._normalize_telegram_chat_id(row_chat_id) is None:
+                messagebox.showerror("Telegram Chat ID chua hop le", "Chat ID Telegram cua item %s chua hop le." % index)
+                return
         if not token:
             clear_telegram_runtime_settings()
             self.config = replace(
@@ -254,6 +338,11 @@ class EditorApplication(object):
                 telegram_allowed_chat_ids=(),
             )
             self._stop_embedded_telegram_bot()
+            if self._configured_telegram_bot_configs():
+                self.telegram_status_var.set("Dang bat cac bot Telegram theo tung dong.")
+                self._append_log("Dang khoi dong cac bot Telegram theo cau hinh tung dong.")
+                self._start_embedded_telegram_bot_if_configured()
+                return
             self.telegram_status_var.set("Đã tắt Telegram riêng trên máy này.")
             self._append_log("Đã xóa cấu hình Telegram riêng khỏi máy này.")
             return
@@ -276,13 +365,25 @@ class EditorApplication(object):
         self._restart_embedded_telegram_bot()
 
     def _stop_embedded_telegram_bot(self) -> None:
-        if self.telegram_bot_service is not None:
+        services = list(getattr(self, "telegram_bot_services", {}).values())
+        if not services and self.telegram_bot_service is not None:
+            services = [self.telegram_bot_service]
+        for service in services:
             try:
-                self.telegram_bot_service.stop()
+                service.stop()
             except Exception:
                 self.logger.exception("Unable to stop embedded Telegram bot cleanly.")
-        if self.telegram_bot_thread is not None and self.telegram_bot_thread.is_alive():
-            self.telegram_bot_thread.join(timeout=1.0)
+        threads = list(getattr(self, "telegram_bot_threads", {}).values())
+        if not threads and self.telegram_bot_thread is not None:
+            threads = [self.telegram_bot_thread]
+        for thread in threads:
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=1.0)
+        if getattr(self, "telegram_bot_executor", None) is not None:
+            self.telegram_bot_executor.shutdown(wait=False)
+            self.telegram_bot_executor = None
+        self.telegram_bot_services = {}
+        self.telegram_bot_threads = {}
         self.telegram_bot_service = None
         self.telegram_bot_thread = None
 
@@ -331,7 +432,11 @@ class EditorApplication(object):
     def _fetch_telegram_chat_id_worker(self) -> None:
         try:
             chat_id = None
-            if self.telegram_bot_service is not None:
+            for service in getattr(self, "telegram_bot_services", {}).values():
+                chat_id = service.latest_chat_id()
+                if chat_id is not None:
+                    break
+            if chat_id is None and self.telegram_bot_service is not None:
                 chat_id = self.telegram_bot_service.latest_chat_id()
             if chat_id is None:
                 client = self._telegram_client()
@@ -533,7 +638,7 @@ class EditorApplication(object):
             telegram_actions.columnconfigure(2, weight=1)
             ttk.Button(
                 telegram_actions,
-                text="Lưu cấu hình Telegram",
+                text="Lưu/Bật bot Telegram",
                 style="Secondary.TButton",
                 command=self._save_telegram_settings,
             ).grid(row=0, column=0, sticky="w")
@@ -601,6 +706,8 @@ class EditorApplication(object):
         index_var = tk.StringVar(value="Item %d" % (len(self.rows) + 1))
         url_var = tk.StringVar()
         image_var = tk.StringVar()
+        telegram_bot_token_var = tk.StringVar(value=self.telegram_bot_token_var.get().strip())
+        telegram_chat_id_var = tk.StringVar(value=self.telegram_chat_id_var.get().strip())
         default_blur_percent = self._default_blur_percent()
         opacity_var = tk.IntVar(value=default_blur_percent)
         opacity_label_var = tk.StringVar(value="%d%%" % default_blur_percent)
@@ -633,23 +740,58 @@ class EditorApplication(object):
         browse_button = ttk.Button(image_box, text="Chọn ảnh", style="Secondary.TButton", command=lambda rid=row_id: self._browse_image(rid))
         browse_button.grid(row=0, column=1, padx=(10, 0))
 
+        telegram_box = ttk.Frame(frame, style="Alt.TFrame")
+        telegram_box.grid(row=5, column=0, sticky="ew", pady=(14, 0))
+        telegram_box.columnconfigure(0, weight=1)
+        telegram_box.columnconfigure(1, weight=1)
+        ttk.Label(telegram_box, text="Telegram Bot Token", style="AltBody.TLabel").grid(row=0, column=0, sticky="w")
+        ttk.Label(telegram_box, text="Telegram Chat ID", style="AltBody.TLabel").grid(row=0, column=1, sticky="w", padx=(10, 0))
+        telegram_token_entry = ttk.Entry(telegram_box, textvariable=telegram_bot_token_var)
+        telegram_token_entry.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        telegram_chat_id_entry = ttk.Entry(telegram_box, textvariable=telegram_chat_id_var)
+        telegram_chat_id_entry.grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(6, 0))
+
         slider_head = ttk.Frame(frame, style="Alt.TFrame")
-        slider_head.grid(row=5, column=0, sticky="ew", pady=(14, 6))
+        slider_head.grid(row=6, column=0, sticky="ew", pady=(14, 6))
         slider_head.columnconfigure(0, weight=1)
         ttk.Label(slider_head, text="Độ mờ vùng giao nhau", style="AltBody.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Label(slider_head, textvariable=opacity_label_var, style="Head.TLabel").grid(row=0, column=1, sticky="e")
         opacity_scale = tk.Scale(frame, from_=5, to=95, orient="horizontal", showvalue=False, highlightthickness=0, bd=0, relief="flat", variable=opacity_var, background=PALETTE["card_alt"], foreground=PALETTE["text"], troughcolor=PALETTE["input_bg"], activebackground=PALETTE["accent_2"], length=460, command=lambda value, label=opacity_label_var: label.set("%d%%" % int(round(float(value)))))
-        opacity_scale.grid(row=6, column=0, sticky="ew")
+        opacity_scale.grid(row=7, column=0, sticky="ew")
 
         footer = ttk.Frame(frame, style="Alt.TFrame")
-        footer.grid(row=7, column=0, sticky="ew", pady=(14, 0))
+        footer.grid(row=8, column=0, sticky="ew", pady=(14, 0))
         footer.columnconfigure(1, weight=1)
         status_chip = tk.Label(footer, text=STATUS_LABELS["draft"], font=("Segoe UI Semibold", 9, "bold"), padx=12, pady=6, bd=0)
         status_chip.grid(row=0, column=0, sticky="w")
         ttk.Label(footer, textvariable=detail_var, style="AltBody.TLabel", wraplength=720, justify="left").grid(row=0, column=1, sticky="w", padx=(10, 0))
         self._set_chip_style(status_chip, "draft")
 
-        self.rows.append(SessionRowWidgets(row_id, frame, index_var, url_var, image_var, opacity_var, opacity_label_var, status_var, detail_var, url_entry, image_entry, opacity_scale, browse_button, remove_button, open_button, rerun_button, status_chip))
+        self.rows.append(
+            SessionRowWidgets(
+                row_id,
+                frame,
+                index_var,
+                url_var,
+                image_var,
+                telegram_bot_token_var,
+                telegram_chat_id_var,
+                opacity_var,
+                opacity_label_var,
+                status_var,
+                detail_var,
+                url_entry,
+                image_entry,
+                telegram_token_entry,
+                telegram_chat_id_entry,
+                opacity_scale,
+                browse_button,
+                remove_button,
+                open_button,
+                rerun_button,
+                status_chip,
+            )
+        )
         self._bind_rows_mousewheel(frame)
         self._renumber_rows()
 
@@ -661,6 +803,10 @@ class EditorApplication(object):
             if row:
                 row.url_var.set("")
                 row.image_var.set("")
+                if hasattr(row, "telegram_bot_token_var"):
+                    row.telegram_bot_token_var.set(self.telegram_bot_token_var.get().strip())
+                if hasattr(row, "telegram_chat_id_var"):
+                    row.telegram_chat_id_var.set(self.telegram_chat_id_var.get().strip())
                 row.output_dir = None
                 row.preview_video_path = None
                 row.open_button.configure(state="disabled")
@@ -936,7 +1082,16 @@ class EditorApplication(object):
         items = []
         for row in self.rows:
             image_text = row.image_var.get().strip()
-            items.append(SessionItemSpec(row_id=row.row_id, source_video_url=row.url_var.get().strip(), product_image=Path(image_text) if image_text else None, overlay_alpha_ratio=self._fade_ratio_from_blur_percent(row.opacity_var.get())))
+            items.append(
+                SessionItemSpec(
+                    row_id=row.row_id,
+                    source_video_url=row.url_var.get().strip(),
+                    product_image=Path(image_text) if image_text else None,
+                    overlay_alpha_ratio=self._fade_ratio_from_blur_percent(row.opacity_var.get()),
+                    telegram_bot_token=getattr(row, "telegram_bot_token_var", self.telegram_bot_token_var).get().strip(),
+                    telegram_chat_id=getattr(row, "telegram_chat_id_var", self.telegram_chat_id_var).get().strip(),
+                )
+            )
         return SessionSpec(items=items, output_root_dir=Path(self.output_root_var.get().strip() or str(self.config.default_output_root)), session_name=(self.session_name_var.get().strip() or None), cookies_file=None)
 
     def _run_session_worker(self, session_spec: SessionSpec) -> None:
@@ -956,20 +1111,26 @@ class EditorApplication(object):
 
     def _send_session_via_telegram(self) -> None:
         runtime_config = self._runtime_telegram_config()
-        if not runtime_config.allow_local_telegram:
+        has_row_telegram = any(
+            getattr(row, "telegram_bot_token_var", self.telegram_bot_token_var).get().strip()
+            for row in self.rows
+        )
+        if has_row_telegram and not runtime_config.allow_local_telegram:
+            runtime_config = replace(runtime_config, allow_local_telegram=True)
+        if not runtime_config.allow_local_telegram and not has_row_telegram:
             messagebox.showinfo("Chưa cấu hình Telegram", "Nhập bot token và chat ID của riêng bạn rồi bấm Lưu cấu hình Telegram trước khi gửi.")
             return
         if self.running or self.latest_result is None or not self.review_ready:
             return
         chat_id = self._normalize_telegram_chat_id(self.telegram_chat_id_var.get())
-        if chat_id is None:
+        if chat_id is None and not has_row_telegram:
             messagebox.showerror("Thiếu Telegram Chat ID", "Nhập Telegram Chat ID hợp lệ trước khi gửi.")
             return
         self._set_running_state(True)
         self._set_session_status("running", "Đang gửi các video đã duyệt qua Telegram.")
         threading.Thread(target=self._send_session_via_telegram_worker, args=(chat_id, runtime_config), daemon=True).start()
 
-    def _send_session_via_telegram_worker(self, chat_id: int, runtime_config: PipelineConfig) -> None:
+    def _send_session_via_telegram_worker(self, chat_id: Optional[int], runtime_config: PipelineConfig) -> None:
         try:
             self.telegram_delivery = TelegramDeliveryService(runtime_config, logger=self.logger)
             payload = self.telegram_delivery.send_session_result(self.latest_result, chat_id)
@@ -980,7 +1141,10 @@ class EditorApplication(object):
     def _cleanup_media_storage(self) -> None:
         if self.running:
             return
-        if self.telegram_bot_service is not None and self.telegram_bot_service.has_processing_jobs():
+        bot_services = list(getattr(self, "telegram_bot_services", {}).values())
+        if not bot_services and self.telegram_bot_service is not None:
+            bot_services = [self.telegram_bot_service]
+        if any(service.has_processing_jobs() for service in bot_services):
             messagebox.showwarning(
                 "Bot Telegram đang xử lý",
                 "Bot Telegram vẫn đang chạy job. Hãy đợi xong rồi xóa media để tránh đụng file đang dùng.",
@@ -997,8 +1161,11 @@ class EditorApplication(object):
 
     def _cleanup_media_storage_worker(self) -> None:
         try:
-            if self.telegram_bot_service is not None:
-                self.telegram_bot_service.clear_pending_jobs()
+            bot_services = list(getattr(self, "telegram_bot_services", {}).values())
+            if not bot_services and self.telegram_bot_service is not None:
+                bot_services = [self.telegram_bot_service]
+            for service in bot_services:
+                service.clear_pending_jobs()
             report = cleanup_media_storage(self._media_cleanup_config())
             self._queue_event(SessionEvent(event_type="media_cleanup_result", payload={"report": report}))
         except Exception as exc:
@@ -1022,6 +1189,8 @@ class EditorApplication(object):
             source_video_url=row.url_var.get().strip(),
             product_image=Path(image_text) if image_text else None,
             overlay_alpha_ratio=self._fade_ratio_from_blur_percent(row.opacity_var.get()),
+            telegram_bot_token=getattr(row, "telegram_bot_token_var", self.telegram_bot_token_var).get().strip(),
+            telegram_chat_id=getattr(row, "telegram_chat_id_var", self.telegram_chat_id_var).get().strip(),
         )
         if self.running:
             row.rerun_button.configure(state="disabled")
@@ -1127,6 +1296,10 @@ class EditorApplication(object):
         for row in self.rows:
             row.url_entry.configure(state=state)
             row.image_entry.configure(state=state)
+            if hasattr(row, "telegram_token_entry"):
+                row.telegram_token_entry.configure(state=state)
+            if hasattr(row, "telegram_chat_id_entry"):
+                row.telegram_chat_id_entry.configure(state=state)
             row.opacity_scale.configure(state=state)
             row.browse_button.configure(state=state)
             row.remove_button.configure(state=state)

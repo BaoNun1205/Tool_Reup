@@ -93,6 +93,23 @@ class EditorApplicationTests(unittest.TestCase):
         self.assertEqual(runtime_config.telegram_delivery_chat_id, "")
         self.assertEqual(runtime_config.telegram_allowed_chat_ids, ())
 
+    def test_configured_telegram_bot_configs_collects_multiple_row_bots(self):
+        app = EditorApplication.__new__(EditorApplication)
+        app.config = PipelineConfig()
+        app.telegram_bot_token_var = FakeVar("")
+        app.telegram_chat_id_var = FakeVar("")
+        app.rows = [
+            type("Row", (), {"telegram_bot_token_var": FakeVar("token-a"), "telegram_chat_id_var": FakeVar("111")})(),
+            type("Row", (), {"telegram_bot_token_var": FakeVar("token-b"), "telegram_chat_id_var": FakeVar("222")})(),
+            type("Row", (), {"telegram_bot_token_var": FakeVar("token-a"), "telegram_chat_id_var": FakeVar("333")})(),
+        ]
+
+        configs = app._configured_telegram_bot_configs()
+
+        self.assertEqual(set(configs.keys()), {"token-a", "token-b"})
+        self.assertEqual(configs["token-a"].telegram_allowed_chat_ids, (111, 333))
+        self.assertEqual(configs["token-b"].telegram_allowed_chat_ids, (222,))
+
     def test_media_cleanup_config_uses_current_output_root_and_updates_default_input_root(self):
         app = EditorApplication.__new__(EditorApplication)
         app.config = PipelineConfig(
@@ -243,6 +260,8 @@ class EditorApplicationTests(unittest.TestCase):
         app.running = True
         app.latest_result = None
         app.session_rerun_queue = queue.Queue()
+        app.telegram_bot_token_var = FakeVar("")
+        app.telegram_chat_id_var = FakeVar("")
         app._set_row_status = lambda *args, **kwargs: None
         app._set_session_status = lambda *args, **kwargs: None
         app._append_log = lambda *args, **kwargs: None
@@ -269,6 +288,33 @@ class EditorApplicationTests(unittest.TestCase):
         self.assertEqual(queued_spec.product_image, Path("d:/Tool_Reup/code/tests/fixtures/product.png"))
         self.assertAlmostEqual(queued_spec.overlay_alpha_ratio, 0.40)
         self.assertEqual(row.rerun_button.state, "disabled")
+
+    def test_build_session_spec_preserves_row_telegram_delivery_settings(self):
+        app = EditorApplication.__new__(EditorApplication)
+        app.config = PipelineConfig()
+        app.output_root_var = FakeVar("d:/output")
+        app.session_name_var = FakeVar("demo")
+        app.telegram_bot_token_var = FakeVar("")
+        app.telegram_chat_id_var = FakeVar("")
+
+        row = type(
+            "Row",
+            (),
+            {
+                "row_id": "row_001",
+                "url_var": FakeVar("https://www.tiktok.com/@store/video/1234567890"),
+                "image_var": FakeVar(str(Path("d:/Tool_Reup/code/tests/fixtures/product.png"))),
+                "opacity_var": FakeVar(55),
+                "telegram_bot_token_var": FakeVar("bot-token-a"),
+                "telegram_chat_id_var": FakeVar("111222333"),
+            },
+        )()
+        app.rows = [row]
+
+        session_spec = app._build_session_spec()
+
+        self.assertEqual(session_spec.items[0].telegram_bot_token, "bot-token-a")
+        self.assertEqual(session_spec.items[0].telegram_chat_id, "111222333")
 
     def test_prepare_bulk_import_items_pairs_links_with_images_in_natural_order(self):
         temp_dir = _temporary_directory()

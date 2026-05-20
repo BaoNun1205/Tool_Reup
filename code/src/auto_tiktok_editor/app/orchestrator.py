@@ -194,6 +194,8 @@ class ItemPipelineRunner(object):
                 artifacts=artifacts,
                 warnings=list(recorder.warnings),
                 metadata=metadata,
+                telegram_bot_token=validated_item.item_spec.telegram_bot_token,
+                telegram_chat_id=validated_item.item_spec.telegram_chat_id,
             )
             self._emit(
                 event_callback,
@@ -240,6 +242,8 @@ class ItemPipelineRunner(object):
                 warnings=list(recorder.warnings),
                 metadata=metadata,
                 error=error_message,
+                telegram_bot_token=validated_item.item_spec.telegram_bot_token,
+                telegram_chat_id=validated_item.item_spec.telegram_chat_id,
             )
             self._emit(
                 event_callback,
@@ -829,6 +833,8 @@ class SessionOrchestrator(object):
             "final_audio_path": str(item.artifacts.final_audio_path) if item.artifacts.final_audio_path else None,
             "metadata_path": str(item.artifacts.metadata_path) if item.artifacts.metadata_path else None,
             "process_log_path": str(item.artifacts.process_log_path) if item.artifacts.process_log_path else None,
+            "telegram_chat_id": item.telegram_chat_id or None,
+            "telegram_bot_configured": bool(item.telegram_bot_token),
             "warnings": item.warnings,
             "error": item.error,
         }

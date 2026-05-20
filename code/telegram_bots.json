@@ -1,0 +1,19 @@
+{
+  "bots": [
+    {
+      "name": "linh_an_ngon_bot",
+      "bot_token": "8738767457:AAEvTix0euHVfoPeS6-zQput9odkA08XTMY",
+      "chat_id": 6547959450
+    },
+    {
+      "name": "an_vat_cung_tien_bot",
+      "bot_token": "8708744319:AAEJEr4kY7mxv_wpmZSEKqgJKkilzbmLm5I",
+      "chat_id": 6547959450
+    },
+    {
+      "name": "ha_my_ne_bot",
+      "bot_token": "8671720513:AAFdhb9q6P0saKJqly9YOJWvxVySf-Jkz3Y",
+      "chat_id": 6547959450
+    }
+  ]
+}

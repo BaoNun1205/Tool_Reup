@@ -95,6 +95,81 @@ class TelegramDeliveryServiceTests(unittest.TestCase):
         finally:
             temp_dir.cleanup()
 
+    def test_send_session_result_uses_each_items_bot_and_chat(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            video_a = base_dir / "a.mp4"
+            video_b = base_dir / "b.mp4"
+            video_a.write_text("a", encoding="utf-8")
+            video_b.write_text("b", encoding="utf-8")
+            clients = {}
+
+            def client_factory(token):
+                clients[token] = FakeTelegramClient()
+                return clients[token]
+
+            service = TelegramDeliveryService(
+                config=type("Config", (), {"telegram_bot_token": "", "telegram_delivery_chat_id": ""})(),
+                client_factory=client_factory,
+            )
+
+            result = SessionResult(
+                session_id="session_demo",
+                status="completed_with_success",
+                items=[
+                    ItemProcessResult(
+                        item_index=0,
+                        row_id="row_001",
+                        job_id="job_a",
+                        status="completed",
+                        source_video_url="https://example.com/a",
+                        product_image_path=None,
+                        output_dir=base_dir,
+                        artifacts=JobArtifacts(
+                            output_dir=base_dir,
+                            final_video_path=video_a,
+                            final_audio_path=None,
+                            video_title_path=None,
+                            metadata_path=None,
+                            process_log_path=None,
+                        ),
+                        metadata={"source_title": "Title A"},
+                        telegram_bot_token="token-a",
+                        telegram_chat_id="111",
+                    ),
+                    ItemProcessResult(
+                        item_index=1,
+                        row_id="row_002",
+                        job_id="job_b",
+                        status="completed",
+                        source_video_url="https://example.com/b",
+                        product_image_path=None,
+                        output_dir=base_dir,
+                        artifacts=JobArtifacts(
+                            output_dir=base_dir,
+                            final_video_path=video_b,
+                            final_audio_path=None,
+                            video_title_path=None,
+                            metadata_path=None,
+                            process_log_path=None,
+                        ),
+                        metadata={"source_title": "Title B"},
+                        telegram_bot_token="token-b",
+                        telegram_chat_id="222",
+                    ),
+                ],
+            )
+
+            payload = service.send_session_result(result)
+
+            self.assertEqual(payload["sent_count"], 2)
+            self.assertEqual(payload["chat_ids"], [111, 222])
+            self.assertEqual(clients["token-a"].sent_documents[0], (111, video_a, "Title A", "video_final.mp4"))
+            self.assertEqual(clients["token-b"].sent_documents[0], (222, video_b, "Title B", "video_final.mp4"))
+        finally:
+            temp_dir.cleanup()
+
     def test_send_session_result_requires_completed_video(self):
         client = FakeTelegramClient()
         service = TelegramDeliveryService(client=client)

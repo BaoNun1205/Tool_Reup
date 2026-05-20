@@ -203,6 +203,8 @@ class SessionValidator(object):
                 output_basename=validated_job.job_spec.output_basename,
                 shuffle_seed=validated_job.job_spec.shuffle_seed,
                 overlay_alpha_ratio=validated_job.job_spec.overlay_alpha_ratio,
+                telegram_bot_token=str(getattr(item_spec, "telegram_bot_token", "") or "").strip(),
+                telegram_chat_id=str(getattr(item_spec, "telegram_chat_id", "") or "").strip(),
             )
             duplicate_key = (
                 normalized_item.source_video_url,

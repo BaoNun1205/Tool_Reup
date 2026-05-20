@@ -21,6 +21,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("ui", help="Launch the local desktop UI")
     subparsers.add_parser("telegram-bot", help="Run the Telegram bot worker")
+    multi_bot_parser = subparsers.add_parser("telegram-bots", help="Run multiple Telegram bot workers")
+    multi_bot_parser.add_argument(
+        "--bots-file",
+        default="telegram_bots.json",
+        help="Path to JSON file containing Telegram bot token/chat mappings",
+    )
 
     run_parser = subparsers.add_parser("run-session", help="Run a session from a JSON manifest")
     run_parser.add_argument("--session-file", required=True, help="Path to a JSON session manifest")
@@ -85,6 +91,11 @@ def main(argv=None) -> int:
         service = TelegramBotService(config=config)
         service.serve_forever()
         return 0
+    if args.command == "telegram-bots":
+        from auto_tiktok_editor.app.telegram_multi_bot import load_telegram_bot_specs, run_multi_telegram_bots
+
+        specs = load_telegram_bot_specs(Path(args.bots_file))
+        return run_multi_telegram_bots(specs, base_config=config)
     parser.error("Unknown command.")
     return 2
 

@@ -373,7 +373,7 @@ class PipelineConfig:
             ),
             download_via_lazy_down_only=_env_flag("AUTO_EDITOR_LAZY_DOWN_ONLY", True),
             default_output_root=output_root,
-            max_parallel_session_items=max(1, _env_int("AUTO_EDITOR_MAX_PARALLEL_SESSION_ITEMS", 1)),
+            max_parallel_session_items=max(1, _env_int("AUTO_EDITOR_MAX_PARALLEL_SESSION_ITEMS", 2)),
             android_device_serial=os.getenv("AUTO_EDITOR_ANDROID_DEVICE_SERIAL", "").strip(),
             android_device_video_dir=os.getenv("AUTO_EDITOR_ANDROID_VIDEO_DIR", "/sdcard/Movies/AutoTikTokEditor").strip()
             or "/sdcard/Movies/AutoTikTokEditor",

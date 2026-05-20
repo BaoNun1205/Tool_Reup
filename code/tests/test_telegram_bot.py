@@ -5,10 +5,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+import json
 import tempfile
 import unittest
 import os
 import time
+from unittest import mock
+from urllib.error import URLError
 
 from auto_tiktok_editor.app.media_cleanup import cleanup_media_storage
 from auto_tiktok_editor.app.telegram_bot import TelegramBotService, TelegramConversationState, TelegramJobResult
@@ -45,6 +48,25 @@ class FakeTelegramClient(object):
         return path
 
 
+class FailingDownloadTelegramClient(FakeTelegramClient):
+    def download_file(self, file_id, destination_dir, preferred_name=None):
+        raise RuntimeError("download reset")
+
+
+class FakeUrlopenResponse(object):
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return json.dumps(self.payload).encode("utf-8")
+
+
 class FakeTelegramJobRunner(object):
     def __init__(self, video_path: Path):
         self.video_path = video_path
@@ -56,6 +78,25 @@ class FakeTelegramJobRunner(object):
             ok=True,
             final_video_path=self.video_path,
             source_title="Demo source title",
+            session_id="session_demo",
+        )
+
+
+class FlakyTelegramJobRunner(object):
+    def __init__(self, video_path: Path, failures_before_success: int, error: str = "Unable to download TikTok source video."):
+        self.video_path = video_path
+        self.failures_before_success = failures_before_success
+        self.error = error
+        self.calls = []
+
+    def run(self, chat_id, source_video_url, product_image_path):
+        self.calls.append((chat_id, source_video_url, Path(product_image_path)))
+        if len(self.calls) <= self.failures_before_success:
+            return TelegramJobResult(ok=False, error=self.error)
+        return TelegramJobResult(
+            ok=True,
+            final_video_path=self.video_path,
+            source_title="Recovered title",
             session_id="session_demo",
         )
 
@@ -96,6 +137,56 @@ class DeferredExecutor(object):
 
 
 class TelegramBotServiceTests(unittest.TestCase):
+    def test_get_updates_returns_empty_list_on_transient_polling_error(self):
+        from auto_tiktok_editor.app.telegram_bot import TelegramBotClient
+
+        real_client = TelegramBotClient("token")
+        with mock.patch("auto_tiktok_editor.app.telegram_bot.urlopen", side_effect=URLError("reset")):
+            updates = real_client.get_updates(offset=None, timeout_seconds=1)
+
+        self.assertEqual(updates, [])
+
+    def test_send_document_uploads_to_telegram_once(self):
+        from auto_tiktok_editor.app.telegram_bot import TelegramBotClient
+
+        real_client = TelegramBotClient("token")
+
+        with mock.patch(
+            "auto_tiktok_editor.app.telegram_bot.urlopen",
+            return_value=FakeUrlopenResponse({"ok": True, "result": {"message_id": 1}}),
+        ) as mocked_urlopen:
+            real_client.send_document(123, Path(__file__).resolve(), caption="Demo", filename="video_final.mp4")
+
+        self.assertEqual(mocked_urlopen.call_count, 1)
+
+    def test_poll_offset_is_persisted_per_bot(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            config = PipelineConfig(
+                allow_local_telegram=True,
+                telegram_bot_token="token",
+                telegram_input_root=base_dir / "telegram_inputs",
+            )
+            service = TelegramBotService(
+                config=config,
+                client=FakeTelegramClient(base_dir),
+                job_runner=FakeTelegramJobRunner(base_dir / "unused.mp4"),
+                executor=InlineExecutor(),
+            )
+
+            service._save_poll_offset(12346)
+            reloaded = TelegramBotService(
+                config=config,
+                client=FakeTelegramClient(base_dir),
+                job_runner=FakeTelegramJobRunner(base_dir / "unused.mp4"),
+                executor=InlineExecutor(),
+            )
+
+            self.assertEqual(reloaded._load_poll_offset(), 12346)
+        finally:
+            temp_dir.cleanup()
+
     def test_myid_command_returns_chat_identity(self):
         temp_dir = _temporary_directory()
         try:
@@ -182,6 +273,128 @@ class TelegramBotServiceTests(unittest.TestCase):
             self.assertTrue(any("Đã nhận link TikTok" in text for _, text in client.sent_messages))
             self.assertTrue(any("Đã nhận đủ link TikTok và ảnh sản phẩm" in text for _, text in client.sent_messages))
             self.assertFalse(any(text == "Title: Demo source title" for _, text in client.sent_messages))
+        finally:
+            temp_dir.cleanup()
+
+    def test_image_download_failure_is_reported_without_crashing_polling(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            client = FailingDownloadTelegramClient(base_dir)
+            job_runner = FakeTelegramJobRunner(base_dir / "unused.mp4")
+            config = PipelineConfig(
+                allow_local_telegram=True,
+                telegram_bot_token="token",
+                telegram_input_root=base_dir / "telegram_inputs",
+                default_output_root=base_dir / "output",
+            )
+            service = TelegramBotService(
+                config=config,
+                client=client,
+                job_runner=job_runner,
+                executor=InlineExecutor(),
+            )
+
+            service.handle_update(
+                {
+                    "update_id": 1,
+                    "message": {
+                        "chat": {"id": 123},
+                        "photo": [{"file_id": "photo-large"}],
+                    },
+                }
+            )
+
+            self.assertEqual(job_runner.calls, [])
+            self.assertTrue(any("Khong tai duoc anh" in text for _, text in client.sent_messages))
+        finally:
+            temp_dir.cleanup()
+
+    def test_retries_failed_job_before_replying_with_video(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            video_path = base_dir / "final_video.mp4"
+            video_path.write_text("video", encoding="utf-8")
+            client = FakeTelegramClient(base_dir)
+            job_runner = FlakyTelegramJobRunner(video_path, failures_before_success=2)
+            config = PipelineConfig(
+                allow_local_telegram=True,
+                telegram_bot_token="token",
+                telegram_input_root=base_dir / "telegram_inputs",
+                default_output_root=base_dir / "output",
+            )
+            service = TelegramBotService(
+                config=config,
+                client=client,
+                job_runner=job_runner,
+                executor=InlineExecutor(),
+            )
+
+            service._run_job_and_reply(123, "https://www.tiktok.com/@store/video/retry", base_dir / "product.jpg")
+
+            self.assertEqual(len(job_runner.calls), 3)
+            self.assertEqual(len(client.sent_documents), 1)
+            self.assertTrue(any("Job loi o lan 1/3" in text for _, text in client.sent_messages))
+            self.assertTrue(any("Job loi o lan 2/3" in text for _, text in client.sent_messages))
+        finally:
+            temp_dir.cleanup()
+
+    def test_reports_error_after_three_failed_job_attempts(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            client = FakeTelegramClient(base_dir)
+            job_runner = FlakyTelegramJobRunner(base_dir / "missing.mp4", failures_before_success=3)
+            config = PipelineConfig(
+                allow_local_telegram=True,
+                telegram_bot_token="token",
+                telegram_input_root=base_dir / "telegram_inputs",
+                default_output_root=base_dir / "output",
+            )
+            service = TelegramBotService(
+                config=config,
+                client=client,
+                job_runner=job_runner,
+                executor=InlineExecutor(),
+            )
+
+            service._run_job_and_reply(123, "https://www.tiktok.com/@store/video/fail", base_dir / "product.jpg")
+
+            self.assertEqual(len(job_runner.calls), 3)
+            self.assertEqual(client.sent_documents, [])
+            self.assertTrue(any("Job bi loi" in text for _, text in client.sent_messages))
+        finally:
+            temp_dir.cleanup()
+
+    def test_does_not_retry_non_download_processing_error(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            client = FakeTelegramClient(base_dir)
+            job_runner = FlakyTelegramJobRunner(
+                base_dir / "missing.mp4",
+                failures_before_success=3,
+                error="render compositor failed",
+            )
+            config = PipelineConfig(
+                allow_local_telegram=True,
+                telegram_bot_token="token",
+                telegram_input_root=base_dir / "telegram_inputs",
+                default_output_root=base_dir / "output",
+            )
+            service = TelegramBotService(
+                config=config,
+                client=client,
+                job_runner=job_runner,
+                executor=InlineExecutor(),
+            )
+
+            service._run_job_and_reply(123, "https://www.tiktok.com/@store/video/fail", base_dir / "product.jpg")
+
+            self.assertEqual(len(job_runner.calls), 1)
+            self.assertEqual(client.sent_documents, [])
+            self.assertFalse(any("bot se tu lam lai" in text for _, text in client.sent_messages))
         finally:
             temp_dir.cleanup()
 

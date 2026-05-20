@@ -10,6 +10,7 @@ import mimetypes
 from pathlib import Path
 import re
 import shutil
+import socket
 import threading
 import time
 from typing import Dict, List, Optional
@@ -26,6 +27,18 @@ from auto_tiktok_editor.domain.models import SessionItemSpec, SessionSpec
 
 
 TIKTOK_URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
+TELEGRAM_API_RETRY_ATTEMPTS = 3
+TELEGRAM_API_RETRY_BASE_DELAY_SECONDS = 2.0
+TELEGRAM_JOB_RETRY_ATTEMPTS = 3
+TIKTOK_DOWNLOAD_RETRY_MARKERS = (
+    "download",
+    "tiktok",
+    "lazy-down",
+    "yt-dlp",
+    "source video",
+    "playable video stream",
+    "non-video artifacts",
+)
 
 
 @dataclass
@@ -65,7 +78,16 @@ class TelegramBotClient(object):
         payload = {"timeout": max(1, int(timeout_seconds))}
         if offset is not None:
             payload["offset"] = int(offset)
-        return self._call_json_api("getUpdates", payload=payload, timeout=timeout_seconds + 10)
+        try:
+            return self._call_json_api(
+                "getUpdates",
+                payload=payload,
+                timeout=timeout_seconds + 10,
+                retry_attempts=1,
+            )
+        except RuntimeError as exc:
+            self.logger.info("Telegram getUpdates skipped after transient polling error: %s", exc)
+            return []
 
     def send_message(self, chat_id: int, text: str) -> None:
         self._call_json_api(
@@ -109,19 +131,32 @@ class TelegramBotClient(object):
         safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(preferred_name or file_id).stem).strip("._") or file_id
         local_path = destination_dir / ("%s%s" % (safe_stem, suffix))
         request = Request("%s/%s" % (self.file_root, file_path))
-        with urlopen(request, timeout=120) as response:
-            local_path.write_bytes(response.read())
+        file_bytes = self._urlopen_bytes_with_retry(
+            request,
+            timeout=120,
+            operation_label="Telegram file download",
+            method="downloadFile",
+        )
+        local_path.write_bytes(file_bytes)
         return local_path
 
-    def _call_json_api(self, method: str, payload: Optional[Dict[str, object]] = None, timeout: int = 30):
+    def _call_json_api(
+        self,
+        method: str,
+        payload: Optional[Dict[str, object]] = None,
+        timeout: int = 30,
+        retry_attempts: int = TELEGRAM_API_RETRY_ATTEMPTS,
+    ):
         encoded = urlencode(payload or {}).encode("utf-8")
         request = Request("%s/%s" % (self.api_root, method), data=encoded)
         request.add_header("Content-Type", "application/x-www-form-urlencoded")
-        try:
-            with urlopen(request, timeout=timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError) as exc:
-            raise RuntimeError("Telegram API request failed for %s: %s" % (method, exc))
+        data = self._urlopen_json_with_retry(
+            request,
+            timeout=timeout,
+            operation_label="Telegram API request",
+            method=method,
+            retry_attempts=retry_attempts,
+        )
         if not data.get("ok"):
             raise RuntimeError("Telegram API returned an error for %s: %s" % (method, data))
         return data.get("result")
@@ -156,13 +191,83 @@ class TelegramBotClient(object):
         body.extend(("--%s--\r\n" % boundary).encode("utf-8"))
         request = Request("%s/%s" % (self.api_root, method), data=bytes(body))
         request.add_header("Content-Type", "multipart/form-data; boundary=%s" % boundary)
-        try:
-            with urlopen(request, timeout=timeout) as response:
-                data = json.loads(response.read().decode("utf-8"))
-        except (HTTPError, URLError, TimeoutError) as exc:
-            raise RuntimeError("Telegram upload failed for %s: %s" % (method, exc))
+        data = self._urlopen_json_with_retry(
+            request,
+            timeout=timeout,
+            operation_label="Telegram upload",
+            method=method,
+            retry_attempts=1,
+        )
         if not data.get("ok"):
             raise RuntimeError("Telegram upload returned an error for %s: %s" % (method, data))
+
+    def _urlopen_json_with_retry(
+        self,
+        request: Request,
+        timeout: int,
+        operation_label: str,
+        method: str,
+        retry_attempts: int = TELEGRAM_API_RETRY_ATTEMPTS,
+    ):
+        last_error = None
+        retry_attempts = max(1, int(retry_attempts))
+        for attempt in range(1, retry_attempts + 1):
+            try:
+                with urlopen(request, timeout=timeout) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            except HTTPError as exc:
+                raise RuntimeError("%s failed for %s: %s" % (operation_label, method, exc))
+            except (URLError, TimeoutError, ConnectionResetError, socket.timeout, OSError) as exc:
+                last_error = exc
+                if attempt >= retry_attempts:
+                    break
+                delay_seconds = TELEGRAM_API_RETRY_BASE_DELAY_SECONDS * attempt
+                self.logger.warning(
+                    "%s failed for %s on attempt %s/%s: %s. Retrying in %.1fs.",
+                    operation_label,
+                    method,
+                    attempt,
+                    retry_attempts,
+                    exc,
+                    delay_seconds,
+                )
+                time.sleep(delay_seconds)
+        raise RuntimeError("%s failed for %s after %s attempts: %s" % (
+            operation_label,
+            method,
+            retry_attempts,
+            last_error,
+        ))
+
+    def _urlopen_bytes_with_retry(self, request: Request, timeout: int, operation_label: str, method: str) -> bytes:
+        last_error = None
+        for attempt in range(1, TELEGRAM_API_RETRY_ATTEMPTS + 1):
+            try:
+                with urlopen(request, timeout=timeout) as response:
+                    return response.read()
+            except HTTPError as exc:
+                raise RuntimeError("%s failed for %s: %s" % (operation_label, method, exc))
+            except (URLError, TimeoutError, ConnectionResetError, socket.timeout, OSError) as exc:
+                last_error = exc
+                if attempt >= TELEGRAM_API_RETRY_ATTEMPTS:
+                    break
+                delay_seconds = TELEGRAM_API_RETRY_BASE_DELAY_SECONDS * attempt
+                self.logger.warning(
+                    "%s failed for %s on attempt %s/%s: %s. Retrying in %.1fs.",
+                    operation_label,
+                    method,
+                    attempt,
+                    TELEGRAM_API_RETRY_ATTEMPTS,
+                    exc,
+                    delay_seconds,
+                )
+                time.sleep(delay_seconds)
+        raise RuntimeError("%s failed for %s after %s attempts: %s" % (
+            operation_label,
+            method,
+            TELEGRAM_API_RETRY_ATTEMPTS,
+            last_error,
+        ))
 
 
 class TelegramJobRunner(object):
@@ -248,9 +353,10 @@ class TelegramBotService(object):
         self._state_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._last_auto_cleanup_at = 0.0
+        self._poll_offset_path = Path(self.config.telegram_input_root) / "_telegram_poll_offset.txt"
 
     def serve_forever(self) -> None:
-        offset = None
+        offset = self._load_poll_offset()
         self.logger.info("Telegram bot worker started.")
         while not self._stop_event.is_set():
             if self.runtime_checkpoint is not None:
@@ -265,6 +371,7 @@ class TelegramBotService(object):
                     update_id = update.get("update_id")
                     if update_id is not None:
                         offset = int(update_id) + 1
+                        self._save_poll_offset(offset)
                     self.handle_update(update)
                 self._maybe_cleanup_expired_media()
             except KeyboardInterrupt:
@@ -277,6 +384,23 @@ class TelegramBotService(object):
 
     def stop(self) -> None:
         self._stop_event.set()
+
+    def _load_poll_offset(self) -> Optional[int]:
+        try:
+            if self._poll_offset_path.exists():
+                value = self._poll_offset_path.read_text(encoding="utf-8").strip()
+                if value:
+                    return int(value)
+        except (OSError, ValueError) as exc:
+            self.logger.warning("Could not load Telegram poll offset from %s: %s", self._poll_offset_path, exc)
+        return None
+
+    def _save_poll_offset(self, offset: int) -> None:
+        try:
+            self._poll_offset_path.parent.mkdir(parents=True, exist_ok=True)
+            self._poll_offset_path.write_text(str(int(offset)), encoding="utf-8")
+        except OSError as exc:
+            self.logger.warning("Could not save Telegram poll offset to %s: %s", self._poll_offset_path, exc)
 
     def handle_update(self, update: Dict[str, object]) -> None:
         message = update.get("message") or update.get("edited_message")
@@ -314,7 +438,15 @@ class TelegramBotService(object):
             return
 
         received_url = self._extract_tiktok_url(text_value)
-        image_path = self._download_image_from_message(chat_id, message)
+        try:
+            image_path = self._download_image_from_message(chat_id, message)
+        except Exception as exc:
+            self.logger.warning("Could not download Telegram image for chat %s: %s", chat_id, exc)
+            self.client.send_message(
+                chat_id,
+                "Khong tai duoc anh tu Telegram sau khi thu lai. Hay gui lai anh. Loi: %s" % exc,
+            )
+            return
 
         with self._state_lock:
             state = self._chat_states.get(chat_id)
@@ -364,11 +496,11 @@ class TelegramBotService(object):
     def _run_job_and_reply(self, chat_id: int, source_video_url: str, product_image_path: Path) -> None:
         result = None
         try:
-            result = self.job_runner.run(chat_id, source_video_url, product_image_path)
+            result = self._run_job_with_processing_retries(chat_id, source_video_url, product_image_path)
             if not result.ok or result.final_video_path is None or not result.final_video_path.exists():
                 self.client.send_message(
                     chat_id,
-                    "Job bị lỗi: %s" % (result.error or "không tìm thấy video đầu ra."),
+                    "Job bi loi: %s" % (result.error or "khong tim thay video dau ra."),
                 )
                 return
             caption = result.source_title or "Video đã edit xong."
@@ -380,7 +512,7 @@ class TelegramBotService(object):
             )
         except Exception as exc:
             self.logger.exception("Telegram job failed for chat %s.", chat_id)
-            self.client.send_message(chat_id, "Có lỗi khi xử lý job: %s" % exc)
+            self.client.send_message(chat_id, "Co loi khi xu ly hoac gui job: %s" % exc)
         finally:
             if self.config.telegram_cleanup_after_job_enabled:
                 self._cleanup_completed_job_files(product_image_path, result)
@@ -393,6 +525,51 @@ class TelegramBotService(object):
                     has_follow_up = False
             if has_follow_up:
                 self._maybe_start_job(chat_id)
+
+    def _run_job_with_processing_retries(
+        self,
+        chat_id: int,
+        source_video_url: str,
+        product_image_path: Path,
+    ) -> TelegramJobResult:
+        last_result = None
+        for attempt in range(1, TELEGRAM_JOB_RETRY_ATTEMPTS + 1):
+            try:
+                result = self.job_runner.run(chat_id, source_video_url, product_image_path)
+            except Exception as exc:
+                if attempt >= TELEGRAM_JOB_RETRY_ATTEMPTS or not self._should_retry_processing_error(str(exc)):
+                    raise
+                self.logger.warning(
+                    "Telegram job attempt %s/%s failed for chat %s: %s",
+                    attempt,
+                    TELEGRAM_JOB_RETRY_ATTEMPTS,
+                    chat_id,
+                    exc,
+                )
+                self.client.send_message(
+                    chat_id,
+                    "Job loi o lan %s/%s, bot se tu thu lai: %s"
+                    % (attempt, TELEGRAM_JOB_RETRY_ATTEMPTS, exc),
+                )
+                continue
+            last_result = result
+            output_ok = result.ok and result.final_video_path is not None and result.final_video_path.exists()
+            if output_ok:
+                return result
+            error_text = result.error or "khong tim thay video dau ra"
+            if not self._should_retry_processing_error(error_text):
+                return result
+            if attempt < TELEGRAM_JOB_RETRY_ATTEMPTS:
+                self.client.send_message(
+                    chat_id,
+                    "Job loi o lan %s/%s, bot se tu lam lai: %s"
+                    % (attempt, TELEGRAM_JOB_RETRY_ATTEMPTS, error_text),
+                )
+        return last_result or TelegramJobResult(ok=False, error="Pipeline khong tra ve ket qua.")
+
+    def _should_retry_processing_error(self, error_text: str) -> bool:
+        normalized = str(error_text or "").lower()
+        return any(marker in normalized for marker in TIKTOK_DOWNLOAD_RETRY_MARKERS)
 
     def _cleanup_completed_job_files(self, product_image_path: Path, result: Optional[TelegramJobResult]) -> None:
         paths = []  # type: List[Path]

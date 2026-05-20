@@ -27,6 +27,8 @@ class SessionItemSpec:
     output_basename: Optional[str] = None
     shuffle_seed: Optional[int] = None
     overlay_alpha_ratio: Optional[float] = None
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
 
 
 @dataclass
@@ -202,6 +204,8 @@ class ItemProcessResult:
     warnings: List[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
 
 
 @dataclass

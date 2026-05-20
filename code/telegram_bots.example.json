@@ -1,0 +1,19 @@
+{
+  "bots": [
+    {
+      "name": "channel_1",
+      "bot_token": "123456:PASTE_BOT_TOKEN_1_HERE",
+      "chat_id": 111111111
+    },
+    {
+      "name": "channel_2",
+      "bot_token": "234567:PASTE_BOT_TOKEN_2_HERE",
+      "chat_id": 222222222
+    },
+    {
+      "name": "channel_3",
+      "bot_token": "345678:PASTE_BOT_TOKEN_3_HERE",
+      "chat_id": 333333333
+    }
+  ]
+}
