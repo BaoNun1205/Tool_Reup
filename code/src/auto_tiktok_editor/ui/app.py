@@ -32,6 +32,7 @@ STAGE_LABELS = {
     "speed_processing": "Đang tăng tốc 1.2x",
     "detecting_scenes": "Đang cắt video thành đoạn",
     "planning_edit": "Đang xáo và sắp thứ tự",
+    "preparing_product_image": "Đang crop 4:3 và làm nét ảnh sản phẩm",
     "rendering_final": "Đang render video final",
     "exporting_artifacts": "Đang xuất file đầu ra",
 }

@@ -57,6 +57,8 @@ class ItemPipelineRunner(object):
         final_video_path = None
         final_audio_path = None
         prepared_audio_path = None
+        product_image_future = None
+        product_image_executor = None
         self._emit(
             event_callback,
             SessionEvent(
@@ -101,6 +103,11 @@ class ItemPipelineRunner(object):
                 workspace.processed_dir / "processed_master.mp4",
             )
             metadata["working_duration_after_speed"] = processed_master.info.duration_seconds
+            product_image_future, product_image_executor = self._start_product_image_preprocessing(
+                validated,
+                workspace,
+            )
+            metadata["product_image_preprocess_async"] = True
 
             self._transition(recorder, session_id, validated_item, "extracting_audio", event_callback)
             prepared_audio = self.services.audio_finisher.prepare(
@@ -134,6 +141,19 @@ class ItemPipelineRunner(object):
             metadata["shuffle_seed_used"] = edit_plan.seed
             metadata["scene_drop_reasons"] = [scene.drop_reason for scene in dropped_scenes if scene.drop_reason]
 
+            self._transition(recorder, session_id, validated_item, "preparing_product_image", event_callback)
+            product_image = self._finish_product_image_preprocessing(
+                product_image_future,
+                product_image_executor,
+            )
+            product_image_future = None
+            product_image_executor = None
+            self._record_warnings(recorder, session_id, validated_item, product_image.warnings, event_callback)
+            metadata["product_image_original_path"] = str(validated.image_info.path)
+            metadata["product_image_prepared_path"] = str(product_image.image_info.path)
+            metadata["product_image_cropped_path"] = str(product_image.cropped_path)
+            metadata["product_image_enhanced"] = product_image.enhanced
+
             self._transition(recorder, session_id, validated_item, "rendering_final", event_callback)
             rough_cut = self.services.rough_cut_renderer.render(
                 processed_master,
@@ -142,7 +162,7 @@ class ItemPipelineRunner(object):
                 workspace.output_dir / "rough_cut.mp4",
             )
             overlay_spec = self.services.overlay_planner.plan(
-                validated.image_info,
+                product_image.image_info,
                 validated.job_spec.overlay_alpha_ratio,
             )
             self._record_warnings(recorder, session_id, validated_item, overlay_spec.warnings, event_callback)
@@ -214,6 +234,7 @@ class ItemPipelineRunner(object):
             )
             return result
         except Exception as exc:
+            self._stop_product_image_preprocessing(product_image_future, product_image_executor)
             error_message = str(exc) or exc.__class__.__name__
             if not isinstance(exc, EditorError):
                 self.logger.exception("Unexpected item pipeline failure for row %s.", validated_item.row_id)
@@ -258,6 +279,27 @@ class ItemPipelineRunner(object):
                 ),
             )
             return result
+
+    def _start_product_image_preprocessing(self, validated, workspace):
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="auto-editor-product-image")
+        future = executor.submit(
+            self.services.product_image_preprocessor.prepare,
+            validated.image_info,
+            workspace.processed_dir,
+        )
+        return future, executor
+
+    def _finish_product_image_preprocessing(self, future, executor):
+        try:
+            return future.result()
+        finally:
+            executor.shutdown(wait=True)
+
+    def _stop_product_image_preprocessing(self, future, executor) -> None:
+        if future is not None:
+            future.cancel()
+        if executor is not None:
+            executor.shutdown(wait=False)
 
     def _transition(
         self,

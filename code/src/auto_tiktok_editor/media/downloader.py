@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 from typing import Dict, List, Optional, Tuple
 from urllib.error import URLError
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlencode, urljoin, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 from auto_tiktok_editor.config import PipelineConfig
@@ -62,9 +62,31 @@ class SourceDownloader(object):
                     },
                 )
             except (DownloadError, ExternalToolError) as exc:
-                raise DownloadError(
-                    "lazy-down could not obtain a playable TikTok video stream. Details: %s" % str(exc)
-                )
+                lazy_error = str(exc)
+                try:
+                    downloaded_path, tikwm_metadata = self._download_with_tikwm(source_url, destination_dir)
+                    return SourceAsset(
+                        source_url=source_url,
+                        downloaded_path=downloaded_path,
+                        extractor_name="tikwm",
+                        metadata={
+                            "output_template": output_template,
+                            "downloaded_path": str(downloaded_path),
+                            "download_strategy": "tikwm_fallback",
+                            "cookies_file_ignored": str(cookies_file) if cookies_file else None,
+                            "lazy_down_error": lazy_error,
+                            "tikwm_selected_field": tikwm_metadata.get("selected_field"),
+                            "tikwm_api_url": tikwm_metadata.get("api_url"),
+                            "source_title": tikwm_metadata.get("title"),
+                            "source_author": tikwm_metadata.get("author"),
+                            "source_unique_id": tikwm_metadata.get("unique_id"),
+                        },
+                    )
+                except DownloadError as tikwm_exc:
+                    raise DownloadError(
+                        "lazy-down could not obtain a playable TikTok video stream, and TikWM fallback also failed. "
+                        "Details: lazy-down: %s; tikwm: %s" % (lazy_error, str(tikwm_exc))
+                    )
 
         staged_cookies_file = self._stage_cookies_file(cookies_file, destination_dir.parent) if cookies_file is not None else None
         attempts = []  # type: List[Tuple[str, List[str]]]
@@ -141,6 +163,29 @@ class SourceDownloader(object):
             )
         except (DownloadError, ExternalToolError) as exc:
             failure_messages.append("lazy_down_fallback: %s" % str(exc))
+
+        self._cleanup_destination_dir(destination_dir)
+        try:
+            downloaded_path, tikwm_metadata = self._download_with_tikwm(source_url, destination_dir)
+            return SourceAsset(
+                source_url=source_url,
+                downloaded_path=downloaded_path,
+                extractor_name="tikwm",
+                metadata={
+                    "output_template": output_template,
+                    "downloaded_path": str(downloaded_path),
+                    "download_strategy": "tikwm_fallback",
+                    "cookies_file": str(cookies_file) if cookies_file else None,
+                    "staged_cookies_file": str(staged_cookies_file) if staged_cookies_file else None,
+                    "tikwm_selected_field": tikwm_metadata.get("selected_field"),
+                    "tikwm_api_url": tikwm_metadata.get("api_url"),
+                    "source_title": tikwm_metadata.get("title"),
+                    "source_author": tikwm_metadata.get("author"),
+                    "source_unique_id": tikwm_metadata.get("unique_id"),
+                },
+            )
+        except DownloadError as exc:
+            failure_messages.append("tikwm_fallback: %s" % str(exc))
 
         raise DownloadError(self._format_failure_message(failure_messages, cookies_file is not None))
 
@@ -242,6 +287,91 @@ class SourceDownloader(object):
             "author": root_info.get("author") or selected_media.get("author"),
             "unique_id": root_info.get("unique_id") or selected_media.get("unique_id"),
         }
+
+    def _download_with_tikwm(self, source_url: str, destination_dir: Path) -> Tuple[Path, Dict[str, object]]:
+        api_url, payload = self._fetch_tikwm_payload(source_url)
+        video_url, selected_field = self._select_tikwm_video_url(payload)
+        output_path = destination_dir / "source.mp4"
+        self._download_tikwm_video_url(video_url, output_path)
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+        author = data.get("author") if isinstance(data.get("author"), dict) else {}
+        return output_path.resolve(), {
+            "api_url": api_url,
+            "selected_field": selected_field,
+            "title": data.get("title"),
+            "author": author.get("unique_id") or author.get("nickname"),
+            "unique_id": data.get("id"),
+        }
+
+    def _fetch_tikwm_payload(self, source_url: str) -> Tuple[str, Dict[str, object]]:
+        query = urlencode({"url": self._strip_tiktok_tracking_query(source_url), "hd": "1"})
+        api_base_url = self.config.tikwm_api_url.strip() or "https://www.tikwm.com/api/"
+        separator = "&" if "?" in api_base_url else "?"
+        api_url = "%s%s%s" % (api_base_url, separator, query)
+        request = Request(
+            api_url,
+            headers={
+                "User-Agent": self.config.tiktok_web_user_agent,
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urlopen(request, timeout=20) as response:
+                raw_payload = response.read()
+        except (URLError, ValueError, OSError) as exc:
+            raise DownloadError("TikWM API request failed: %s" % exc)
+        try:
+            payload = json.loads(raw_payload.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise DownloadError("TikWM API returned unreadable JSON.") from exc
+        if not isinstance(payload, dict):
+            raise DownloadError("TikWM API returned an unexpected response.")
+        code = payload.get("code")
+        if code not in (None, 0):
+            raise DownloadError("TikWM API rejected the URL: %s" % (payload.get("msg") or code))
+        return api_url, payload
+
+    def _select_tikwm_video_url(self, payload: Dict[str, object]) -> Tuple[str, str]:
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise DownloadError("TikWM API response did not include video data.")
+        for field_name in ("hdplay", "play", "wmplay"):
+            value = data.get(field_name)
+            if not value:
+                continue
+            video_url = self._tikwm_absolute_url(str(value))
+            parsed = urlparse(video_url)
+            if parsed.scheme and parsed.netloc:
+                return video_url, field_name
+        raise DownloadError("TikWM API response did not include a downloadable video URL.")
+
+    def _tikwm_absolute_url(self, value: str) -> str:
+        if value.startswith("//"):
+            return "https:%s" % value
+        if urlparse(value).scheme:
+            return value
+        return urljoin("https://www.tikwm.com", value)
+
+    def _download_tikwm_video_url(self, video_url: str, output_path: Path) -> None:
+        request = Request(
+            video_url,
+            headers={
+                "User-Agent": self.config.tiktok_web_user_agent,
+                "Referer": "https://www.tikwm.com/",
+            },
+        )
+        try:
+            with urlopen(request, timeout=120) as response:
+                with output_path.open("wb") as handle:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+        except (URLError, ValueError, OSError) as exc:
+            raise DownloadError("TikWM video download failed: %s" % exc)
+        if not output_path.exists() or not output_path.is_file() or output_path.stat().st_size <= 0:
+            raise DownloadError("TikWM video download produced an empty file.")
 
     def _normalize_source_url_for_lazy_down(self, source_url: str) -> str:
         parsed = urlparse(source_url)

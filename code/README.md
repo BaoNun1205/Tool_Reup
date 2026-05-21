@@ -55,6 +55,15 @@ Binary ngoài cần có trong `PATH` để chạy pipeline thật:
 - `yt-dlp`
 - `ffmpeg`
 - `ffprobe`
+- `realesrgan-ncnn-vulkan` optional, để crop 4:3 rồi làm nét ảnh sản phẩm trước khi overlay. Nếu thiếu binary này, app sẽ dùng ảnh đã crop 4:3 và ghi warning thay vì làm fail job.
+
+Real-ESRGAN có thể cấu hình bằng biến môi trường:
+
+- `AUTO_EDITOR_REALESRGAN_BIN`
+- `AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE`
+- `AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE_REQUIRED`
+- `AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE_SCALE`
+- `AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE_MODEL`
 
 UI dùng `tkinter`, là thư viện chuẩn của Python trên Windows thông thường.
 

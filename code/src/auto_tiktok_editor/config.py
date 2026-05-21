@@ -175,7 +175,9 @@ class PipelineConfig:
     ffprobe_bin: str = "ffprobe"
     ytdlp_bin: str = "yt-dlp"
     lazy_down_bin: str = "lazy-down"
+    realesrgan_bin: str = "realesrgan-ncnn-vulkan"
     adb_bin: str = "adb"
+    tikwm_api_url: str = "https://www.tikwm.com/api/"
 
     # Neu True thi TikTok se luon tai qua lazy-down.
     download_via_lazy_down_only: bool = True
@@ -204,6 +206,12 @@ class PipelineConfig:
     # Tien xu ly truoc khi cat chunk va xao.
     # So dB tang them cho audio truoc limiter va speed-up.
     preprocess_audio_gain_db: float = 4.0
+    # Chinh mau video truoc speed-up va truoc khi cat chunk.
+    preprocess_video_brightness_adjustment: float = 0.02
+    preprocess_video_contrast_adjustment: float = -0.01
+    preprocess_video_saturation_adjustment: float = 0.03
+    # Lam net nhe video bang FFmpeg CAS trong cung buoc normalize.
+    preprocess_video_sharpen_strength: float = 0.12
     # Toc do tang toan cuc ap dung truoc khi tach audio va cat chunk.
     speed_factor: float = 1.2
 
@@ -245,7 +253,7 @@ class PipelineConfig:
     # muc mo dam hon truoc khi fade dan len 0 o phia tren.
     split_separator_fade_ratio: float = 0.50
     # Muc zoom ap dung cho video normalize.
-    split_zoom_factor: float = 1.0
+    split_zoom_factor: float = 1.03
     # Sau khi crop anh san pham ve 4:3 o giua anh goc, se scale theo ti le nay.
     split_image_scale_factor: float = 1.2
     # Muc zoom lon nhat cua anh san pham trong split layout 4:3.
@@ -259,18 +267,24 @@ class PipelineConfig:
 
     # Can chinh khung video nguon truoc speed va truoc khi cat chunk.
     # So pixel cat o phia tren.
-    split_video_trim_top_pixels: int = 120
+    split_video_trim_top_pixels: int = 200
     # So pixel cat o phia duoi.
-    split_video_trim_bottom_pixels: int = 360
+    split_video_trim_bottom_pixels: int = 280
     # Ban ratio cua hai thong so crop ben tren.
     # Chu yeu de tuong thich code cu va de test/thu nghiem.
-    split_video_trim_top_ratio: float = 0.0625
-    split_video_trim_bottom_ratio: float = 0.1875
+    split_video_trim_top_ratio: float = 0.1042
+    split_video_trim_bottom_ratio: float = 0.1458
     # Thong so day/keo video theo ti le kieu cu.
     # Flow normalize hien tai chu yeu dua vao crop theo pixel ben tren.
     split_video_vertical_offset_ratio: float = 0.00
     # Mau nen phia sau anh JPG hoac PNG bi flatten trong phan anh duoi.
     split_image_background_color: str = "#FFF4C2"
+
+    # Lam net anh san pham sau khi crop ve khung 4:3.
+    product_image_enhance_enabled: bool = True
+    product_image_enhance_required: bool = False
+    product_image_enhance_scale: int = 4
+    product_image_enhance_model: str = "realesrgan-x4plus"
 
     # Gui sang dien thoai.
     # Serial adb co dinh neu muon khoa 1 thiet bi cu the.
@@ -362,6 +376,13 @@ class PipelineConfig:
                 [],
                 "lazy-down.cmd",
             ),
+            realesrgan_bin=_resolve_tool(
+                "AUTO_EDITOR_REALESRGAN_BIN",
+                "realesrgan-ncnn-vulkan",
+                "realesrgan-ncnn-vulkan.exe",
+                [],
+                "realesrgan-ncnn-vulkan.exe",
+            ),
             adb_bin=(
                 os.getenv("AUTO_EDITOR_ADB_BIN")
                 or _find_runtime_binary("tools/adb.exe")
@@ -372,6 +393,13 @@ class PipelineConfig:
                 or "adb"
             ),
             download_via_lazy_down_only=_env_flag("AUTO_EDITOR_LAZY_DOWN_ONLY", True),
+            tikwm_api_url=os.getenv("AUTO_EDITOR_TIKWM_API_URL", "https://www.tikwm.com/api/").strip()
+            or "https://www.tikwm.com/api/",
+            product_image_enhance_enabled=_env_flag("AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE", True),
+            product_image_enhance_required=_env_flag("AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE_REQUIRED", False),
+            product_image_enhance_scale=max(1, _env_int("AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE_SCALE", 4)),
+            product_image_enhance_model=os.getenv("AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE_MODEL", "realesrgan-x4plus").strip()
+            or "realesrgan-x4plus",
             default_output_root=output_root,
             max_parallel_session_items=max(1, _env_int("AUTO_EDITOR_MAX_PARALLEL_SESSION_ITEMS", 2)),
             android_device_serial=os.getenv("AUTO_EDITOR_ANDROID_DEVICE_SERIAL", "").strip(),

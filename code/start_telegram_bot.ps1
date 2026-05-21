@@ -12,6 +12,7 @@ $venvActivate = Join-Path $projectRoot ".venv\Scripts\Activate.ps1"
 $tokenFile = Join-Path $projectRoot "telegram_bot_token.txt"
 $botsFile = Join-Path $projectRoot "telegram_bots.json"
 $srcPath = Join-Path $projectRoot "src"
+$realEsrganBin = "D:\tools\realesrgan-ncnn-vulkan-20220424-windows\realesrgan-ncnn-vulkan.exe"
 
 if (-not (Test-Path $venvActivate)) {
     Write-Error "Khong tim thay file kich hoat venv: $venvActivate"
@@ -41,6 +42,10 @@ else {
 
 $env:AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM = "1"
 $env:AUTO_EDITOR_ALLOW_SOURCE_RUNTIME = "1"
+if (-not $env:AUTO_EDITOR_REALESRGAN_BIN -and (Test-Path $realEsrganBin)) {
+    $env:AUTO_EDITOR_REALESRGAN_BIN = $realEsrganBin
+    $env:AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE = "1"
+}
 
 try {
     if (Test-Path $botsFile) {

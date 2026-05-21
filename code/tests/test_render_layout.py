@@ -65,9 +65,11 @@ class RenderLayoutTests(unittest.TestCase):
         command = runner.commands[0]
         vf = command[command.index('-vf') + 1]
         self.assertIn('scale=1080:1920:force_original_aspect_ratio=increase', vf)
-        self.assertIn('crop=1080:1440:0:120', vf)
-        self.assertIn('scale=trunc(iw*1.0000/2)*2:trunc(ih*1.0000/2)*2', vf)
-        self.assertIn('crop=1080:1440:(iw-1080)/2:0', vf)
+        self.assertIn('crop=1080:1440:0:200', vf)
+        self.assertIn('scale=trunc(iw*1.0300/2)*2:trunc(ih*1.0300/2)*2', vf)
+        self.assertIn('crop=1080:1482:(iw-1080)/2:0', vf)
+        self.assertIn('eq=brightness=0.0200:contrast=0.9900:saturation=1.0300', vf)
+        self.assertIn('cas=strength=0.1200', vf)
 
     def test_split_layout_filter_matches_requested_crop_and_blend(self):
         config = PipelineConfig()

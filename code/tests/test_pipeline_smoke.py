@@ -143,6 +143,20 @@ class FakeOverlayPlanner(object):
         )
 
 
+class FakeProductImagePreprocessor(object):
+    def __init__(self):
+        self.inputs = []
+
+    def prepare(self, image_info, output_dir):
+        self.inputs.append(image_info.path)
+        return SimpleNamespace(
+            image_info=image_info,
+            cropped_path=image_info.path,
+            enhanced=False,
+            warnings=[],
+        )
+
+
 class FakeAudioFinisher(object):
     def __init__(self):
         self.prepared_inputs = []
@@ -168,6 +182,7 @@ class FakeFinalCompositor(object):
 class SessionSmokeTests(unittest.TestCase):
     def build_services(self):
         audio_finisher = FakeAudioFinisher()
+        product_image_preprocessor = FakeProductImagePreprocessor()
         return SimpleNamespace(
             validator=FakeValidator(),
             downloader=FakeDownloader(),
@@ -177,6 +192,7 @@ class SessionSmokeTests(unittest.TestCase):
             scene_detector=FakeSceneDetector(),
             scene_qualifier=FakeSceneQualifier(),
             edit_planner=FakeEditPlanner(),
+            product_image_preprocessor=product_image_preprocessor,
             overlay_planner=FakeOverlayPlanner(),
             rough_cut_renderer=FakeRoughCutRenderer(),
             audio_finisher=audio_finisher,

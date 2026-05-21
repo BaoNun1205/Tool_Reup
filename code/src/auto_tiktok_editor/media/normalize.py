@@ -28,6 +28,8 @@ class MediaNormalizer(object):
                 * self.config.split_zoom_factor
             ),
         )
+        color_filter = self._build_color_filter()
+        sharpen_filter = self._build_sharpen_filter()
         vf = (
             "scale=%d:%d:force_original_aspect_ratio=increase," % (self.config.target_width, self.config.target_height)
             + "crop=%d:%d:0:%d," % (
@@ -41,6 +43,8 @@ class MediaNormalizer(object):
                 visible_height,
                 self.config.target_width,
             )
+            + "%s," % color_filter
+            + "%s," % sharpen_filter
             + "fps=%d,format=yuv420p" % self.config.target_fps
         )
         command = [
@@ -84,10 +88,22 @@ class MediaNormalizer(object):
         return WorkingMedia(path=output_path, info=normalized_info, warnings=warnings)
 
     def _even_int(self, value: float) -> int:
-        rounded = int(round(value))
-        if rounded % 2 != 0:
-            rounded += 1
-        return rounded
+        even_value = int(value / 2) * 2
+        return max(2, even_value)
+
+    def _build_color_filter(self) -> str:
+        brightness = self.config.preprocess_video_brightness_adjustment
+        contrast = 1.0 + self.config.preprocess_video_contrast_adjustment
+        saturation = 1.0 + self.config.preprocess_video_saturation_adjustment
+        return "eq=brightness=%0.4f:contrast=%0.4f:saturation=%0.4f" % (
+            brightness,
+            contrast,
+            saturation,
+        )
+
+    def _build_sharpen_filter(self) -> str:
+        strength = max(0.0, float(self.config.preprocess_video_sharpen_strength))
+        return "cas=strength=%0.4f" % strength
 
     def _build_warnings(self, source_info: MediaInfo) -> List[str]:
         warnings = []

@@ -13,6 +13,7 @@ from auto_tiktok_editor.media.downloader import SourceDownloader
 from auto_tiktok_editor.media.normalize import MediaNormalizer
 from auto_tiktok_editor.media.overlay import OverlayPlanner
 from auto_tiktok_editor.media.probe import MediaProbe
+from auto_tiktok_editor.media.product_image import ProductImagePreprocessor
 from auto_tiktok_editor.media.render import FinalCompositor, RoughCutRenderer
 from auto_tiktok_editor.media.scenes import SceneDetector
 from auto_tiktok_editor.media.speed import SpeedProcessor
@@ -31,6 +32,7 @@ class PipelineServices:
     scene_detector: object
     scene_qualifier: object
     edit_planner: object
+    product_image_preprocessor: object
     overlay_planner: object
     rough_cut_renderer: object
     audio_finisher: object
@@ -52,6 +54,7 @@ def build_default_services(config: PipelineConfig) -> PipelineServices:
         scene_detector=SceneDetector(config, runner),
         scene_qualifier=SceneQualifier(config),
         edit_planner=EditPlanner(config),
+        product_image_preprocessor=ProductImagePreprocessor(config, runner),
         overlay_planner=OverlayPlanner(config),
         rough_cut_renderer=RoughCutRenderer(config, runner, probe),
         audio_finisher=AudioFinisher(config, runner),

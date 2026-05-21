@@ -16,6 +16,43 @@ from auto_tiktok_editor.media.downloader import SourceDownloader
 from auto_tiktok_editor.utils.command import CommandRunner
 
 
+class FailingLazyDownRunner(object):
+    def ensure_tool(self, tool):
+        return None
+
+    def run(self, command):
+        raise DownloadError('Autolink HTTP 403 phase=issue: {"error":"challenge_required","provider":"turnstile"}')
+
+
+class FakeUrlopenResponse(object):
+    def __init__(self, payload, resolved_url=None):
+        self._payload = payload
+        self._offset = 0
+        self._resolved_url = resolved_url
+
+    def read(self, size=-1):
+        if isinstance(self._payload, str):
+            data = self._payload.encode("utf-8")
+        else:
+            data = self._payload
+        if size is None or size < 0:
+            chunk = data[self._offset:]
+            self._offset = len(data)
+            return chunk
+        chunk = data[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
+
+    def geturl(self):
+        return self._resolved_url or ""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
 class SourceDownloaderTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -100,22 +137,9 @@ class SourceDownloaderTests(unittest.TestCase):
         )
 
     def test_normalize_source_url_for_lazy_down_expands_shortlink(self):
-        class FakeResponse(object):
-            def __init__(self, resolved_url):
-                self._resolved_url = resolved_url
-
-            def geturl(self):
-                return self._resolved_url
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, exc_type, exc, tb):
-                return False
-
         source_url = "https://vt.tiktok.com/ZSHuwkq4J/"
         resolved_url = "https://www.tiktok.com/@store/video/1234567890?_r=1&_t=ZS-abc"
-        with mock.patch("auto_tiktok_editor.media.downloader.urlopen", return_value=FakeResponse(resolved_url)):
+        with mock.patch("auto_tiktok_editor.media.downloader.urlopen", return_value=FakeUrlopenResponse(b"", resolved_url)):
             self.assertEqual(
                 self.downloader._normalize_source_url_for_lazy_down(source_url),
                 "https://www.tiktok.com/@store/video/1234567890",
@@ -218,6 +242,45 @@ class SourceDownloaderTests(unittest.TestCase):
         command_output = json.dumps({"jsonPath": str(manifest_path)})
         result = self.downloader._find_lazy_down_json_path(command_output, self.base_dir)
         self.assertEqual(result, manifest_path.resolve())
+
+    def test_download_uses_tikwm_fallback_when_lazy_down_is_blocked(self):
+        payload = json.dumps({
+            "code": 0,
+            "data": {
+                "id": "1234567890",
+                "title": "Snack video",
+                "hdplay": "/video/media/hdplay/1234567890.mp4",
+                "play": "https://www.tikwm.com/video/media/play/1234567890.mp4",
+                "author": {"unique_id": "store"},
+            },
+        })
+        downloader = SourceDownloader(PipelineConfig(), FailingLazyDownRunner())
+
+        with mock.patch(
+            "auto_tiktok_editor.media.downloader.urlopen",
+            side_effect=[
+                FakeUrlopenResponse(payload),
+                FakeUrlopenResponse(b"fake mp4 bytes"),
+            ],
+        ) as mocked_urlopen:
+            result = downloader.download("https://www.tiktok.com/@store/video/1234567890", self.base_dir)
+
+        self.assertEqual(result.extractor_name, "tikwm")
+        self.assertEqual(result.metadata["download_strategy"], "tikwm_fallback")
+        self.assertEqual(result.metadata["tikwm_selected_field"], "hdplay")
+        self.assertEqual(result.metadata["source_unique_id"], "1234567890")
+        self.assertTrue(result.downloaded_path.exists())
+        self.assertEqual(result.downloaded_path.read_bytes(), b"fake mp4 bytes")
+        self.assertEqual(mocked_urlopen.call_count, 2)
+
+    def test_select_tikwm_video_url_uses_play_when_hd_is_missing(self):
+        video_url, selected_field = self.downloader._select_tikwm_video_url({
+            "data": {
+                "play": "//www.tikwm.com/video/media/play/123.mp4",
+            }
+        })
+        self.assertEqual(video_url, "https://www.tikwm.com/video/media/play/123.mp4")
+        self.assertEqual(selected_field, "play")
 
 
 if __name__ == "__main__":
