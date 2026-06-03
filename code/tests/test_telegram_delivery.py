@@ -81,7 +81,7 @@ class TelegramDeliveryServiceTests(unittest.TestCase):
                             metadata_path=None,
                             process_log_path=None,
                         ),
-                        metadata={"source_title": "Title A"},
+                        metadata={"source_title": "Title A", "product_id": "1730667245645826792"},
                     ),
                 ],
             )
@@ -91,6 +91,7 @@ class TelegramDeliveryServiceTests(unittest.TestCase):
             self.assertEqual(payload["sent_count"], 2)
             self.assertEqual(client.sent_documents[0], (123456, video_a, "Title A", "video_final.mp4"))
             self.assertEqual(client.sent_documents[1], (123456, video_b, "Title B", "video_final.mp4"))
+            self.assertEqual(client.sent_messages[0], (123456, "1730667245645826792"))
             self.assertTrue(any("Đã gửi 2 video" in text for _, text in client.sent_messages))
         finally:
             temp_dir.cleanup()

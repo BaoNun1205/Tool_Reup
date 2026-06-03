@@ -48,14 +48,14 @@ class ProductImageRunner(object):
             if self.fail_realesrgan:
                 raise ExternalToolError("Real-ESRGAN not available.")
             output_path = Path(args[args.index("-o") + 1])
-            write_fake_png(output_path, 4800, 3600, has_alpha=True)
+            write_fake_png(output_path, 4800, 4800, has_alpha=True)
             return None
-        write_fake_png(Path(args[-1]), 1200, 900, has_alpha=True)
+        write_fake_png(Path(args[-1]), 1200, 1200, has_alpha=True)
         return None
 
 
 class ProductImagePreprocessorTests(unittest.TestCase):
-    def test_crops_to_4_3_before_realesrgan_enhancement(self):
+    def test_crops_to_1_1_before_realesrgan_enhancement(self):
         temp_dir = tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT))
         try:
             base_dir = Path(temp_dir.name)
@@ -72,11 +72,11 @@ class ProductImagePreprocessorTests(unittest.TestCase):
             result = preprocessor.prepare(probe_image(source_path), base_dir / "processed")
 
             self.assertTrue(result.enhanced)
-            self.assertEqual(result.image_info.path.name, "product_4x3_enhanced.png")
-            self.assertEqual((result.image_info.width, result.image_info.height), (4800, 3600))
+            self.assertEqual(result.image_info.path.name, "product_1x1_enhanced.png")
+            self.assertEqual((result.image_info.width, result.image_info.height), (4800, 4800))
             crop_command = runner.commands[0]
             enhance_command = runner.commands[1]
-            self.assertIn("crop='min(iw\\,ih*4/3)':'min(ih\\,iw*3/4)'", crop_command[crop_command.index("-vf") + 1])
+            self.assertIn("crop='min(iw\\,ih)':'min(iw\\,ih)'", crop_command[crop_command.index("-vf") + 1])
             self.assertEqual(enhance_command[0], "realesrgan-ncnn-vulkan")
             self.assertEqual(enhance_command[enhance_command.index("-i") + 1], str(result.cropped_path))
             self.assertEqual(enhance_command[enhance_command.index("-s") + 1], "4")
@@ -95,8 +95,8 @@ class ProductImagePreprocessorTests(unittest.TestCase):
             result = preprocessor.prepare(probe_image(source_path), base_dir / "processed")
 
             self.assertFalse(result.enhanced)
-            self.assertEqual(result.image_info.path.name, "product_4x3.png")
-            self.assertEqual((result.image_info.width, result.image_info.height), (1200, 900))
+            self.assertEqual(result.image_info.path.name, "product_1x1.png")
+            self.assertEqual((result.image_info.width, result.image_info.height), (1200, 1200))
             self.assertEqual(len(result.warnings), 1)
         finally:
             cleanup_temp_dir(temp_dir)

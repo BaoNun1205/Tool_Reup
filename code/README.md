@@ -160,6 +160,57 @@ output/
 python -m unittest discover -s tests -v
 ```
 
+## TikTok Profile Manager MVP
+
+Phan nay la lop dau tien cho flow tu dong dang TikTok Shop: quan ly account va Chrome persistent profile rieng cho tung nick. Tool khong doc cookie, khong export session, khong luu mat khau.
+
+Chuc nang hien co:
+
+- SQLite database tai `tiktok_profile_manager.sqlite3`.
+- Profile folder tu dong tao trong `profiles/<slug>`.
+- Tkinter UI co cac tab `Accounts`, `Videos`, `Products`, `Logs`.
+- Bang account co cac nut: `Add account`, `Open profile`, `Open TikTok Studio`, `Check All Live`, `Run Queue`, `Mark Live`, `Mark Need Login`, `Mark Error`.
+- Bang videos luu `file_path`, `caption`, `hashtags`, `status`, `note`.
+- Video render xong qua Telegram multi-bot se duoc copy vao `profile_video_queue/<bot_name>/` va tu dong them vao tab `Videos` neu `name` trong `telegram_bots.json` trung voi profile slug trong `profiles/<name>`.
+- Moi job Telegram can 3 mon: link video TikTok, link san pham TikTok Shop, va anh san pham. Link san pham rut gon `vt.tiktok.com` se duoc resolve de lay Product ID tu URL dang `/view/product/<id>`.
+- Video queue co profile tuong ung, description lay tu mo ta/title cua link TikTok, Product ID lay tu link san pham, va mac dinh `Publish now`.
+- `Set Schedule` cho video yeu cau thoi gian cach hien tai it nhat 30 phut de tru hao gioi han TikTok Studio toi thieu 15 phut.
+- Bang products luu `product_id`, `account_id`, `status`, `note`.
+- Bang logs ghi lai check login va queue result.
+- `Open TikTok Studio` mo `https://www.tiktok.com/tiktokstudio/upload` bang Playwright persistent context va cap nhat status theo heuristic MVP:
+  - upload page: `live`
+  - login page: `need_login`
+  - verification/checkpoint/captcha: `checkpoint`
+  - loi khong nhan dien duoc: `error`
+- `Check All Live` kiem tra tuan tu tat ca account.
+- `Run Queue` ban dau chi lay video dang chon, mo cac account dang `live`, vao upload page va chon file video. Chua dien caption, chua gan product, chua bam Post.
+
+Cai dat tren Windows:
+
+```bash
+cd code
+py -3.11 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -e .
+python -m playwright install chromium
+```
+
+Neu may da co Google Chrome, Playwright se uu tien mo bang channel `chrome`. Chromium cai bang lenh tren la fallback khi can.
+
+Chay UI:
+
+```bash
+auto-tiktok-editor profile-manager
+```
+
+Hoac double-click:
+
+```text
+code/start_tiktok_profile_manager.bat
+```
+
+Luon dang nhap truc tiep trong cua so Chrome profile ma tool mo ra. Khong nhap mat khau vao database va khong copy cookie/session ra ngoai. Sau khi login xong, bam lai `Open TikTok Studio` de tool kiem tra va cap nhat status.
+
 ## Deploy Telegram bot trên Render Free
 
 Nếu chỉ dùng cá nhân qua Telegram, deploy Web Service free trên Render bằng `render.yaml` ở root repo. Service có endpoint `/health` cho UptimeRobot ping, còn bot Telegram chạy nền trong cùng process:

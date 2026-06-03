@@ -135,12 +135,32 @@ class FinalCompositor(object):
             "libx264",
             "-preset",
             "medium",
-            "-crf",
-            "20",
+            "-profile:v",
+            "high",
+            "-level",
+            "4.2",
             "-pix_fmt",
             "yuv420p",
+            "-r",
+            str(self.config.target_fps),
+            "-b:v",
+            self.config.final_video_bitrate,
+            "-maxrate",
+            self.config.final_video_maxrate,
+            "-bufsize",
+            self.config.final_video_bufsize,
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
             "-c:a",
             "aac",
+            "-b:a",
+            self.config.final_audio_bitrate,
             "-ar",
             str(self.config.target_sample_rate),
             "-t",
@@ -206,22 +226,17 @@ class FinalCompositor(object):
         overlay_height = min(target_height, bottom_height + feather_height)
         overlay_y = max(0, min(target_height - overlay_height, overlay_spec.y))
         image_scale_factor = max(0.1, overlay_spec.zoom_factor or self.config.split_image_scale_factor)
-        image_zoom_peak_factor = max(
-            image_scale_factor,
-            getattr(self.config, "split_image_zoom_peak_factor", image_scale_factor),
-        )
+        image_zoom_peak_factor = max(0.1, getattr(self.config, "split_image_zoom_peak_factor", image_scale_factor))
         scaled_image_width = max(target_width, self._even_int(target_width * image_scale_factor))
         zoom_peak_image_width = max(
-            scaled_image_width,
             target_width,
             self._even_int(target_width * image_zoom_peak_factor),
         )
-        scaled_image_height = self._even_int(scaled_image_width * 0.75)
         image_frame_height = overlay_height
-        # Anh san pham duoc crop 4:3 roi zoom ben trong khung co dinh
+        # Anh san pham duoc crop 1:1 roi zoom ben trong khung co dinh
         # canh day; fade bat dau tai mep tren khung anh.
         base_frame_width = min(target_width, scaled_image_width)
-        base_frame_height = min(image_frame_height, scaled_image_height)
+        base_frame_height = min(image_frame_height, target_width)
         separator_alpha_ratio = overlay_spec.separator_max_alpha_ratio
         if separator_alpha_ratio is None:
             separator_alpha_ratio = self.config.split_separator_max_alpha_ratio
@@ -231,8 +246,8 @@ class FinalCompositor(object):
         separator_fade_ratio = max(0.05, min(0.95, float(separator_fade_ratio)))
         fade_gamma = max(0.35, min(2.5, 2.2 - (separator_alpha_ratio * 1.8)))
         image_bg = self._ffmpeg_color(overlay_spec.image_background_color or self.config.split_image_background_color)
-        crop_width_expr = "min(iw\\,ih*4/3)"
-        crop_height_expr = "min(ih\\,iw*3/4)"
+        crop_width_expr = "min(iw\\,ih)"
+        crop_height_expr = "min(iw\\,ih)"
         fade_height_target = max(
             24,
             int(round(base_frame_height * separator_fade_ratio))
@@ -247,11 +262,34 @@ class FinalCompositor(object):
             self.config.target_fps * max(0.1, getattr(self.config, "split_image_zoom_cycle_seconds", 6.0)),
         )
         image_scale_delta = zoom_peak_image_width - scaled_image_width
-        image_scale_expr = "%0.4f+%0.4f*(1-abs(2*mod(n\\,%0.4f)/%0.4f-1))" % (
+        motion_cycle_frames = max(
+            1.0,
+            self.config.target_fps * max(0.1, getattr(self.config, "split_image_motion_cycle_seconds", 6.0)),
+        )
+        horizontal_float_pixels = max(
+            0,
+            int(round(getattr(self.config, "split_image_horizontal_float_ratio", 0.018) * target_width)),
+        )
+        vertical_float_pixels = max(
+            0,
+            int(round(getattr(self.config, "split_image_vertical_float_ratio", 0.014) * base_frame_height)),
+        )
+        image_scale_expr = "%0.4f+%0.4f*(0.5-0.5*cos(2*PI*n/%0.4f))" % (
             scaled_image_width,
             image_scale_delta,
             zoom_cycle_frames,
-            zoom_cycle_frames,
+        )
+        image_crop_x_expr = "min(max(0\\,(iw-%d)/2+%d*sin(2*PI*n/%0.4f))\\,iw-%d)" % (
+            base_frame_width,
+            horizontal_float_pixels,
+            motion_cycle_frames,
+            base_frame_width,
+        )
+        image_crop_y_expr = "min(max(0\\,ih-%d-%d*(0.5-0.5*cos(2*PI*n/%0.4f)))\\,ih-%d)" % (
+            base_frame_height,
+            vertical_float_pixels,
+            motion_cycle_frames,
+            base_frame_height,
         )
         mask_expr = (
             "if(lte(Y\\,%d)\\,0\\,"
@@ -267,7 +305,7 @@ class FinalCompositor(object):
             "[0:v]scale={tw}:-2:flags=lanczos,setsar=1,pad={tw}:{th}:0:0:color=black[basev];"
             "[2:v]format=rgba,crop='{crop_w}':'{crop_h}':(iw-{crop_w})/2:(ih-{crop_h})/2,"
             "scale=w='{image_scale_expr}':h=-2:flags=lanczos:eval=frame,"
-            "crop={base_frame_w}:{base_frame_h}:(iw-{base_frame_w})/2:ih-{base_frame_h}[imgcrop];"
+            "crop={base_frame_w}:{base_frame_h}:'{image_crop_x_expr}':'{image_crop_y_expr}'[imgcrop];"
             "color=color={bg}:size={tw}x{overlay_h},format=rgba[imgbg];"
             "[imgbg][imgcrop]overlay=0:H-h:shortest=1:eof_action=pass,format=rgba[bottomsrc];"
             "nullsrc=size={tw}x{overlay_h},format=gray,geq=lum='{mask}'[maskraw];"
@@ -283,6 +321,8 @@ class FinalCompositor(object):
             base_frame_w=base_frame_width,
             base_frame_h=base_frame_height,
             image_scale_expr=image_scale_expr,
+            image_crop_x_expr=image_crop_x_expr,
+            image_crop_y_expr=image_crop_y_expr,
             crop_w=crop_width_expr,
             crop_h=crop_height_expr,
             mask=mask_expr,

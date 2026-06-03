@@ -73,6 +73,9 @@ class TelegramDeliveryService(object):
                 caption=self._build_caption(item),
                 filename="video_final.mp4",
             )
+            product_id = self._item_product_id(item)
+            if product_id:
+                client.send_message(resolved_chat_id, product_id)
             sent_count += 1
             target_key = (bot_token, resolved_chat_id)
             sent_by_target[target_key] = sent_by_target.get(target_key, 0) + 1
@@ -134,3 +137,6 @@ class TelegramDeliveryService(object):
         if len(title) > TELEGRAM_CAPTION_MAX_CHARS:
             return title[: TELEGRAM_CAPTION_MAX_CHARS - 1].rstrip() + "…"
         return title
+
+    def _item_product_id(self, item: ItemProcessResult) -> str:
+        return str(item.metadata.get("product_id") or "").strip()

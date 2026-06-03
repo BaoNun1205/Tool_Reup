@@ -11,3 +11,7 @@ assets/
 work/
 tmp/
 telegram_bot_token.txt
+profiles/
+profile_video_queue/
+tiktok_profile_manager.sqlite3
+tiktok_profile_manager.sqlite3-*

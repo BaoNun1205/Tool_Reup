@@ -90,12 +90,12 @@ class RenderLayoutTests(unittest.TestCase):
 
         self.assertEqual(spec.mode, 'stacked_split_mask')
         self.assertIn('[0:v]scale=1080:-2:flags=lanczos,setsar=1,pad=1080:1920:0:0:color=black[basev]', filter_complex)
-        self.assertIn("crop='min(iw\\,ih*4/3)':'min(ih\\,iw*3/4)'", filter_complex)
-        self.assertIn("scale=w='1188.0000+108.0000*(1-abs(2*mod(n\\,180.0000)/180.0000-1))':h=-2:flags=lanczos:eval=frame", filter_complex)
-        self.assertIn('crop=1080:892:(iw-1080)/2:ih-892[imgcrop]', filter_complex)
-        self.assertIn("geq=lum='if(lte(Y\\,345)\\,0\\,if(lte(Y\\,691)\\,255*pow((Y-345)/346\\,1.4800)\\,255))'", filter_complex)
+        self.assertIn("crop='min(iw\\,ih)':'min(iw\\,ih)'", filter_complex)
+        self.assertIn("scale=w='1080.0000+152.0000*(0.5-0.5*cos(2*PI*n/180.0000))':h=-2:flags=lanczos:eval=frame", filter_complex)
+        self.assertIn("crop=1080:1080:'min(max(0\\,(iw-1080)/2+56*sin(2*PI*n/150.0000))\\,iw-1080)':'min(max(0\\,ih-1080-41*(0.5-0.5*cos(2*PI*n/150.0000)))\\,ih-1080)'[imgcrop]", filter_complex)
+        self.assertIn("geq=lum='if(lte(Y\\,157)\\,0\\,if(lte(Y\\,597)\\,255*pow((Y-157)/440\\,1.4800)\\,255))'", filter_complex)
         self.assertIn('overlay=0:H-h:shortest=1:eof_action=pass,format=rgba[bottomsrc]', filter_complex)
-        self.assertIn('[maskraw]boxblur=22:1[bottommask]', filter_complex)
+        self.assertIn('[maskraw]boxblur=28:1[bottommask]', filter_complex)
         self.assertIn('[bottomsrc][bottommask]alphamerge[bottom]', filter_complex)
         self.assertIn('[basev][bottom]overlay=0:683:shortest=1:eof_action=pass[vraw]', filter_complex)
         self.assertIn('[vraw]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[vout]', filter_complex)
@@ -118,7 +118,7 @@ class RenderLayoutTests(unittest.TestCase):
 
         filter_complex = compositor._build_filter_complex(spec)
 
-        self.assertIn("geq=lum='if(lte(Y\\,345)\\,0\\,if(lte(Y\\,468)\\,255*pow((Y-345)/123\\,1.4800)\\,255))'", filter_complex)
+        self.assertIn("geq=lum='if(lte(Y\\,157)\\,0\\,if(lte(Y\\,327)\\,255*pow((Y-157)/170\\,1.4800)\\,255))'", filter_complex)
         self.assertIn('[maskraw]boxblur=12:1[bottommask]', filter_complex)
 
     def test_final_compositor_caps_to_rough_cut_without_shortest_mux_truncation(self):
@@ -162,6 +162,16 @@ class RenderLayoutTests(unittest.TestCase):
         self.assertIn('-t', command)
         self.assertIn('17.133', command)
         self.assertNotIn('-shortest', command)
+        self.assertIn('-profile:v', command)
+        self.assertIn('high', command)
+        self.assertIn('-b:v', command)
+        self.assertIn('16M', command)
+        self.assertIn('-maxrate', command)
+        self.assertIn('20M', command)
+        self.assertIn('-b:a', command)
+        self.assertIn('192k', command)
+        self.assertIn('-colorspace', command)
+        self.assertIn('bt709', command)
 
 
 if __name__ == '__main__':

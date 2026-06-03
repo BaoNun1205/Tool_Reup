@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("ui", help="Launch the local desktop UI")
+    subparsers.add_parser("profile-manager", help="Launch the TikTok Profile Manager UI")
     subparsers.add_parser("telegram-bot", help="Run the Telegram bot worker")
     multi_bot_parser = subparsers.add_parser("telegram-bots", help="Run multiple Telegram bot workers")
     multi_bot_parser.add_argument(
@@ -82,6 +83,10 @@ def main(argv=None) -> int:
         from auto_tiktok_editor.ui.app import launch_ui
 
         return launch_ui(config=config)
+    if args.command == "profile-manager":
+        from auto_tiktok_editor.tiktok_profiles.ui import launch_profile_manager
+
+        return launch_profile_manager(config=config)
     if args.command == "run-session":
         return run_headless_session(Path(args.session_file))
     if args.command == "telegram-bot":

@@ -110,7 +110,7 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(spec.panel_height, spec.image_panel_height + spec.separator_height)
         self.assertEqual(spec.y, self.config.target_height - spec.panel_height)
         self.assertEqual(spec.separator_height, int(round(self.config.target_height * self.config.split_separator_height_ratio)))
-        self.assertAlmostEqual(spec.zoom_factor, self.config.split_zoom_factor)
+        self.assertAlmostEqual(spec.zoom_factor, self.config.split_image_scale_factor)
         self.assertAlmostEqual(spec.video_trim_bottom_ratio, self.config.split_video_trim_bottom_ratio)
 
 

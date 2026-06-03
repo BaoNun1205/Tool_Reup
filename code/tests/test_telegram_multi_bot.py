@@ -59,6 +59,7 @@ class TelegramMultiBotTests(unittest.TestCase):
         self.assertEqual(config.telegram_bot_token, "token-a")
         self.assertEqual(config.telegram_allowed_chat_ids, (111,))
         self.assertEqual(config.telegram_input_root, Path("d:/telegram_inputs/channel_1"))
+        self.assertEqual(config.tiktok_profile_slug, "channel_1")
 
     def test_load_telegram_bot_specs_merges_duplicate_tokens(self):
         specs = load_telegram_bot_specs_from_payload(

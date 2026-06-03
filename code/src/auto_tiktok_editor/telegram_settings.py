@@ -38,6 +38,8 @@ def _prefer_portable_settings_file() -> bool:
 class TelegramRuntimeSettings:
     bot_token: str = ""
     delivery_chat_id: str = ""
+    send_result_to_telegram: bool = False
+    save_received_video_to_profile: bool = True
 
 
 class _DataBlob(ctypes.Structure):
@@ -109,6 +111,8 @@ def _settings_from_payload(payload: dict[str, object]) -> TelegramRuntimeSetting
     return TelegramRuntimeSettings(
         bot_token=str(payload.get("bot_token") or "").strip(),
         delivery_chat_id=str(payload.get("delivery_chat_id") or "").strip(),
+        send_result_to_telegram=bool(payload.get("send_result_to_telegram", False)),
+        save_received_video_to_profile=bool(payload.get("save_received_video_to_profile", True)),
     )
 
 
@@ -159,6 +163,8 @@ def save_telegram_runtime_settings(settings: TelegramRuntimeSettings) -> Path:
                 {
                     "bot_token": settings.bot_token,
                     "delivery_chat_id": settings.delivery_chat_id,
+                    "send_result_to_telegram": settings.send_result_to_telegram,
+                    "save_received_video_to_profile": settings.save_received_video_to_profile,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -172,6 +178,8 @@ def save_telegram_runtime_settings(settings: TelegramRuntimeSettings) -> Path:
         {
             "bot_token": settings.bot_token,
             "delivery_chat_id": settings.delivery_chat_id,
+            "send_result_to_telegram": settings.send_result_to_telegram,
+            "save_received_video_to_profile": settings.save_received_video_to_profile,
         },
         ensure_ascii=False,
     ).encode("utf-8")

@@ -202,6 +202,11 @@ class PipelineConfig:
     target_sample_rate: int = 48000
     # Chat luong H.264. CRF cang thap thi cang net nhung file cang nang.
     video_crf: int = 18
+    # Thong so encode cuoi cung toi uu cho upload TikTok.
+    final_video_bitrate: str = "16M"
+    final_video_maxrate: str = "20M"
+    final_video_bufsize: str = "32M"
+    final_audio_bitrate: str = "192k"
 
     # Tien xu ly truoc khi cat chunk va xao.
     # So dB tang them cho audio truoc limiter va speed-up.
@@ -254,13 +259,17 @@ class PipelineConfig:
     split_separator_fade_ratio: float = 0.50
     # Muc zoom ap dung cho video normalize.
     split_zoom_factor: float = 1.03
-    # Sau khi crop anh san pham ve 4:3 o giua anh goc, se scale theo ti le nay.
-    split_image_scale_factor: float = 1.2
-    # Muc zoom lon nhat cua anh san pham trong split layout 4:3.
-    split_image_zoom_peak_factor: float = 1.3
+    # Muc zoom ban dau sau khi crop anh san pham ve 1:1 o giua anh goc.
+    split_image_scale_factor: float = 1.0
+    # Muc zoom cao nhat trong chu ky phong/thu.
+    split_image_zoom_peak_factor: float = 1.14
     # Chu ky phong/thu cua anh san pham de tao nhip zoom mem va deu.
     split_image_zoom_cycle_seconds: float = 6.0
-    # Cac thong so trim cu, hien khong ap dung cho crop 4:3.
+    # Bien do troi ngang/doc cho hieu ung floating parallax loop.
+    split_image_motion_cycle_seconds: float = 5.0
+    split_image_horizontal_float_ratio: float = 0.052
+    split_image_vertical_float_ratio: float = 0.038
+    # Cac thong so trim cu, hien khong ap dung cho crop 1:1.
     split_image_trim_top_ratio: float = 0.10
     split_image_trim_top_pixels: int = 0
     split_image_trim_bottom_pixels: int = 0
@@ -280,7 +289,7 @@ class PipelineConfig:
     # Mau nen phia sau anh JPG hoac PNG bi flatten trong phan anh duoi.
     split_image_background_color: str = "#FFF4C2"
 
-    # Lam net anh san pham sau khi crop ve khung 4:3.
+    # Lam net anh san pham sau khi crop ve khung 1:1.
     product_image_enhance_enabled: bool = True
     product_image_enhance_required: bool = False
     product_image_enhance_scale: int = 4
@@ -314,10 +323,15 @@ class PipelineConfig:
     telegram_input_root: Path = PROJECT_ROOT / "output" / "_telegram_inputs"
     telegram_allowed_chat_ids: tuple = ()
     telegram_delivery_chat_id: str = ""
+    telegram_send_result_to_telegram: bool = False
+    telegram_save_received_video_to_profile: bool = True
     telegram_cleanup_after_job_enabled: bool = False
     telegram_auto_cleanup_enabled: bool = True
     telegram_cleanup_interval_seconds: int = 21600
     telegram_cleanup_max_age_seconds: int = 86400
+    # Profile slug dung de dua video Telegram da render vao TikTok Profile Manager.
+    # Multi-bot se set gia tri nay bang name trong telegram_bots.json.
+    tiktok_profile_slug: str = ""
 
     # Hoan thien audio.
     # Muc loudness muc tieu cho audio da xu ly va audio final.
@@ -416,6 +430,14 @@ class PipelineConfig:
             ).expanduser().resolve(),
             telegram_allowed_chat_ids=telegram_allowed_chat_ids if allow_local_telegram else (),
             telegram_delivery_chat_id=resolved_telegram_delivery_chat_id if allow_local_telegram else "",
+            telegram_send_result_to_telegram=_env_flag(
+                "AUTO_EDITOR_TELEGRAM_SEND_RESULT_TO_TELEGRAM",
+                bool(telegram_runtime_settings.send_result_to_telegram),
+            ),
+            telegram_save_received_video_to_profile=_env_flag(
+                "AUTO_EDITOR_TELEGRAM_SAVE_RECEIVED_VIDEO_TO_PROFILE",
+                bool(telegram_runtime_settings.save_received_video_to_profile),
+            ),
             telegram_cleanup_after_job_enabled=_env_flag("AUTO_EDITOR_TELEGRAM_CLEANUP_AFTER_JOB", False),
             telegram_auto_cleanup_enabled=_env_flag("AUTO_EDITOR_TELEGRAM_AUTO_CLEANUP", True),
             telegram_cleanup_interval_seconds=max(
@@ -426,6 +448,7 @@ class PipelineConfig:
                 300,
                 _env_int("AUTO_EDITOR_TELEGRAM_CLEANUP_MAX_AGE_SECONDS", 86400),
             ),
+            tiktok_profile_slug=os.getenv("AUTO_EDITOR_TIKTOK_PROFILE_SLUG", "").strip(),
         )
 
     def build_job_id(self):

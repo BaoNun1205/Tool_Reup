@@ -108,6 +108,7 @@ def _config_for_bot(base_config: PipelineConfig, spec: TelegramBotRuntimeSpec, i
         telegram_delivery_chat_id=str(spec.chat_id or ""),
         telegram_allowed_chat_ids=allowed_chat_ids,
         telegram_input_root=input_root,
+        tiktok_profile_slug=_safe_name(spec.name or ("bot_%03d" % index)),
     )
 
 
