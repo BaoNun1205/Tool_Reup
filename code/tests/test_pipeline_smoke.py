@@ -96,7 +96,11 @@ class FakeSpeedProcessor(object):
 
 
 class FakeSceneDetector(object):
+    def __init__(self):
+        self.inputs = []
+
     def detect(self, processed_master):
+        self.inputs.append(processed_master.path)
         return [
             SceneRange(0.0, 1.5, 0),
             SceneRange(1.5, 3.0, 1),
@@ -111,12 +115,20 @@ class FakeSceneQualifier(object):
 
 
 class FakeEditPlanner(object):
+    def __init__(self):
+        self.inputs = []
+
     def build(self, scenes, seed):
+        self.inputs.append((list(scenes), seed))
         return EditPlan(seed=seed or 99, opener_index=0, closer_index=3, ordered_scenes=list(scenes), warnings=[])
 
 
 class FakeRoughCutRenderer(object):
+    def __init__(self):
+        self.inputs = []
+
     def render(self, processed_master, edit_plan, clips_dir, output_path):
+        self.inputs.append((processed_master.path, edit_plan, output_path))
         clips_dir.mkdir(parents=True, exist_ok=True)
         output_path.write_text("roughcut", encoding="utf-8")
         clip_path = clips_dir / "clip_000.mp4"
@@ -183,18 +195,21 @@ class SessionSmokeTests(unittest.TestCase):
     def build_services(self):
         audio_finisher = FakeAudioFinisher()
         product_image_preprocessor = FakeProductImagePreprocessor()
+        scene_detector = FakeSceneDetector()
+        edit_planner = FakeEditPlanner()
+        rough_cut_renderer = FakeRoughCutRenderer()
         return SimpleNamespace(
             validator=FakeValidator(),
             downloader=FakeDownloader(),
             probe=FakeProbe(),
             normalizer=FakeNormalizer(),
             speed_processor=FakeSpeedProcessor(),
-            scene_detector=FakeSceneDetector(),
+            scene_detector=scene_detector,
             scene_qualifier=FakeSceneQualifier(),
-            edit_planner=FakeEditPlanner(),
+            edit_planner=edit_planner,
             product_image_preprocessor=product_image_preprocessor,
             overlay_planner=FakeOverlayPlanner(),
-            rough_cut_renderer=FakeRoughCutRenderer(),
+            rough_cut_renderer=rough_cut_renderer,
             audio_finisher=audio_finisher,
             final_compositor=FakeFinalCompositor(),
             artifact_exporter=ArtifactExporter(),
@@ -304,6 +319,45 @@ class SessionSmokeTests(unittest.TestCase):
             finalized = orchestrator.finalize_reviewed_session(result)
             self.assertTrue(finalized.artifacts.titles_path.exists())
             self.assertTrue((finalized.artifacts.session_dir / "001_final_video.mp4").exists())
+        finally:
+            temp_dir.cleanup()
+
+    def test_original_cut_mode_skips_cut_and_shuffle_only(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            base_dir = Path(temp_dir.name)
+            image_path = base_dir / "product.png"
+            image_path.write_text("fake-image", encoding="utf-8")
+            config = PipelineConfig(default_output_root=base_dir / "out", video_cut_mode="original")
+            services = self.build_services()
+            validator = SessionValidator(item_validator=FakeValidator(), config=config)
+            orchestrator = SessionOrchestrator(config=config, services=services, session_validator=validator)
+
+            result = orchestrator.run(
+                SessionSpec(
+                    items=[
+                        SessionItemSpec(
+                            row_id="row_001",
+                            source_video_url="https://www.tiktok.com/@store/video/1234567890",
+                            product_image=image_path,
+                        )
+                    ],
+                    output_root_dir=base_dir / "out",
+                )
+            )
+
+            item = result.items[0]
+            self.assertEqual(item.status, "completed")
+            self.assertTrue(item.metadata["cut_and_shuffle_skipped"])
+            self.assertTrue(item.metadata["audio_extracted_before_shuffle"])
+            self.assertTrue(item.artifacts.final_audio_path.exists())
+            self.assertEqual(item.artifacts.final_video_path.read_text(encoding="utf-8"), "video")
+            self.assertEqual(len(services.audio_finisher.prepared_inputs), 1)
+            self.assertEqual(len(services.audio_finisher.finished_inputs), 1)
+            self.assertEqual(services.product_image_preprocessor.inputs, [image_path])
+            self.assertEqual(services.scene_detector.inputs, [])
+            self.assertEqual(services.edit_planner.inputs, [])
+            self.assertEqual(services.rough_cut_renderer.inputs, [])
         finally:
             temp_dir.cleanup()
 

@@ -11,6 +11,7 @@ import subprocess
 import threading
 import tkinter as tk
 import webbrowser
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -64,6 +65,22 @@ ACCOUNT_DEFAULT_HASHTAGS = {
 }
 PLAY_ICON = "▶"
 PLAY_HOVER_ICON = "▶"
+VIDEO_CUT_MODE_LABELS = {
+    "fixed": "Fixed chunks",
+    "scene": "Scene changes",
+    "original": "Keep Original",
+}
+VIDEO_CUT_MODE_VALUES = {label: value for value, label in VIDEO_CUT_MODE_LABELS.items()}
+PRODUCT_IMAGE_CROP_RATIO_LABELS = {
+    "1:1": "1:1",
+    "4:3": "4:3",
+}
+PRODUCT_IMAGE_CROP_RATIO_VALUES = {label: value for value, label in PRODUCT_IMAGE_CROP_RATIO_LABELS.items()}
+PRODUCT_IMAGE_MOTION_LABELS = {
+    "still": "Still",
+    "zoom": "Zoom in/out",
+}
+PRODUCT_IMAGE_MOTION_VALUES = {label: value for value, label in PRODUCT_IMAGE_MOTION_LABELS.items()}
 
 
 def _button_kwargs(kind: str = "secondary") -> dict:
@@ -622,6 +639,30 @@ class App(ctk.CTk):
         self.telegram_save_profile_var = tk.BooleanVar(
             value=bool(getattr(self.config, "telegram_save_received_video_to_profile", telegram_settings.save_received_video_to_profile))
         )
+        cut_mode = str(getattr(self.config, "video_cut_mode", telegram_settings.video_cut_mode) or "fixed").strip().lower()
+        if cut_mode not in VIDEO_CUT_MODE_LABELS:
+            cut_mode = "fixed"
+        self.video_cut_mode_var = tk.StringVar(value=VIDEO_CUT_MODE_LABELS[cut_mode])
+        self.fixed_chunk_duration_var = tk.StringVar(
+            value=self._format_float_setting(
+                getattr(self.config, "fixed_chunk_duration_seconds", telegram_settings.fixed_chunk_duration_seconds)
+            )
+        )
+        self.scene_threshold_var = tk.StringVar(
+            value=self._format_float_setting(getattr(self.config, "scene_threshold", telegram_settings.scene_threshold))
+        )
+        crop_ratio = str(
+            getattr(self.config, "product_image_crop_ratio", telegram_settings.product_image_crop_ratio) or "1:1"
+        ).strip().lower().replace("x", ":")
+        if crop_ratio not in PRODUCT_IMAGE_CROP_RATIO_LABELS:
+            crop_ratio = "1:1"
+        self.product_image_crop_ratio_var = tk.StringVar(value=PRODUCT_IMAGE_CROP_RATIO_LABELS[crop_ratio])
+        image_motion = str(
+            getattr(self.config, "product_image_motion", telegram_settings.product_image_motion) or "still"
+        ).strip().lower()
+        if image_motion not in PRODUCT_IMAGE_MOTION_LABELS:
+            image_motion = "still"
+        self.product_image_motion_var = tk.StringVar(value=PRODUCT_IMAGE_MOTION_LABELS[image_motion])
         self.telegram_bot_status_var = tk.StringVar(value="Bot stopped")
         self.telegram_target_profile_var = tk.StringVar(value="Telegram videos will be saved to: Select a profile")
         self.product_link_tooltip = None
@@ -683,7 +724,7 @@ class App(ctk.CTk):
         ctk.CTkLabel(self.sidebar, text="Profile Manager", font=(FONT, 13), text_color=COLORS["muted"]).pack(anchor="w", padx=20, pady=(2, 18))
 
         self.nav_buttons = {}
-        nav_items = (("Account & Bot", "accounts"), ("Videos", "videos"), ("Logs", "logs"))
+        nav_items = (("Accounts", "accounts"), ("Videos", "videos"), ("Logs", "logs"), ("Settings", "settings"))
         for label, key in nav_items:
             button = ctk.CTkButton(
                 self.sidebar,
@@ -738,10 +779,12 @@ class App(ctk.CTk):
         self.accounts_tab = ctk.CTkFrame(self.content_stack, fg_color="transparent")
         self.videos_tab = ctk.CTkFrame(self.content_stack, fg_color="transparent")
         self.logs_tab = ctk.CTkFrame(self.content_stack, fg_color="transparent")
+        self.settings_tab = ctk.CTkFrame(self.content_stack, fg_color="transparent")
         self.tab_by_name = {
             "accounts": self.accounts_tab,
             "videos": self.videos_tab,
             "logs": self.logs_tab,
+            "settings": self.settings_tab,
         }
         for tab in self.tab_by_name.values():
             tab.grid(row=0, column=0, sticky="nsew")
@@ -750,6 +793,7 @@ class App(ctk.CTk):
         self._build_accounts_tab()
         self._build_videos_tab()
         self._build_logs_tab()
+        self._build_settings_tab()
         self._show_tab_name("accounts")
 
     def build_status_bar(self) -> None:
@@ -854,11 +898,81 @@ class App(ctk.CTk):
         )
         self.account_table.configure(displaycolumns=("id", "name", "login_type", "status", "profile_path", "updated_at"))
         self.account_table.pack(fill="both", expand=True)
-        self._build_telegram_bot_section()
 
-    def _build_telegram_bot_section(self) -> None:
+    def _build_settings_tab(self) -> None:
+        self.settings_tab.grid_columnconfigure(0, weight=1)
+        self.settings_tab.grid_rowconfigure(0, weight=0)
+        self.settings_tab.grid_rowconfigure(1, weight=0)
+        self._build_video_edit_settings_section()
+        self._build_telegram_bot_section(self.settings_tab)
+
+    def _build_video_edit_settings_section(self) -> None:
         card, body, actions = self._card(
-            self.accounts_tab,
+            self.settings_tab,
+            "Video Edit Settings",
+            "Choose how the editor cuts source video and prepares product images.",
+        )
+        card.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+        self._add_action_button(actions, "Save", self._on_video_edit_settings_changed, "primary")
+
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_columnconfigure(2, weight=1)
+
+        mode_frame = ctk.CTkFrame(body, fg_color="transparent")
+        mode_frame.grid(row=0, column=0, sticky="ew", padx=(0, 10), pady=(0, 4))
+        mode_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(mode_frame, text="Cut mode", text_color=COLORS["muted"], font=(FONT, 12, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        self.video_cut_mode_menu = self._option_menu(
+            mode_frame,
+            self.video_cut_mode_var,
+            list(VIDEO_CUT_MODE_VALUES.keys()),
+            command=lambda _value: self._on_video_cut_mode_changed(),
+        )
+        self.video_cut_mode_menu.grid(row=1, column=0, sticky="ew")
+
+        chunk_frame = ctk.CTkFrame(body, fg_color="transparent")
+        chunk_frame.grid(row=0, column=1, sticky="ew", padx=(10, 10), pady=(0, 4))
+        chunk_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(chunk_frame, text="Fixed chunk seconds", text_color=COLORS["muted"], font=(FONT, 12, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        self.fixed_chunk_duration_entry = self._entry(chunk_frame, self.fixed_chunk_duration_var, "2.27")
+        self.fixed_chunk_duration_entry.grid(row=1, column=0, sticky="ew")
+
+        threshold_frame = ctk.CTkFrame(body, fg_color="transparent")
+        threshold_frame.grid(row=0, column=2, sticky="ew", padx=(10, 0), pady=(0, 4))
+        threshold_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(threshold_frame, text="Scene threshold", text_color=COLORS["muted"], font=(FONT, 12, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        self.scene_threshold_entry = self._entry(threshold_frame, self.scene_threshold_var, "0.35")
+        self.scene_threshold_entry.grid(row=1, column=0, sticky="ew")
+
+        ratio_frame = ctk.CTkFrame(body, fg_color="transparent")
+        ratio_frame.grid(row=1, column=0, sticky="ew", padx=(0, 10), pady=(12, 4))
+        ratio_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(ratio_frame, text="Image crop ratio", text_color=COLORS["muted"], font=(FONT, 12, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        self.product_image_crop_ratio_menu = self._option_menu(
+            ratio_frame,
+            self.product_image_crop_ratio_var,
+            list(PRODUCT_IMAGE_CROP_RATIO_VALUES.keys()),
+            command=lambda _value: self._on_video_edit_settings_changed(),
+        )
+        self.product_image_crop_ratio_menu.grid(row=1, column=0, sticky="ew")
+
+        motion_frame = ctk.CTkFrame(body, fg_color="transparent")
+        motion_frame.grid(row=1, column=1, sticky="ew", padx=(10, 10), pady=(12, 4))
+        motion_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(motion_frame, text="Image motion", text_color=COLORS["muted"], font=(FONT, 12, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        self.product_image_motion_menu = self._option_menu(
+            motion_frame,
+            self.product_image_motion_var,
+            list(PRODUCT_IMAGE_MOTION_VALUES.keys()),
+            command=lambda _value: self._on_video_edit_settings_changed(),
+        )
+        self.product_image_motion_menu.grid(row=1, column=0, sticky="ew")
+        self._update_video_edit_controls_state()
+
+    def _build_telegram_bot_section(self, parent) -> None:
+        card, body, actions = self._card(
+            parent,
             "Telegram Bot Management",
             "Receive natural photo captions and route completed videos.",
         )
@@ -2041,6 +2155,100 @@ class App(ctk.CTk):
         self.telegram_event_log.see("end")
         self.telegram_event_log.configure(state="disabled")
 
+    def _format_float_setting(self, value) -> str:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            number = 0.0
+        return ("%.3f" % number).rstrip("0").rstrip(".")
+
+    def _video_cut_mode_value(self) -> str:
+        label = self.video_cut_mode_var.get().strip()
+        return VIDEO_CUT_MODE_VALUES.get(label, "fixed")
+
+    def _product_image_crop_ratio_value(self) -> str:
+        label = self.product_image_crop_ratio_var.get().strip()
+        return PRODUCT_IMAGE_CROP_RATIO_VALUES.get(label, "1:1")
+
+    def _product_image_motion_value(self) -> str:
+        label = self.product_image_motion_var.get().strip()
+        return PRODUCT_IMAGE_MOTION_VALUES.get(label, "still")
+
+    def _read_float_setting(self, variable: tk.StringVar, label: str, minimum: float, maximum: float) -> float:
+        text = variable.get().strip().replace(",", ".")
+        try:
+            value = float(text)
+        except ValueError:
+            raise ValueError("%s must be a number." % label)
+        if value < minimum or value > maximum:
+            raise ValueError("%s must be between %s and %s." % (label, self._format_float_setting(minimum), self._format_float_setting(maximum)))
+        return value
+
+    def _read_float_or_fallback(self, variable: tk.StringVar, fallback: float, minimum: float, maximum: float) -> float:
+        try:
+            value = float(variable.get().strip().replace(",", "."))
+        except ValueError:
+            return fallback
+        return max(minimum, min(maximum, value))
+
+    def _current_video_edit_settings(self) -> tuple[str, float, float, str, str]:
+        video_cut_mode = self._video_cut_mode_value()
+        if video_cut_mode == "fixed":
+            fixed_chunk_duration = self._read_float_setting(self.fixed_chunk_duration_var, "Fixed chunk seconds", 0.5, 30.0)
+            scene_threshold = self._read_float_or_fallback(
+                self.scene_threshold_var,
+                float(getattr(self.config, "scene_threshold", 0.35)),
+                0.01,
+                0.95,
+            )
+        elif video_cut_mode == "scene":
+            fixed_chunk_duration = self._read_float_or_fallback(
+                self.fixed_chunk_duration_var,
+                float(getattr(self.config, "fixed_chunk_duration_seconds", 2.27)),
+                0.5,
+                30.0,
+            )
+            scene_threshold = self._read_float_setting(self.scene_threshold_var, "Scene threshold", 0.01, 0.95)
+        else:
+            fixed_chunk_duration = self._read_float_or_fallback(
+                self.fixed_chunk_duration_var,
+                float(getattr(self.config, "fixed_chunk_duration_seconds", 2.27)),
+                0.5,
+                30.0,
+            )
+            scene_threshold = self._read_float_or_fallback(
+                self.scene_threshold_var,
+                float(getattr(self.config, "scene_threshold", 0.35)),
+                0.01,
+                0.95,
+            )
+        return (
+            video_cut_mode,
+            fixed_chunk_duration,
+            scene_threshold,
+            self._product_image_crop_ratio_value(),
+            self._product_image_motion_value(),
+        )
+
+    def _update_video_edit_controls_state(self) -> None:
+        mode = self._video_cut_mode_value()
+        if hasattr(self, "fixed_chunk_duration_entry"):
+            self.fixed_chunk_duration_entry.configure(state="normal" if mode == "fixed" else "disabled")
+        if hasattr(self, "scene_threshold_entry"):
+            self.scene_threshold_entry.configure(state="normal" if mode == "scene" else "disabled")
+
+    def _on_video_cut_mode_changed(self) -> None:
+        self._update_video_edit_controls_state()
+        self._on_video_edit_settings_changed()
+
+    def _on_video_edit_settings_changed(self) -> None:
+        self._update_video_edit_controls_state()
+        if not self._save_telegram_bot_settings(show_error=True):
+            return
+        self.status_var.set("Video edit settings saved.")
+        if self.telegram_bot_process is not None and self.telegram_bot_process.poll() is None:
+            self._append_telegram_event("Video edit settings changed; restart bot to apply.")
+
     def _on_telegram_settings_changed(self) -> None:
         self._save_telegram_bot_settings()
         self._update_telegram_target_profile_label()
@@ -2048,18 +2256,50 @@ class App(ctk.CTk):
             self.status_var.set("Telegram settings changed. Restart bot to apply the new settings.")
             self._append_telegram_event("Settings changed; restart bot to apply.")
 
-    def _save_telegram_bot_settings(self) -> None:
+    def _save_telegram_bot_settings(self, show_error: bool = False) -> bool:
         try:
+            (
+                video_cut_mode,
+                fixed_chunk_duration,
+                scene_threshold,
+                product_image_crop_ratio,
+                product_image_motion,
+            ) = self._current_video_edit_settings()
             save_telegram_runtime_settings(
                 TelegramRuntimeSettings(
                     bot_token=self.telegram_bot_token_var.get().strip(),
                     delivery_chat_id=self.telegram_chat_id_var.get().strip(),
                     send_result_to_telegram=bool(self.telegram_send_result_var.get()),
                     save_received_video_to_profile=bool(self.telegram_save_profile_var.get()),
+                    video_cut_mode=video_cut_mode,
+                    fixed_chunk_duration_seconds=fixed_chunk_duration,
+                    scene_threshold=scene_threshold,
+                    product_image_crop_ratio=product_image_crop_ratio,
+                    product_image_motion=product_image_motion,
                 )
             )
+            self.config = replace(
+                self.config,
+                video_cut_mode=video_cut_mode,
+                fixed_chunk_duration_seconds=fixed_chunk_duration,
+                scene_threshold=scene_threshold,
+                product_image_crop_ratio=product_image_crop_ratio,
+                product_image_motion=product_image_motion,
+            )
+            self.fixed_chunk_duration_var.set(self._format_float_setting(fixed_chunk_duration))
+            self.scene_threshold_var.set(self._format_float_setting(scene_threshold))
+            self.product_image_crop_ratio_var.set(PRODUCT_IMAGE_CROP_RATIO_LABELS[product_image_crop_ratio])
+            self.product_image_motion_var.set(PRODUCT_IMAGE_MOTION_LABELS[product_image_motion])
+            return True
+        except ValueError as exc:
+            if show_error:
+                messagebox.showerror("Video edit settings", str(exc))
+            return False
         except Exception as exc:
             self.logger.warning("Could not save Telegram bot settings: %s", exc)
+            if show_error:
+                messagebox.showerror("Settings", "Could not save settings: %s" % exc)
+            return False
 
     def _telegram_bots_config_path(self) -> Path:
         return Path(self.manager.project_root).resolve() / "telegram_bots.json"
@@ -2155,7 +2395,16 @@ class App(ctk.CTk):
                 self.telegram_bot_status_var.set("Bot error")
                 return
         effective_save = self._telegram_effective_save_to_profile()
-        self._save_telegram_bot_settings()
+        if not self._save_telegram_bot_settings(show_error=True):
+            self.telegram_bot_status_var.set("Bot error")
+            return
+        (
+            video_cut_mode,
+            fixed_chunk_duration,
+            scene_threshold,
+            product_image_crop_ratio,
+            product_image_motion,
+        ) = self._current_video_edit_settings()
         log_dir = project_root / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         pause_path = self._telegram_bot_pause_file()
@@ -2175,6 +2424,11 @@ class App(ctk.CTk):
                 env["AUTO_EDITOR_TELEGRAM_INPUT_MODE"] = "simple"
                 env["AUTO_EDITOR_TELEGRAM_SEND_RESULT_TO_TELEGRAM"] = "1" if self.telegram_send_result_var.get() else "0"
                 env["AUTO_EDITOR_TELEGRAM_SAVE_RECEIVED_VIDEO_TO_PROFILE"] = "1" if effective_save else "0"
+                env["AUTO_EDITOR_VIDEO_CUT_MODE"] = video_cut_mode
+                env["AUTO_EDITOR_FIXED_CHUNK_DURATION_SECONDS"] = self._format_float_setting(fixed_chunk_duration)
+                env["AUTO_EDITOR_SCENE_THRESHOLD"] = self._format_float_setting(scene_threshold)
+                env["AUTO_EDITOR_PRODUCT_IMAGE_CROP_RATIO"] = product_image_crop_ratio
+                env["AUTO_EDITOR_PRODUCT_IMAGE_MOTION"] = product_image_motion
                 env["AUTO_EDITOR_TELEGRAM_PAUSE_FILE"] = str(pause_path)
                 self.telegram_bot_process = subprocess.Popen(
                     [

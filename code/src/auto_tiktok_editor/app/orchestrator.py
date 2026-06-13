@@ -12,7 +12,7 @@ from auto_tiktok_editor.app.recorder import PipelineRecorder
 from auto_tiktok_editor.app.services import PipelineServices, build_default_services
 from auto_tiktok_editor.app.workspace import SessionWorkspace, create_item_workspace, create_session_workspace
 from auto_tiktok_editor.config import PipelineConfig
-from auto_tiktok_editor.domain.models import ItemProcessResult, SessionArtifacts, SessionEvent, SessionItemSpec, SessionResult, SessionSpec, ValidatedSessionItem
+from auto_tiktok_editor.domain.models import ItemProcessResult, RoughCutAsset, SessionArtifacts, SessionEvent, SessionItemSpec, SessionResult, SessionSpec, ValidatedSessionItem
 from auto_tiktok_editor.domain.validation import SessionValidator
 from auto_tiktok_editor.exceptions import EditorError, SessionValidationError
 
@@ -118,28 +118,37 @@ class ItemPipelineRunner(object):
             prepared_audio_path = prepared_audio.path if prepared_audio.has_audio else None
             metadata["audio_extracted_before_shuffle"] = True
 
-            self._transition(recorder, session_id, validated_item, "detecting_scenes", event_callback)
-            raw_scenes, black_ranges, detection_warnings = self.services.scene_detector.detect(processed_master)
-            usable_scenes, dropped_scenes, qualification_warnings = self.services.scene_qualifier.qualify(
-                raw_scenes,
-                black_ranges,
-            )
-            self._record_warnings(
-                recorder,
-                session_id,
-                validated_item,
-                detection_warnings + qualification_warnings,
-                event_callback,
-            )
-            metadata["scene_detected_count"] = len(raw_scenes)
-            metadata["scene_kept_count"] = len(usable_scenes)
-            metadata["scene_dropped_count"] = len(dropped_scenes)
+            rough_cut = None
+            if self._uses_original_video_mode():
+                metadata["video_cut_mode"] = "original"
+                metadata["cut_and_shuffle_skipped"] = True
+                metadata["scene_detected_count"] = 1
+                metadata["scene_kept_count"] = 1
+                metadata["scene_dropped_count"] = 0
+                metadata["scene_drop_reasons"] = []
+            else:
+                self._transition(recorder, session_id, validated_item, "detecting_scenes", event_callback)
+                raw_scenes, black_ranges, detection_warnings = self.services.scene_detector.detect(processed_master)
+                usable_scenes, dropped_scenes, qualification_warnings = self.services.scene_qualifier.qualify(
+                    raw_scenes,
+                    black_ranges,
+                )
+                self._record_warnings(
+                    recorder,
+                    session_id,
+                    validated_item,
+                    detection_warnings + qualification_warnings,
+                    event_callback,
+                )
+                metadata["scene_detected_count"] = len(raw_scenes)
+                metadata["scene_kept_count"] = len(usable_scenes)
+                metadata["scene_dropped_count"] = len(dropped_scenes)
 
-            self._transition(recorder, session_id, validated_item, "planning_edit", event_callback)
-            edit_plan = self.services.edit_planner.build(usable_scenes, validated.job_spec.shuffle_seed)
-            self._record_warnings(recorder, session_id, validated_item, edit_plan.warnings, event_callback)
-            metadata["shuffle_seed_used"] = edit_plan.seed
-            metadata["scene_drop_reasons"] = [scene.drop_reason for scene in dropped_scenes if scene.drop_reason]
+                self._transition(recorder, session_id, validated_item, "planning_edit", event_callback)
+                edit_plan = self.services.edit_planner.build(usable_scenes, validated.job_spec.shuffle_seed)
+                self._record_warnings(recorder, session_id, validated_item, edit_plan.warnings, event_callback)
+                metadata["shuffle_seed_used"] = edit_plan.seed
+                metadata["scene_drop_reasons"] = [scene.drop_reason for scene in dropped_scenes if scene.drop_reason]
 
             self._transition(recorder, session_id, validated_item, "preparing_product_image", event_callback)
             product_image = self._finish_product_image_preprocessing(
@@ -155,12 +164,16 @@ class ItemPipelineRunner(object):
             metadata["product_image_enhanced"] = product_image.enhanced
 
             self._transition(recorder, session_id, validated_item, "rendering_final", event_callback)
-            rough_cut = self.services.rough_cut_renderer.render(
-                processed_master,
-                edit_plan,
-                workspace.clips_dir,
-                workspace.output_dir / "rough_cut.mp4",
-            )
+            if rough_cut is None:
+                if self._uses_original_video_mode():
+                    rough_cut = RoughCutAsset(path=processed_master.path, info=processed_master.info, clip_paths=[])
+                else:
+                    rough_cut = self.services.rough_cut_renderer.render(
+                        processed_master,
+                        edit_plan,
+                        workspace.clips_dir,
+                        workspace.output_dir / "rough_cut.mp4",
+                    )
             overlay_spec = self.services.overlay_planner.plan(
                 product_image.image_info,
                 validated.job_spec.overlay_alpha_ratio,
@@ -300,6 +313,10 @@ class ItemPipelineRunner(object):
             future.cancel()
         if executor is not None:
             executor.shutdown(wait=False)
+
+    def _uses_original_video_mode(self) -> bool:
+        mode = str(getattr(self.config, "video_cut_mode", "fixed") or "fixed").strip().lower()
+        return mode == "original"
 
     def _transition(
         self,

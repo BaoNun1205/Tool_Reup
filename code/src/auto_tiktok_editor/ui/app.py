@@ -354,6 +354,11 @@ class EditorApplication(object):
             TelegramRuntimeSettings(
                 bot_token=token,
                 delivery_chat_id=delivery_chat_id,
+                video_cut_mode=getattr(self.config, "video_cut_mode", "fixed"),
+                fixed_chunk_duration_seconds=getattr(self.config, "fixed_chunk_duration_seconds", 2.27),
+                scene_threshold=getattr(self.config, "scene_threshold", 0.35),
+                product_image_crop_ratio=getattr(self.config, "product_image_crop_ratio", "1:1"),
+                product_image_motion=getattr(self.config, "product_image_motion", "still"),
             )
         )
         self.config = self._runtime_telegram_config()

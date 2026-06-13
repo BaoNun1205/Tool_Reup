@@ -128,6 +128,31 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value.strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_video_cut_mode(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"fixed", "scene", "original"} else "fixed"
+
+
+def _normalize_product_image_crop_ratio(value: str) -> str:
+    normalized = str(value or "").strip().lower().replace("x", ":")
+    return normalized if normalized in {"1:1", "4:3"} else "1:1"
+
+
+def _normalize_product_image_motion(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"still", "zoom"} else "still"
+
+
 def _env_chat_ids(name: str):
     value = os.getenv(name)
     if value is None:
@@ -221,11 +246,12 @@ class PipelineConfig:
     speed_factor: float = 1.2
 
     # Cat chunk va bao toan muc tieu shuffle.
-    # Do dai chunk co dinh thay cho tach canh tu nhien trong flow hien tai.
-    # Neu muon moi doan deu duoi 3 giay thi giu gia tri nay < 3.0.
+    # Mode "fixed" cat chunk co dinh; mode "scene" cat theo diem chuyen canh;
+    # mode "original" bo qua buoc cat va xao tron, cac buoc con lai van chay.
+    video_cut_mode: str = "fixed"
+    # Do dai chunk co dinh. Neu muon moi doan deu duoi 3 giay thi giu gia tri nay < 3.0.
     fixed_chunk_duration_seconds: float = 2.27
-    # Nguong tach canh tu nhien kieu cu. Hien tai gan nhu khong con tac dung
-    # chinh vi app dang uu tien fixed chunk, nhung van giu lai de tuong thich.
+    # Nguong tach canh tu nhien khi video_cut_mode la "scene".
     scene_threshold: float = 0.35
     # Do dai toi thieu cua mot doan nho khi planner phai chia tiep.
     min_scene_duration: float = 0.9
@@ -259,8 +285,12 @@ class PipelineConfig:
     split_separator_fade_ratio: float = 0.50
     # Muc zoom ap dung cho video normalize.
     split_zoom_factor: float = 1.03
-    # Muc zoom ban dau sau khi crop anh san pham ve 1:1 o giua anh goc.
+    # Muc zoom ban dau sau khi crop anh san pham theo ti le da chon.
     split_image_scale_factor: float = 1.0
+    # Ti le crop anh san pham truoc khi ghep vao panel duoi.
+    product_image_crop_ratio: str = "1:1"
+    # "still" giu anh dung yen; "zoom" dung hieu ung phong/thu hien tai.
+    product_image_motion: str = "still"
     # Muc zoom cao nhat trong chu ky phong/thu.
     split_image_zoom_peak_factor: float = 1.14
     # Chu ky phong/thu cua anh san pham de tao nhip zoom mem va deu.
@@ -352,6 +382,33 @@ class PipelineConfig:
             os.getenv("AUTO_EDITOR_TELEGRAM_DELIVERY_CHAT_ID", "").strip()
             or telegram_runtime_settings.delivery_chat_id
         )
+        video_cut_mode = _normalize_video_cut_mode(
+            os.getenv("AUTO_EDITOR_VIDEO_CUT_MODE", "").strip()
+            or telegram_runtime_settings.video_cut_mode
+            or "fixed"
+        )
+        fixed_chunk_duration_seconds = max(
+            0.5,
+            _env_float(
+                "AUTO_EDITOR_FIXED_CHUNK_DURATION_SECONDS",
+                telegram_runtime_settings.fixed_chunk_duration_seconds,
+            ),
+        )
+        scene_threshold = max(
+            0.01,
+            min(
+                0.95,
+                _env_float("AUTO_EDITOR_SCENE_THRESHOLD", telegram_runtime_settings.scene_threshold),
+            ),
+        )
+        product_image_crop_ratio = _normalize_product_image_crop_ratio(
+            os.getenv("AUTO_EDITOR_PRODUCT_IMAGE_CROP_RATIO")
+            or telegram_runtime_settings.product_image_crop_ratio
+        )
+        product_image_motion = _normalize_product_image_motion(
+            os.getenv("AUTO_EDITOR_PRODUCT_IMAGE_MOTION")
+            or telegram_runtime_settings.product_image_motion
+        )
         allow_local_telegram = env_allow_local_telegram or bool(resolved_telegram_bot_token)
         telegram_allowed_chat_ids = _env_chat_ids("AUTO_EDITOR_TELEGRAM_ALLOWED_CHAT_IDS")
         if not telegram_allowed_chat_ids and resolved_telegram_delivery_chat_id:
@@ -414,6 +471,11 @@ class PipelineConfig:
             product_image_enhance_scale=max(1, _env_int("AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE_SCALE", 4)),
             product_image_enhance_model=os.getenv("AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE_MODEL", "realesrgan-x4plus").strip()
             or "realesrgan-x4plus",
+            video_cut_mode=video_cut_mode,
+            fixed_chunk_duration_seconds=fixed_chunk_duration_seconds,
+            scene_threshold=scene_threshold,
+            product_image_crop_ratio=product_image_crop_ratio,
+            product_image_motion=product_image_motion,
             default_output_root=output_root,
             max_parallel_session_items=max(1, _env_int("AUTO_EDITOR_MAX_PARALLEL_SESSION_ITEMS", 2)),
             android_device_serial=os.getenv("AUTO_EDITOR_ANDROID_DEVICE_SERIAL", "").strip(),

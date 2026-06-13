@@ -24,7 +24,13 @@ class TelegramSettingsTests(unittest.TestCase):
         temp_dir = tempfile.TemporaryDirectory()
         try:
             settings_path = Path(temp_dir.name) / "telegram_settings.json"
-            sample = TelegramRuntimeSettings(bot_token="bot-token-demo", delivery_chat_id="123456")
+            sample = TelegramRuntimeSettings(
+                bot_token="bot-token-demo",
+                delivery_chat_id="123456",
+                video_cut_mode="original",
+                product_image_crop_ratio="4:3",
+                product_image_motion="zoom",
+            )
             with mock.patch("auto_tiktok_editor.telegram_settings._settings_path", return_value=settings_path):
                 with mock.patch("auto_tiktok_editor.telegram_settings._dpapi_protect", side_effect=lambda value: value):
                     with mock.patch("auto_tiktok_editor.telegram_settings._dpapi_unprotect", side_effect=lambda value: value):
@@ -45,6 +51,8 @@ class TelegramSettingsTests(unittest.TestCase):
                     {
                         "bot_token": "legacy-token",
                         "delivery_chat_id": "654321",
+                        "product_image_crop_ratio": "4:3",
+                        "product_image_motion": "zoom",
                     },
                     ensure_ascii=False,
                     indent=2,
@@ -55,6 +63,9 @@ class TelegramSettingsTests(unittest.TestCase):
                 loaded = load_telegram_runtime_settings()
             self.assertEqual(loaded.bot_token, "legacy-token")
             self.assertEqual(loaded.delivery_chat_id, "654321")
+            self.assertEqual(loaded.video_cut_mode, "fixed")
+            self.assertEqual(loaded.product_image_crop_ratio, "4:3")
+            self.assertEqual(loaded.product_image_motion, "zoom")
         finally:
             temp_dir.cleanup()
 

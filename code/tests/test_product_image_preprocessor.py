@@ -76,10 +76,31 @@ class ProductImagePreprocessorTests(unittest.TestCase):
             self.assertEqual((result.image_info.width, result.image_info.height), (4800, 4800))
             crop_command = runner.commands[0]
             enhance_command = runner.commands[1]
-            self.assertIn("crop='min(iw\\,ih)':'min(iw\\,ih)'", crop_command[crop_command.index("-vf") + 1])
+            self.assertIn("crop='if(gte(iw/ih\\,1.0000)\\,ih*1.0000\\,iw)'", crop_command[crop_command.index("-vf") + 1])
             self.assertEqual(enhance_command[0], "realesrgan-ncnn-vulkan")
             self.assertEqual(enhance_command[enhance_command.index("-i") + 1], str(result.cropped_path))
             self.assertEqual(enhance_command[enhance_command.index("-s") + 1], "4")
+        finally:
+            cleanup_temp_dir(temp_dir)
+
+    def test_crops_to_4_3_when_configured(self):
+        temp_dir = tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT))
+        try:
+            base_dir = Path(temp_dir.name)
+            source_path = base_dir / "product.png"
+            write_fake_png(source_path, 1600, 1200, has_alpha=True)
+            runner = ProductImageRunner(fail_realesrgan=True)
+            preprocessor = ProductImagePreprocessor(
+                PipelineConfig(product_image_crop_ratio="4:3"),
+                runner,
+            )
+
+            result = preprocessor.prepare(probe_image(source_path), base_dir / "processed")
+
+            self.assertFalse(result.enhanced)
+            self.assertEqual(result.image_info.path.name, "product_4x3.png")
+            crop_filter = runner.commands[0][runner.commands[0].index("-vf") + 1]
+            self.assertIn("crop='if(gte(iw/ih\\,1.3333)\\,ih*1.3333\\,iw)'", crop_filter)
         finally:
             cleanup_temp_dir(temp_dir)
 

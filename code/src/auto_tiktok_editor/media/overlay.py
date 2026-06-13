@@ -39,4 +39,6 @@ class OverlayPlanner(object):
             image_background_color=self.config.split_image_background_color,
             separator_max_alpha_ratio=self.config.split_separator_max_alpha_ratio,
             separator_fade_ratio=separator_fade_ratio,
+            image_crop_ratio=getattr(self.config, "product_image_crop_ratio", "1:1"),
+            image_motion=getattr(self.config, "product_image_motion", "still"),
         )

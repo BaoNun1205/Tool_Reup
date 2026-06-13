@@ -157,6 +157,8 @@ class OverlaySpec:
     image_background_color: str = "#FFF4C2"
     separator_max_alpha_ratio: Optional[float] = None
     separator_fade_ratio: Optional[float] = None
+    image_crop_ratio: str = "1:1"
+    image_motion: str = "still"
 
 
 @dataclass

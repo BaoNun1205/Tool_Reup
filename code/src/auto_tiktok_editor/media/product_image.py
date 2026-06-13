@@ -29,14 +29,19 @@ class ProductImagePreprocessor(object):
     def prepare(self, image_info: ImageInfo, output_dir: Path) -> ProductImagePreprocessResult:
         output_dir.mkdir(parents=True, exist_ok=True)
         warnings = []
-        cropped_path = output_dir / "product_1x1.png"
+        crop_ratio = self._crop_ratio()
+        crop_suffix = crop_ratio.replace(":", "x")
+        cropped_path = output_dir / ("product_%s.png" % crop_suffix)
         try:
-            self._crop_to_1_1(image_info.path, cropped_path)
+            self._crop_to_ratio(image_info.path, cropped_path, crop_ratio)
             prepared_info = probe_image(cropped_path)
         except (EditorError, OSError) as exc:
             if self.config.product_image_enhance_required:
                 raise
-            warnings.append("Could not crop product image to 1:1 before enhancement; using original image. %s" % exc)
+            warnings.append(
+                "Could not crop product image to %s before enhancement; using original image. %s"
+                % (crop_ratio, exc)
+            )
             return ProductImagePreprocessResult(
                 image_info=image_info,
                 cropped_path=image_info.path,
@@ -52,7 +57,7 @@ class ProductImagePreprocessor(object):
                 warnings=warnings,
             )
 
-        enhanced_path = output_dir / "product_1x1_enhanced.png"
+        enhanced_path = output_dir / ("product_%s_enhanced.png" % crop_suffix)
         try:
             self._enhance_with_realesrgan(cropped_path, enhanced_path)
             enhanced_info = probe_image(enhanced_path)
@@ -73,11 +78,19 @@ class ProductImagePreprocessor(object):
                 warnings=warnings,
             )
 
-    def _crop_to_1_1(self, input_path: Path, output_path: Path) -> None:
+    def _crop_ratio(self) -> str:
+        normalized = str(getattr(self.config, "product_image_crop_ratio", "1:1") or "1:1").strip().lower()
+        return normalized if normalized in {"1:1", "4:3"} else "1:1"
+
+    def _crop_to_ratio(self, input_path: Path, output_path: Path, crop_ratio: str) -> None:
+        ratio_width, ratio_height = (float(part) for part in crop_ratio.split(":", 1))
+        target_ratio = ratio_width / ratio_height
         crop_filter = (
             "format=rgba,"
-            "crop='min(iw\\,ih)':'min(iw\\,ih)':"
-            "(iw-min(iw\\,ih))/2:(ih-min(iw\\,ih))/2"
+            "crop='if(gte(iw/ih\\,%0.4f)\\,ih*%0.4f\\,iw)':"
+            "'if(gte(iw/ih\\,%0.4f)\\,ih\\,iw/%0.4f)':"
+            "(iw-ow)/2:(ih-oh)/2"
+            % (target_ratio, target_ratio, target_ratio, target_ratio)
         )
         command = [
             self.config.ffmpeg_bin,

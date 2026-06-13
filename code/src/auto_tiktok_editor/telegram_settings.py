@@ -40,6 +40,33 @@ class TelegramRuntimeSettings:
     delivery_chat_id: str = ""
     send_result_to_telegram: bool = False
     save_received_video_to_profile: bool = True
+    video_cut_mode: str = "fixed"
+    fixed_chunk_duration_seconds: float = 2.27
+    scene_threshold: float = 0.35
+    product_image_crop_ratio: str = "1:1"
+    product_image_motion: str = "still"
+
+
+def _float_setting(payload: dict[str, object], key: str, default: float) -> float:
+    try:
+        return float(payload.get(key, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def _video_cut_mode(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"fixed", "scene", "original"} else "fixed"
+
+
+def _product_image_crop_ratio(value: object) -> str:
+    normalized = str(value or "").strip().lower().replace("x", ":")
+    return normalized if normalized in {"1:1", "4:3"} else "1:1"
+
+
+def _product_image_motion(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"still", "zoom"} else "still"
 
 
 class _DataBlob(ctypes.Structure):
@@ -113,6 +140,11 @@ def _settings_from_payload(payload: dict[str, object]) -> TelegramRuntimeSetting
         delivery_chat_id=str(payload.get("delivery_chat_id") or "").strip(),
         send_result_to_telegram=bool(payload.get("send_result_to_telegram", False)),
         save_received_video_to_profile=bool(payload.get("save_received_video_to_profile", True)),
+        video_cut_mode=_video_cut_mode(payload.get("video_cut_mode", "fixed")),
+        fixed_chunk_duration_seconds=max(0.5, _float_setting(payload, "fixed_chunk_duration_seconds", 2.27)),
+        scene_threshold=max(0.01, min(0.95, _float_setting(payload, "scene_threshold", 0.35))),
+        product_image_crop_ratio=_product_image_crop_ratio(payload.get("product_image_crop_ratio", "1:1")),
+        product_image_motion=_product_image_motion(payload.get("product_image_motion", "still")),
     )
 
 
@@ -165,6 +197,11 @@ def save_telegram_runtime_settings(settings: TelegramRuntimeSettings) -> Path:
                     "delivery_chat_id": settings.delivery_chat_id,
                     "send_result_to_telegram": settings.send_result_to_telegram,
                     "save_received_video_to_profile": settings.save_received_video_to_profile,
+                    "video_cut_mode": settings.video_cut_mode,
+                    "fixed_chunk_duration_seconds": settings.fixed_chunk_duration_seconds,
+                    "scene_threshold": settings.scene_threshold,
+                    "product_image_crop_ratio": settings.product_image_crop_ratio,
+                    "product_image_motion": settings.product_image_motion,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -180,6 +217,11 @@ def save_telegram_runtime_settings(settings: TelegramRuntimeSettings) -> Path:
             "delivery_chat_id": settings.delivery_chat_id,
             "send_result_to_telegram": settings.send_result_to_telegram,
             "save_received_video_to_profile": settings.save_received_video_to_profile,
+            "video_cut_mode": settings.video_cut_mode,
+            "fixed_chunk_duration_seconds": settings.fixed_chunk_duration_seconds,
+            "scene_threshold": settings.scene_threshold,
+            "product_image_crop_ratio": settings.product_image_crop_ratio,
+            "product_image_motion": settings.product_image_motion,
         },
         ensure_ascii=False,
     ).encode("utf-8")

@@ -233,10 +233,11 @@ class FinalCompositor(object):
             self._even_int(target_width * image_zoom_peak_factor),
         )
         image_frame_height = overlay_height
-        # Anh san pham duoc crop 1:1 roi zoom ben trong khung co dinh
+        image_crop_aspect = self._image_crop_aspect(overlay_spec.image_crop_ratio)
+        # Anh san pham duoc crop theo ti le da chon roi zoom ben trong khung co dinh
         # canh day; fade bat dau tai mep tren khung anh.
         base_frame_width = min(target_width, scaled_image_width)
-        base_frame_height = min(image_frame_height, target_width)
+        base_frame_height = min(image_frame_height, self._even_int(target_width / image_crop_aspect))
         separator_alpha_ratio = overlay_spec.separator_max_alpha_ratio
         if separator_alpha_ratio is None:
             separator_alpha_ratio = self.config.split_separator_max_alpha_ratio
@@ -246,8 +247,7 @@ class FinalCompositor(object):
         separator_fade_ratio = max(0.05, min(0.95, float(separator_fade_ratio)))
         fade_gamma = max(0.35, min(2.5, 2.2 - (separator_alpha_ratio * 1.8)))
         image_bg = self._ffmpeg_color(overlay_spec.image_background_color or self.config.split_image_background_color)
-        crop_width_expr = "min(iw\\,ih)"
-        crop_height_expr = "min(iw\\,ih)"
+        crop_width_expr, crop_height_expr = self._source_crop_expressions(image_crop_aspect)
         fade_height_target = max(
             24,
             int(round(base_frame_height * separator_fade_ratio))
@@ -274,23 +274,28 @@ class FinalCompositor(object):
             0,
             int(round(getattr(self.config, "split_image_vertical_float_ratio", 0.014) * base_frame_height)),
         )
-        image_scale_expr = "%0.4f+%0.4f*(0.5-0.5*cos(2*PI*n/%0.4f))" % (
-            scaled_image_width,
-            image_scale_delta,
-            zoom_cycle_frames,
-        )
-        image_crop_x_expr = "min(max(0\\,(iw-%d)/2+%d*sin(2*PI*n/%0.4f))\\,iw-%d)" % (
-            base_frame_width,
-            horizontal_float_pixels,
-            motion_cycle_frames,
-            base_frame_width,
-        )
-        image_crop_y_expr = "min(max(0\\,ih-%d-%d*(0.5-0.5*cos(2*PI*n/%0.4f)))\\,ih-%d)" % (
-            base_frame_height,
-            vertical_float_pixels,
-            motion_cycle_frames,
-            base_frame_height,
-        )
+        if self._image_motion(overlay_spec.image_motion) == "zoom":
+            image_scale_expr = "%0.4f+%0.4f*(0.5-0.5*cos(2*PI*n/%0.4f))" % (
+                scaled_image_width,
+                image_scale_delta,
+                zoom_cycle_frames,
+            )
+            image_crop_x_expr = "min(max(0\\,(iw-%d)/2+%d*sin(2*PI*n/%0.4f))\\,iw-%d)" % (
+                base_frame_width,
+                horizontal_float_pixels,
+                motion_cycle_frames,
+                base_frame_width,
+            )
+            image_crop_y_expr = "min(max(0\\,ih-%d-%d*(0.5-0.5*cos(2*PI*n/%0.4f)))\\,ih-%d)" % (
+                base_frame_height,
+                vertical_float_pixels,
+                motion_cycle_frames,
+                base_frame_height,
+            )
+        else:
+            image_scale_expr = "%0.4f" % scaled_image_width
+            image_crop_x_expr = "(iw-%d)/2" % base_frame_width
+            image_crop_y_expr = "ih-%d" % base_frame_height
         mask_expr = (
             "if(lte(Y\\,%d)\\,0\\,"
             "if(lte(Y\\,%d)\\,255*pow((Y-%d)/%d\\,%0.4f)\\,255))"
@@ -346,6 +351,22 @@ class FinalCompositor(object):
         if rounded % 2 != 0:
             rounded += 1
         return rounded
+
+    def _image_crop_aspect(self, value: str) -> float:
+        normalized = str(value or "1:1").strip().lower().replace("x", ":")
+        if normalized == "4:3":
+            return 4.0 / 3.0
+        return 1.0
+
+    def _source_crop_expressions(self, aspect: float) -> tuple[str, str]:
+        return (
+            "if(gte(iw/ih\\,%0.4f)\\,ih*%0.4f\\,iw)" % (aspect, aspect),
+            "if(gte(iw/ih\\,%0.4f)\\,ih\\,iw/%0.4f)" % (aspect, aspect),
+        )
+
+    def _image_motion(self, value: str) -> str:
+        normalized = str(value or "").strip().lower()
+        return normalized if normalized in {"still", "zoom"} else "still"
 
     def _ffmpeg_color(self, value: str) -> str:
         return value.replace('#', '0x')

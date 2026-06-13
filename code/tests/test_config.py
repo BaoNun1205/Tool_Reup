@@ -59,6 +59,11 @@ class PipelineConfigTests(unittest.TestCase):
         old_auto_cleanup = os.environ.get("AUTO_EDITOR_TELEGRAM_AUTO_CLEANUP")
         old_cleanup_interval = os.environ.get("AUTO_EDITOR_TELEGRAM_CLEANUP_INTERVAL_SECONDS")
         old_cleanup_max_age = os.environ.get("AUTO_EDITOR_TELEGRAM_CLEANUP_MAX_AGE_SECONDS")
+        old_video_cut_mode = os.environ.get("AUTO_EDITOR_VIDEO_CUT_MODE")
+        old_fixed_chunk_duration = os.environ.get("AUTO_EDITOR_FIXED_CHUNK_DURATION_SECONDS")
+        old_scene_threshold = os.environ.get("AUTO_EDITOR_SCENE_THRESHOLD")
+        old_product_image_crop_ratio = os.environ.get("AUTO_EDITOR_PRODUCT_IMAGE_CROP_RATIO")
+        old_product_image_motion = os.environ.get("AUTO_EDITOR_PRODUCT_IMAGE_MOTION")
         try:
             os.environ["AUTO_EDITOR_FFMPEG_BIN"] = "custom-ffmpeg"
             os.environ["AUTO_EDITOR_FFPROBE_BIN"] = "custom-ffprobe"
@@ -73,11 +78,21 @@ class PipelineConfigTests(unittest.TestCase):
             os.environ["AUTO_EDITOR_TELEGRAM_AUTO_CLEANUP"] = "false"
             os.environ["AUTO_EDITOR_TELEGRAM_CLEANUP_INTERVAL_SECONDS"] = "120"
             os.environ["AUTO_EDITOR_TELEGRAM_CLEANUP_MAX_AGE_SECONDS"] = "7200"
+            os.environ["AUTO_EDITOR_VIDEO_CUT_MODE"] = "scene"
+            os.environ["AUTO_EDITOR_FIXED_CHUNK_DURATION_SECONDS"] = "2.5"
+            os.environ["AUTO_EDITOR_SCENE_THRESHOLD"] = "0.42"
+            os.environ["AUTO_EDITOR_PRODUCT_IMAGE_CROP_RATIO"] = "4:3"
+            os.environ["AUTO_EDITOR_PRODUCT_IMAGE_MOTION"] = "zoom"
             config = PipelineConfig.from_env()
             self.assertEqual(config.ffmpeg_bin, "custom-ffmpeg")
             self.assertEqual(config.ffprobe_bin, "custom-ffprobe")
             self.assertEqual(config.ytdlp_bin, "custom-ytdlp")
             self.assertFalse(config.download_via_lazy_down_only)
+            self.assertEqual(config.video_cut_mode, "scene")
+            self.assertAlmostEqual(config.fixed_chunk_duration_seconds, 2.5)
+            self.assertAlmostEqual(config.scene_threshold, 0.42)
+            self.assertEqual(config.product_image_crop_ratio, "4:3")
+            self.assertEqual(config.product_image_motion, "zoom")
             self.assertEqual(config.telegram_bot_token, "bot-token")
             self.assertEqual(config.telegram_poll_timeout_seconds, 55)
             self.assertEqual(config.telegram_poll_interval_seconds, 4)
@@ -86,6 +101,10 @@ class PipelineConfigTests(unittest.TestCase):
             self.assertFalse(config.telegram_auto_cleanup_enabled)
             self.assertEqual(config.telegram_cleanup_interval_seconds, 120)
             self.assertEqual(config.telegram_cleanup_max_age_seconds, 7200)
+
+            os.environ["AUTO_EDITOR_VIDEO_CUT_MODE"] = "original"
+            config = PipelineConfig.from_env()
+            self.assertEqual(config.video_cut_mode, "original")
         finally:
             self._restore("AUTO_EDITOR_FFMPEG_BIN", old_ffmpeg)
             self._restore("AUTO_EDITOR_FFPROBE_BIN", old_ffprobe)
@@ -100,6 +119,11 @@ class PipelineConfigTests(unittest.TestCase):
             self._restore("AUTO_EDITOR_TELEGRAM_AUTO_CLEANUP", old_auto_cleanup)
             self._restore("AUTO_EDITOR_TELEGRAM_CLEANUP_INTERVAL_SECONDS", old_cleanup_interval)
             self._restore("AUTO_EDITOR_TELEGRAM_CLEANUP_MAX_AGE_SECONDS", old_cleanup_max_age)
+            self._restore("AUTO_EDITOR_VIDEO_CUT_MODE", old_video_cut_mode)
+            self._restore("AUTO_EDITOR_FIXED_CHUNK_DURATION_SECONDS", old_fixed_chunk_duration)
+            self._restore("AUTO_EDITOR_SCENE_THRESHOLD", old_scene_threshold)
+            self._restore("AUTO_EDITOR_PRODUCT_IMAGE_CROP_RATIO", old_product_image_crop_ratio)
+            self._restore("AUTO_EDITOR_PRODUCT_IMAGE_MOTION", old_product_image_motion)
 
     def test_build_job_id_has_prefix_and_suffix(self):
         config = PipelineConfig()
