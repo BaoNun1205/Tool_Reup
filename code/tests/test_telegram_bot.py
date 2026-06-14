@@ -385,6 +385,7 @@ class TelegramBotServiceTests(unittest.TestCase):
                 telegram_bot_token="token",
                 telegram_input_root=base_dir / "telegram_inputs",
                 default_output_root=base_dir / "output",
+                telegram_send_result_to_telegram=True,
             )
             service = TelegramBotService(
                 config=config,
@@ -684,6 +685,7 @@ class TelegramBotServiceTests(unittest.TestCase):
                 telegram_bot_token="token",
                 telegram_input_root=base_dir / "telegram_inputs",
                 default_output_root=base_dir / "output",
+                telegram_send_result_to_telegram=True,
             )
             service = TelegramBotService(
                 config=config,
@@ -806,6 +808,7 @@ class TelegramBotServiceTests(unittest.TestCase):
                 telegram_bot_token="token",
                 telegram_input_root=base_dir / "telegram_inputs",
                 default_output_root=base_dir / "output",
+                telegram_send_result_to_telegram=True,
             )
             service = TelegramBotService(
                 config=config,

@@ -4,6 +4,8 @@
 venv/
 build/
 dist/
+!vendor/lazy-downloader/dist/
+!vendor/lazy-downloader/dist/**
 *.egg-info/
 *.pyc
 output/

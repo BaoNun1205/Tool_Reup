@@ -1,193 +1,22 @@
-# Auto TikTok Editor MVP
+# TikTok Profile Manager
 
-Project này triển khai bản MVP theo `plan/` mới: một tool render riêng có giao diện local chỉnh chu, cho phép nhập một danh sách nhiều cặp `link TikTok public + ảnh sản phẩm`, xử lý tuần tự từng item, rồi sinh artifact theo item cùng summary cho cả session.
+This project now keeps only the TikTok Profile Manager surface.
 
-## MVP hiện có
+Kept features:
 
-- UI local bằng Tkinter/ttk, mở bằng command `auto-tiktok-editor`.
-- Danh sách item trong UI với các thao tác:
-  - nhập `link TikTok public`
-  - chọn `ảnh sản phẩm` từ máy
-  - `+ Thêm dòng`
-  - `Xóa dòng`
-- Trường `cookies.txt` tùy chọn ở cấp session để hỗ trợ tải các link TikTok bị chặn video stream khi download trực tiếp.
-- Validation theo 2 lớp:
-  - validation cho từng dòng
-  - validation cho toàn session trước khi start
-- Session orchestrator xử lý tuần tự từng item, không dừng cả session khi một item runtime fail.
-- Trạng thái rõ cho session và cho từng item.
-- Media pipeline đầy đủ cho từng item:
-  - download source qua `yt-dlp`
-  - probe media qua `ffprobe`
-  - normalize về working media portrait `1080x1920`, `30 fps`, `48 kHz`
-  - speed-up audio/video `1.2x`
-  - scene detection bằng `ffmpeg`
-  - scene qualification + constrained shuffle bằng Python
-  - rough cut renderer theo clip A/V đã shuffle
-  - audio finishing bằng `loudnorm` + limiter an toàn
-  - product overlay cho PNG alpha và fallback panel cho JPG
-- Output theo item và theo session:
-  - `items/item_00x_*/final_video.mp4`
-  - `items/item_00x_*/final_audio.m4a`
-  - `items/item_00x_*/job_metadata.json`
-  - `items/item_00x_*/process_log.txt`
-  - `session_summary.json`
-  - `session_log.txt`
+- Manage TikTok accounts in SQLite.
+- Create and reuse separate persistent Chrome profile folders per account.
+- Open TikTok Studio with Playwright.
+- Track account status, queued videos, captions, hashtags, product IDs, publish mode, schedule time, and logs.
+- Auto post or prepare selected videos through the profile browser automation.
+- Map profile names to Telegram bot/chat configs in `telegram_bots.json`.
+- Send a selected profile video to the matching Telegram chat.
+- Start, pause, resume, and stop the Telegram bot from Profile Manager settings.
+- Process Telegram jobs through the retained editor pipeline and queue completed videos into the matching profile.
 
-## Cấu trúc project
+Run on Windows:
 
-- `src/auto_tiktok_editor/cli.py`: entry point. Mặc định mở UI, ngoài ra có `run-session` để chạy headless từ JSON manifest.
-- `src/auto_tiktok_editor/ui/`: UI local, list input, per-item status, session summary, session-level cookies file picker.
-- `src/auto_tiktok_editor/app/`: session orchestrator, item pipeline runner, workspace, artifact export, recorder.
-- `src/auto_tiktok_editor/domain/`: models, validation, scene planner.
-- `src/auto_tiktok_editor/media/`: download, probe, normalize, speed, scene detect, audio, render, overlay.
-- `src/auto_tiktok_editor/utils/`: subprocess runner, image probe, time helpers.
-- `tests/`: unit tests cho config, validation, planner và session orchestration smoke.
-
-## Yêu cầu môi trường
-
-Python:
-
-- Python 3.11+ được khuyến nghị
-
-Binary ngoài cần có trong `PATH` để chạy pipeline thật:
-
-- `yt-dlp`
-- `ffmpeg`
-- `ffprobe`
-- `realesrgan-ncnn-vulkan` optional, để crop 4:3 rồi làm nét ảnh sản phẩm trước khi overlay. Nếu thiếu binary này, app sẽ dùng ảnh đã crop 4:3 và ghi warning thay vì làm fail job.
-
-Real-ESRGAN có thể cấu hình bằng biến môi trường:
-
-- `AUTO_EDITOR_REALESRGAN_BIN`
-- `AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE`
-- `AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE_REQUIRED`
-- `AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE_SCALE`
-- `AUTO_EDITOR_PRODUCT_IMAGE_ENHANCE_MODEL`
-
-UI dùng `tkinter`, là thư viện chuẩn của Python trên Windows thông thường.
-
-## Cài đặt local
-
-```bash
-pip install -e .
-```
-
-## Chạy tool
-
-Mở UI local:
-
-```bash
-auto-tiktok-editor
-```
-
-Hoặc explicit subcommand:
-
-```bash
-auto-tiktok-editor ui
-```
-
-## Khi nào nên dùng cookies.txt
-
-Nếu app báo kiểu lỗi sau:
-
-- `non-video artifacts only`
-- `browser-cookie fallback failed`
-- `Failed to decrypt with DPAPI`
-
-thì nên export một file `cookies.txt` theo format Netscape và chọn file đó trong phần `Session Control` của UI.
-
-Thứ tự ưu tiên download hiện tại là:
-
-1. `cookies.txt` do người dùng chọn
-2. download trực tiếp không cookie
-3. fallback `--cookies-from-browser chrome`
-4. fallback `--cookies-from-browser edge`
-
-## Chạy headless từ JSON manifest
-
-Lệnh này chủ yếu hữu ích cho smoke test backend hoặc automation nội bộ nhỏ:
-
-```bash
-auto-tiktok-editor run-session --session-file session.json
-```
-
-Ví dụ `session.json`:
-
-```json
-{
-  "session_name": "demo-session",
-  "output_root_dir": "D:/renders",
-  "cookies_file": "D:/secrets/tiktok_cookies.txt",
-  "items": [
-    {
-      "source_video_url": "https://www.tiktok.com/@user/video/1234567890",
-      "product_image": "D:/assets/product_a.png"
-    },
-    {
-      "source_video_url": "https://www.tiktok.com/@user/video/1234567891",
-      "product_image": "D:/assets/product_b.jpg"
-    }
-  ]
-}
-```
-
-## Output của một session
-
-Thư mục output sẽ có dạng:
-
-```text
-output/
-└─ session_YYYYMMDD_HHMMSS_xxxxxx/
-   ├─ session_summary.json
-   ├─ session_log.txt
-   └─ items/
-      ├─ item_001_row_001/
-      │  ├─ final_video.mp4
-      │  ├─ final_audio.m4a
-      │  ├─ job_metadata.json
-      │  └─ process_log.txt
-      └─ item_002_row_002/
-         ├─ final_video.mp4
-         ├─ final_audio.m4a
-         ├─ job_metadata.json
-         └─ process_log.txt
-```
-
-## Chạy test
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-## TikTok Profile Manager MVP
-
-Phan nay la lop dau tien cho flow tu dong dang TikTok Shop: quan ly account va Chrome persistent profile rieng cho tung nick. Tool khong doc cookie, khong export session, khong luu mat khau.
-
-Chuc nang hien co:
-
-- SQLite database tai `tiktok_profile_manager.sqlite3`.
-- Profile folder tu dong tao trong `profiles/<slug>`.
-- Tkinter UI co cac tab `Accounts`, `Videos`, `Products`, `Logs`.
-- Bang account co cac nut: `Add account`, `Open profile`, `Open TikTok Studio`, `Check All Live`, `Run Queue`, `Mark Live`, `Mark Need Login`, `Mark Error`.
-- Bang videos luu `file_path`, `caption`, `hashtags`, `status`, `note`.
-- Video render xong qua Telegram multi-bot se duoc copy vao `profile_video_queue/<bot_name>/` va tu dong them vao tab `Videos` neu `name` trong `telegram_bots.json` trung voi profile slug trong `profiles/<name>`.
-- Moi job Telegram can 3 mon: link video TikTok, link san pham TikTok Shop, va anh san pham. Link san pham rut gon `vt.tiktok.com` se duoc resolve de lay Product ID tu URL dang `/view/product/<id>`.
-- Video queue co profile tuong ung, description lay tu mo ta/title cua link TikTok, Product ID lay tu link san pham, va mac dinh `Publish now`.
-- `Set Schedule` cho video yeu cau thoi gian cach hien tai it nhat 30 phut de tru hao gioi han TikTok Studio toi thieu 15 phut.
-- Bang products luu `product_id`, `account_id`, `status`, `note`.
-- Bang logs ghi lai check login va queue result.
-- `Open TikTok Studio` mo `https://www.tiktok.com/tiktokstudio/upload` bang Playwright persistent context va cap nhat status theo heuristic MVP:
-  - upload page: `live`
-  - login page: `need_login`
-  - verification/checkpoint/captcha: `checkpoint`
-  - loi khong nhan dien duoc: `error`
-- `Check All Live` kiem tra tuan tu tat ca account.
-- `Run Queue` ban dau chi lay video dang chon, mo cac account dang `live`, vao upload page va chon file video. Chua dien caption, chua gan product, chua bam Post.
-
-Cai dat tren Windows:
-
-```bash
+```powershell
 cd code
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
@@ -195,39 +24,26 @@ pip install -e .
 python -m playwright install chromium
 ```
 
-Neu may da co Google Chrome, Playwright se uu tien mo bang channel `chrome`. Chromium cai bang lenh tren la fallback khi can.
+Start the app:
 
-Chay UI:
-
-```bash
-auto-tiktok-editor profile-manager
+```powershell
+.\start_tiktok_profile_manager.bat
 ```
 
-Hoac double-click:
+The Telegram worker is normally controlled from the Profile Manager. Its launcher remains available at:
 
-```text
-code/start_tiktok_profile_manager.bat
+```powershell
+.\start_telegram_bot.bat
 ```
 
-Luon dang nhap truc tiep trong cua so Chrome profile ma tool mo ra. Khong nhap mat khau vao database va khong copy cookie/session ra ngoai. Sau khi login xong, bam lai `Open TikTok Studio` de tool kiem tra va cap nhat status.
+Or:
 
-## Deploy Telegram bot trên Render Free
-
-Nếu chỉ dùng cá nhân qua Telegram, deploy Web Service free trên Render bằng `render.yaml` ở root repo. Service có endpoint `/health` cho UptimeRobot ping, còn bot Telegram chạy nền trong cùng process:
-
-```bash
-auto-tiktok-telegram-web
+```powershell
+python -m auto_tiktok_editor.cli profile-manager
 ```
 
-Video và ảnh tạm nằm trong `/tmp`; gửi xong qua Telegram thì job được xóa. Cấu hình token, allowlist chat ID và cleanup bằng biến môi trường. Xem chi tiết trong `DEPLOY_TELEGRAM_BOT.md`.
+Tests:
 
-## Giới hạn hiện tại của MVP
-
-- Session chạy tuần tự, chưa có xử lý song song.
-- Chưa có pause/resume queue.
-- Chưa có retry failed item trực tiếp từ UI.
-- Chưa có timeline preview hoặc live preview video.
-- Chưa có semantic scene ranking.
-- Chưa có auto background removal cho JPG.
-- Overlay placement vẫn là safe-zone cố định, chưa subject-aware.
-- Một số link TikTok public vẫn cần `cookies.txt` để lộ video stream cho downloader.
+```powershell
+python -m unittest discover -s tests -v
+```

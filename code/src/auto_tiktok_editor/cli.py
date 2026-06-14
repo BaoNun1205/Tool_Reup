@@ -1,25 +1,21 @@
-"""CLI entry point for the session-based Auto TikTok Editor MVP."""
+"""CLI entry points required by the TikTok Profile Manager."""
 
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 from pathlib import Path
 
-from auto_tiktok_editor.app.orchestrator import SessionOrchestrator
-from auto_tiktok_editor.runtime import ensure_local_telegram_allowed
 from auto_tiktok_editor.config import PipelineConfig
-from auto_tiktok_editor.domain.models import SessionItemSpec, SessionSpec
+from auto_tiktok_editor.runtime import ensure_local_telegram_allowed
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Auto TikTok Editor MVP")
+    parser = argparse.ArgumentParser(description="TikTok Profile Manager")
     parser.add_argument("--log-level", default="INFO", help="Python log level")
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("ui", help="Launch the local desktop UI")
     subparsers.add_parser("profile-manager", help="Launch the TikTok Profile Manager UI")
     subparsers.add_parser("telegram-bot", help="Run the Telegram bot worker")
     multi_bot_parser = subparsers.add_parser("telegram-bots", help="Run multiple Telegram bot workers")
@@ -28,9 +24,6 @@ def build_parser() -> argparse.ArgumentParser:
         default="telegram_bots.json",
         help="Path to JSON file containing Telegram bot token/chat mappings",
     )
-
-    run_parser = subparsers.add_parser("run-session", help="Run a session from a JSON manifest")
-    run_parser.add_argument("--session-file", required=True, help="Path to a JSON session manifest")
     return parser
 
 
@@ -42,53 +35,16 @@ def configure_logging(level_name: str) -> None:
     )
 
 
-def load_session_spec(manifest_path: Path, config: PipelineConfig) -> SessionSpec:
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    output_root = payload.get("output_root_dir") or str(config.default_output_root)
-    cookies_file = payload.get("cookies_file")
-    items = []
-    for index, item in enumerate(payload.get("items") or []):
-        product_image = item.get("product_image")
-        items.append(
-            SessionItemSpec(
-                row_id=item.get("row_id") or "row_%03d" % (index + 1),
-                source_video_url=item.get("source_video_url", ""),
-                product_image=Path(product_image) if product_image else None,
-                output_basename=item.get("output_basename"),
-                shuffle_seed=item.get("shuffle_seed"),
-            )
-        )
-    return SessionSpec(
-        items=items,
-        output_root_dir=Path(output_root),
-        session_name=payload.get("session_name"),
-        cookies_file=Path(cookies_file) if cookies_file else None,
-    )
-
-
-def run_headless_session(manifest_path: Path) -> int:
-    config = PipelineConfig.from_env()
-    orchestrator = SessionOrchestrator(config=config)
-    result = orchestrator.run(load_session_spec(manifest_path, config))
-    print(json.dumps(result.summary, indent=2, ensure_ascii=False))
-    return 0 if result.status in ("completed_with_success", "completed_with_partial_failure") else 1
-
-
 def main(argv=None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     configure_logging(args.log_level)
     config = PipelineConfig.from_env()
-    if args.command in (None, "ui"):
-        from auto_tiktok_editor.ui.app import launch_ui
 
-        return launch_ui(config=config)
-    if args.command == "profile-manager":
+    if args.command in (None, "profile-manager"):
         from auto_tiktok_editor.tiktok_profiles.ui import launch_profile_manager
 
         return launch_profile_manager(config=config)
-    if args.command == "run-session":
-        return run_headless_session(Path(args.session_file))
     if args.command == "telegram-bot":
         from auto_tiktok_editor.app.telegram_bot import TelegramBotService
 

@@ -1072,14 +1072,64 @@ class App(ctk.CTk):
         )
         self.video_filter_account_menu.configure(width=210)
         self.video_filter_account_menu.pack(side="left")
-        self._add_action_button(table_actions, "Auto Post", self._auto_post_selected_video, "primary")
-        self._add_action_button(table_actions, "Gửi", self._send_selected_video_to_telegram, "secondary")
-        self.video_delete_button = self._add_action_button(table_actions, "Delete video", self._start_video_delete_mode, "danger")
-        self.video_select_all_button = self._add_action_button(table_actions, "Select all", self._select_all_videos_for_delete, "secondary")
-        self.video_delete_selected_button = self._add_action_button(table_actions, "Delete selected", self._delete_selected_videos, "danger")
-        self.video_cancel_delete_button = self._add_action_button(table_actions, "Cancel", lambda: self._set_video_delete_mode(False), "secondary")
-        for button in (self.video_select_all_button, self.video_delete_selected_button, self.video_cancel_delete_button):
-            button.grid_remove()
+
+        self.video_normal_actions = ctk.CTkFrame(table_actions, fg_color="transparent")
+        self.video_normal_actions.grid(row=0, column=1, sticky="e")
+        self.video_auto_post_button = self._add_action_button(
+            self.video_normal_actions,
+            "Auto Post",
+            self._auto_post_selected_video,
+            "primary",
+        )
+        self.video_auto_post_button.configure(width=112)
+        self.video_send_button = self._add_action_button(
+            self.video_normal_actions,
+            "Gửi",
+            self._send_selected_video_to_telegram,
+            "secondary",
+        )
+        self.video_send_button.configure(width=88)
+        self.video_delete_button = self._add_action_button(
+            self.video_normal_actions,
+            "Delete video",
+            self._start_video_delete_mode,
+            "danger",
+        )
+        self.video_delete_button.configure(width=116)
+
+        self.video_delete_actions = ctk.CTkFrame(table_actions, fg_color="transparent")
+        self.video_delete_actions.grid(row=0, column=1, sticky="e")
+        self.video_select_all_button = self._add_action_button(
+            self.video_delete_actions,
+            "Select all",
+            self._select_all_videos_for_delete,
+            "secondary",
+        )
+        self.video_select_all_button.configure(width=104)
+        self.video_delete_selection_var = tk.StringVar(value="Selected: 0")
+        self.video_delete_selection_label = ctk.CTkLabel(
+            self.video_delete_actions,
+            textvariable=self.video_delete_selection_var,
+            width=88,
+            text_color=COLORS["muted"],
+            font=(FONT, 11, "bold"),
+        )
+        self.video_delete_selection_label.grid(row=0, column=1, padx=(12, 4))
+        self.video_delete_selected_button = self._add_action_button(
+            self.video_delete_actions,
+            "Delete",
+            self._delete_selected_videos,
+            "danger",
+        )
+        self.video_delete_selected_button.configure(width=100)
+        self.video_cancel_delete_button = self._add_action_button(
+            self.video_delete_actions,
+            "Cancel",
+            lambda: self._set_video_delete_mode(False),
+            "secondary",
+        )
+        self.video_cancel_delete_button.configure(width=80)
+        self.video_delete_actions.grid_remove()
 
         columns = (
             "selected",
@@ -1724,15 +1774,13 @@ class App(ctk.CTk):
         self.video_delete_mode = bool(enabled)
         if self.video_delete_mode:
             self.video_table.configure(displaycolumns=self.video_delete_columns)
-            self.video_delete_button.grid_remove()
-            for button in (self.video_select_all_button, self.video_delete_selected_button, self.video_cancel_delete_button):
-                button.grid()
+            self.video_normal_actions.grid_remove()
+            self.video_delete_actions.grid()
         else:
             self.video_delete_selection.clear()
             self.video_table.configure(displaycolumns=self.video_normal_columns)
-            for button in (self.video_select_all_button, self.video_delete_selected_button, self.video_cancel_delete_button):
-                button.grid_remove()
-            self.video_delete_button.grid()
+            self.video_delete_actions.grid_remove()
+            self.video_normal_actions.grid()
         self._refresh_video_delete_marks()
         self._update_video_delete_buttons()
 
@@ -1766,7 +1814,11 @@ class App(ctk.CTk):
     def _update_video_delete_buttons(self) -> None:
         if not hasattr(self, "video_delete_selected_button"):
             return
-        self.video_delete_selected_button.configure(state="normal" if self.video_delete_selection else "disabled")
+        selected_count = len(self.video_delete_selection)
+        self.video_delete_selection_var.set("Selected: %s" % selected_count)
+        self.video_delete_selected_button.configure(
+            state="normal" if selected_count else "disabled",
+        )
 
     def _delete_selected_videos(self) -> None:
         video_ids = sorted(self.video_delete_selection)
