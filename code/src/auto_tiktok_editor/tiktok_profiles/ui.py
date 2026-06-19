@@ -1406,6 +1406,12 @@ class App(ctk.CTk):
             self._start_phone_control,
             "primary",
         )
+        self.phone_upload_test_button = self._add_action_button(
+            actions,
+            "Upload Test",
+            self._open_tiktok_upload_test,
+            "secondary",
+        )
         self.phone_close_button = self._add_action_button(
             actions,
             "Close",
@@ -1414,6 +1420,7 @@ class App(ctk.CTk):
         )
         self.phone_connect_button.configure(width=82)
         self.phone_control_button.configure(width=82)
+        self.phone_upload_test_button.configure(width=98)
         self.phone_close_button.configure(width=58)
 
         body.grid_columnconfigure(0, weight=1)
@@ -3591,6 +3598,27 @@ class App(ctk.CTk):
             error_title="Phone control",
         )
 
+    def _open_tiktok_upload_test(self) -> None:
+        if not self.phone_controller.is_connected():
+            self.phone_control_status_var.set("Connect the phone before testing upload.")
+            self.phone_metric_var.set("Stopped")
+            messagebox.showinfo("Phone not connected", "Connect the phone first, then test Upload.")
+            return
+        address = self.phone_address_var.get().strip()
+        self.phone_control_status_var.set("Opening TikTok upload deeplink...")
+
+        def on_success(result: dict) -> None:
+            message = str(result.get("message") or "Opened TikTok upload deeplink.")
+            self.phone_control_status_var.set(message)
+            self.status_var.set(message)
+
+        self._run_worker(
+            "Opening TikTok upload deeplink...",
+            lambda: self.phone_controller.open_tiktok_upload(address),
+            on_success=on_success,
+            error_title="TikTok upload test",
+        )
+
     def _phone_control_settings(self, address: str | None = None) -> PhoneControlSettings:
         return PhoneControlSettings(
             address=self.phone_address_var.get().strip() if address is None else address.strip(),
@@ -3688,6 +3716,8 @@ class App(ctk.CTk):
             self.phone_connect_button.configure(state="disabled" if running else "normal")
         if hasattr(self, "phone_control_button"):
             self.phone_control_button.configure(state="normal" if connected and not running else "disabled")
+        if hasattr(self, "phone_upload_test_button"):
+            self.phone_upload_test_button.configure(state="normal" if connected else "disabled")
         if hasattr(self, "phone_close_button"):
             self.phone_close_button.configure(state="normal" if running else "disabled")
         if running:

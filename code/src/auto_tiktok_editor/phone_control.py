@@ -53,6 +53,16 @@ GALLERY_MEDIA_EXTENSIONS = {
     ".webp",
 }
 GALLERY_IMAGE_EXTENSIONS = {".gif", ".jpeg", ".jpg", ".png", ".webp"}
+TIKTOK_ANDROID_PACKAGES = (
+    "com.ss.android.ugc.trill",
+    "com.ss.android.ugc.aweme",
+    "com.zhiliaoapp.musically",
+    "com.zhiliaoapp.musically.go",
+)
+TIKTOK_UPLOAD_DEEPLINKS = (
+    "snssdk1233://aweme/publish",
+    "tiktok://upload",
+)
 
 
 class _AppBarData(ctypes.Structure):
@@ -706,6 +716,75 @@ class PhoneController:
     def is_connected(self) -> bool:
         return bool(self.connected_serial) or self.is_running()
 
+    def open_tiktok_upload(self, address: str = "") -> dict[str, str]:
+        target = normalize_phone_address(address or self.connected_serial)
+        self.runner.ensure_tool(self.config.adb_bin)
+        package_name = self._installed_tiktok_package(target)
+        attempted: list[object] = []
+        opened_deeplink = ""
+        for deeplink in TIKTOK_UPLOAD_DEEPLINKS:
+            if package_name:
+                completed = self.runner.run(
+                    [
+                        self.config.adb_bin,
+                        "-s",
+                        target,
+                        "shell",
+                        "am",
+                        "start",
+                        "-a",
+                        "android.intent.action.VIEW",
+                        "-d",
+                        deeplink,
+                        "-p",
+                        package_name,
+                    ],
+                    check=False,
+                )
+                attempted.append(completed)
+                if completed.returncode == 0:
+                    opened_deeplink = deeplink
+                    break
+            completed = self.runner.run(
+                [
+                    self.config.adb_bin,
+                    "-s",
+                    target,
+                    "shell",
+                    "am",
+                    "start",
+                    "-a",
+                    "android.intent.action.VIEW",
+                    "-d",
+                    deeplink,
+                ],
+                check=False,
+            )
+            attempted.append(completed)
+            if completed.returncode == 0:
+                opened_deeplink = deeplink
+                break
+        if not opened_deeplink:
+            detail = ""
+            for completed in reversed(attempted):
+                detail = str(getattr(completed, "stderr", "") or getattr(completed, "stdout", "") or "").strip()
+                if detail:
+                    break
+            raise RuntimeError(detail or "Could not open TikTok on the phone.")
+        time.sleep(1.2)
+        create_x, create_y = self._tap_tiktok_create_button(target)
+        time.sleep(1.0)
+        library_x, library_y = self._tap_tiktok_library_button(target)
+        return self._tiktok_upload_opened(
+            target,
+            opened_deeplink,
+            package_name,
+            create_x,
+            create_y,
+            library_x,
+            library_y,
+        )
+
     def send_file_to_gallery(self, address: str, local_path: Path) -> dict[str, object]:
         target = normalize_phone_address(address)
         source_path = Path(local_path).expanduser().resolve()
@@ -803,6 +882,106 @@ class PhoneController:
                 [self.config.adb_bin, "-s", target, "shell", "mkdir", "-p", DEFAULT_PUSH_TARGET],
                 check=False,
             )
+
+    def _installed_tiktok_package(self, target: str) -> str:
+        for package_name in TIKTOK_ANDROID_PACKAGES:
+            completed = self.runner.run(
+                [
+                    self.config.adb_bin,
+                    "-s",
+                    target,
+                    "shell",
+                    "pm",
+                    "path",
+                    package_name,
+                ],
+                check=False,
+            )
+            if completed.returncode == 0 and completed.stdout.strip():
+                return package_name
+        return ""
+
+    def _tap_tiktok_create_button(self, target: str) -> tuple[int, int]:
+        width, height = self._phone_screen_size(target)
+        tap_x = max(1, width // 2)
+        tap_y = max(1, int(height * 0.935))
+        self.runner.run(
+            [
+                self.config.adb_bin,
+                "-s",
+                target,
+                "shell",
+                "input",
+                "tap",
+                str(tap_x),
+                str(tap_y),
+            ],
+            check=False,
+        )
+        return tap_x, tap_y
+
+    def _tap_tiktok_library_button(self, target: str) -> tuple[int, int]:
+        width, height = self._phone_screen_size(target)
+        tap_x = max(1, int(width * 0.085))
+        tap_y = max(1, int(height * 0.913))
+        self.runner.run(
+            [
+                self.config.adb_bin,
+                "-s",
+                target,
+                "shell",
+                "input",
+                "tap",
+                str(tap_x),
+                str(tap_y),
+            ],
+            check=False,
+        )
+        return tap_x, tap_y
+
+    def _phone_screen_size(self, target: str) -> tuple[int, int]:
+        completed = self.runner.run(
+            [self.config.adb_bin, "-s", target, "shell", "wm", "size"],
+            check=False,
+        )
+        match = re.search(r"(\d+)x(\d+)", completed.stdout or "")
+        if not match:
+            return 1080, 2400
+        return int(match.group(1)), int(match.group(2))
+
+    def _tiktok_upload_opened(
+        self,
+        target: str,
+        deeplink: str,
+        package_name: str,
+        create_x: int,
+        create_y: int,
+        library_x: int,
+        library_y: int,
+    ) -> dict[str, str]:
+        message = "Opened TikTok and tapped Library at %s,%s." % (library_x, library_y)
+        self._emit_event(
+            "info",
+            "phone_tiktok_upload_opened",
+            message,
+            device_serial=target,
+            deeplink=deeplink,
+            package_name=package_name,
+            create_x=create_x,
+            create_y=create_y,
+            library_x=library_x,
+            library_y=library_y,
+        )
+        return {
+            "address": target,
+            "deeplink": deeplink,
+            "package_name": package_name,
+            "create_x": str(create_x),
+            "create_y": str(create_y),
+            "library_x": str(library_x),
+            "library_y": str(library_y),
+            "message": message,
+        }
 
     def _mark_manual_transfer_path(self, path: str) -> None:
         with self._manual_transfer_lock:

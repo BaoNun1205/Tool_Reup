@@ -16,6 +16,7 @@ from auto_tiktok_editor.phone_control import (
     DEFAULT_PUSH_TARGET,
     PhoneController,
     PhoneControlSettings,
+    TIKTOK_UPLOAD_DEEPLINKS,
     load_phone_control_settings,
     normalize_phone_address,
     normalize_monitor_target,
@@ -43,9 +44,9 @@ class RunnerStub:
 
 
 class CompletedProcessStub:
-    def __init__(self, stdout="", returncode=0):
+    def __init__(self, stdout="", returncode=0, stderr=""):
         self.stdout = stdout
-        self.stderr = ""
+        self.stderr = stderr
         self.returncode = returncode
 
 
@@ -233,6 +234,78 @@ class PhoneControlTests(unittest.TestCase):
         self.assertFalse(controller.is_running())
         popen.assert_not_called()
         self.assertEqual([event["action"] for event in events], ["phone_connected"])
+
+    def test_open_tiktok_upload_uses_installed_package_deeplink(self):
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="package:/data/app/com.ss.android.ugc.trill/base.apk\n"),
+                CompletedProcessStub(),
+                CompletedProcessStub(stdout="Physical size: 1080x2400\n"),
+                CompletedProcessStub(),
+                CompletedProcessStub(stdout="Physical size: 1080x2400\n"),
+                CompletedProcessStub(),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+        controller.connected_serial = "192.168.1.20:5555"
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep") as sleep:
+            result = controller.open_tiktok_upload()
+
+        self.assertEqual(runner.tools, ["adb"])
+        sleep.assert_has_calls([mock.call(1.2), mock.call(1.0)])
+        self.assertEqual(result["deeplink"], TIKTOK_UPLOAD_DEEPLINKS[0])
+        self.assertEqual(result["package_name"], "com.ss.android.ugc.trill")
+        self.assertEqual(
+            runner.commands[1],
+            [
+                "adb",
+                "-s",
+                "192.168.1.20:5555",
+                "shell",
+                "am",
+                "start",
+                "-a",
+                "android.intent.action.VIEW",
+                "-d",
+                TIKTOK_UPLOAD_DEEPLINKS[0],
+                "-p",
+                "com.ss.android.ugc.trill",
+            ],
+        )
+        self.assertEqual(
+            runner.commands[3],
+            [
+                "adb",
+                "-s",
+                "192.168.1.20:5555",
+                "shell",
+                "input",
+                "tap",
+                "540",
+                "2244",
+            ],
+        )
+        self.assertEqual(
+            runner.commands[-1],
+            [
+                "adb",
+                "-s",
+                "192.168.1.20:5555",
+                "shell",
+                "input",
+                "tap",
+                "91",
+                "2191",
+            ],
+        )
+        self.assertEqual(events[-1]["action"], "phone_tiktok_upload_opened")
 
     def test_capture_screenshot_saves_png_and_emits_event(self):
         temp_dir = tempfile.TemporaryDirectory()

@@ -12,6 +12,9 @@ output/
 assets/
 work/
 tmp/
+logs/
+phone_screenshots/
+_tmp_tests/
 telegram_bot_token.txt
 profiles/
 profile_video_queue/
