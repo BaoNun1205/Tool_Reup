@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import math
 import random
+import time
 from typing import List, Optional, Sequence, Tuple
 
 from auto_tiktok_editor.config import PipelineConfig
@@ -87,7 +88,9 @@ class EditPlanner(object):
         if not scenes:
             raise PipelineStageError("Edit planner received no scenes.")
         chosen_seed = seed if seed is not None else random.SystemRandom().randint(1, 10 ** 9)
-        ordered = self._build_strict_shuffle(list(scenes), random.Random(chosen_seed))
+        timeout_seconds = self._timeout_seconds()
+        deadline = time.monotonic() + timeout_seconds
+        ordered = self._build_strict_shuffle(list(scenes), random.Random(chosen_seed), deadline, timeout_seconds)
         warnings = []
         if self._violates_shuffle_constraints(ordered):
             warnings.append(
@@ -102,7 +105,13 @@ class EditPlanner(object):
             warnings=warnings,
         )
 
-    def _build_strict_shuffle(self, scenes: List[SceneRange], rng: random.Random) -> List[SceneRange]:
+    def _build_strict_shuffle(
+        self,
+        scenes: List[SceneRange],
+        rng: random.Random,
+        deadline: float,
+        timeout_seconds: float,
+    ) -> List[SceneRange]:
         if len(scenes) <= 1:
             return list(scenes)
         if len(scenes) == 2:
@@ -112,7 +121,8 @@ class EditPlanner(object):
         best_score = self._score_order(best_order)
         max_attempts = max(64, min(1024, len(scenes) * 32))
         for _attempt in range(max_attempts):
-            candidate = self._build_backtracking_order(list(scenes), rng)
+            self._raise_if_timed_out(deadline, timeout_seconds)
+            candidate = self._build_backtracking_order(list(scenes), rng, deadline, timeout_seconds)
             if candidate is None:
                 shuffled = list(scenes)
                 rng.shuffle(shuffled)
@@ -129,17 +139,21 @@ class EditPlanner(object):
         self,
         scenes: List[SceneRange],
         rng: random.Random,
+        deadline: float,
+        timeout_seconds: float,
     ) -> Optional[List[SceneRange]]:
         ordered = []  # type: List[SceneRange]
         remaining = list(scenes)
 
         def backtrack(position: int) -> bool:
+            self._raise_if_timed_out(deadline, timeout_seconds)
             if not remaining:
                 return True
             candidate_indexes = list(range(len(remaining)))
             rng.shuffle(candidate_indexes)
             candidate_indexes.sort(key=lambda idx: self._candidate_rank(remaining[idx], position, ordered[-1] if ordered else None))
             for candidate_index in candidate_indexes:
+                self._raise_if_timed_out(deadline, timeout_seconds)
                 candidate = remaining[candidate_index]
                 if candidate.source_index == position:
                     continue
@@ -156,6 +170,21 @@ class EditPlanner(object):
         if backtrack(0):
             return ordered
         return None
+
+    def _timeout_seconds(self) -> float:
+        try:
+            configured = float(getattr(self.config, "edit_planner_timeout_seconds", 300.0))
+        except (TypeError, ValueError):
+            configured = 300.0
+        return max(1.0, configured)
+
+    def _raise_if_timed_out(self, deadline: float, timeout_seconds: float) -> None:
+        if time.monotonic() <= deadline:
+            return
+        raise PipelineStageError(
+            "Edit planner timed out after %.0f seconds while building the shuffle plan. "
+            "Skipping this video so the queue can continue." % timeout_seconds
+        )
 
     def _candidate_rank(
         self,

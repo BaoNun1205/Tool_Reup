@@ -26,6 +26,8 @@ class PipelineConfigTests(unittest.TestCase):
             "AUTO_EDITOR_SCENE_THRESHOLD",
             "AUTO_EDITOR_PRODUCT_IMAGE_CROP_RATIO",
             "AUTO_EDITOR_PRODUCT_IMAGE_MOTION",
+            "AUTO_EDITOR_ADB_BIN",
+            "AUTO_EDITOR_SCRCPY_BIN",
         )}
         try:
             os.environ["AUTO_EDITOR_ALLOW_LOCAL_TELEGRAM"] = "true"
@@ -37,6 +39,8 @@ class PipelineConfigTests(unittest.TestCase):
             os.environ["AUTO_EDITOR_SCENE_THRESHOLD"] = "0.42"
             os.environ["AUTO_EDITOR_PRODUCT_IMAGE_CROP_RATIO"] = "4:3"
             os.environ["AUTO_EDITOR_PRODUCT_IMAGE_MOTION"] = "zoom"
+            os.environ["AUTO_EDITOR_ADB_BIN"] = "C:/custom/adb.exe"
+            os.environ["AUTO_EDITOR_SCRCPY_BIN"] = "D:/custom/scrcpy.exe"
 
             config = PipelineConfig.from_env()
 
@@ -48,6 +52,8 @@ class PipelineConfigTests(unittest.TestCase):
             self.assertEqual(config.telegram_bot_token, "bot-token")
             self.assertEqual(config.telegram_allowed_chat_ids, (123, 456))
             self.assertEqual(config.telegram_delivery_chat_id, "987654321")
+            self.assertEqual(config.adb_bin, "C:/custom/adb.exe")
+            self.assertEqual(config.scrcpy_bin, "D:/custom/scrcpy.exe")
         finally:
             for name, value in old_values.items():
                 if value is None:
@@ -82,6 +88,30 @@ class PipelineConfigTests(unittest.TestCase):
 
         self.assertIn("_", config.build_job_id())
         self.assertTrue(config.build_session_id().startswith("session_"))
+
+    def test_resolve_project_root_finds_existing_data_above_runtime_dist(self):
+        import auto_tiktok_editor.config as config_module
+
+        project_root = Path("D:/Tool_Reup/code")
+        runtime_root = project_root / "build" / "profile-manager" / "cli.dist"
+
+        def fake_exists(path):
+            normalized = Path(path).as_posix()
+            return normalized == "D:/Tool_Reup/code/tiktok_profile_manager.sqlite3"
+
+        with mock.patch.dict(os.environ, {"AUTO_EDITOR_PROJECT_ROOT": ""}, clear=False), mock.patch.object(
+            config_module,
+            "_runtime_root",
+            return_value=runtime_root,
+        ), mock.patch.object(Path, "exists", fake_exists):
+            self.assertEqual(config_module._resolve_project_root(), project_root)
+
+    def test_resolve_project_root_env_override_wins(self):
+        import auto_tiktok_editor.config as config_module
+
+        configured_root = Path("D:/Tool_Reup/code")
+        with mock.patch.dict(os.environ, {"AUTO_EDITOR_PROJECT_ROOT": str(configured_root)}, clear=False):
+            self.assertEqual(config_module._resolve_project_root(), configured_root.resolve())
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 import sqlite3
 import unicodedata
+from urllib.parse import urlparse
 
 from auto_tiktok_editor.config import PROJECT_ROOT
 from auto_tiktok_editor.tiktok_profiles.models import (
@@ -17,6 +18,7 @@ from auto_tiktok_editor.tiktok_profiles.models import (
     VIDEO_STATUSES,
     TikTokAccount,
     TikTokLog,
+    TikTokSourceChannel,
     TikTokVideo,
 )
 
@@ -101,6 +103,24 @@ class TikTokProfileManager:
             conn.execute("DROP TABLE IF EXISTS products")
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS source_channels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    featured INTEGER NOT NULL DEFAULT 0,
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(account_id) REFERENCES accounts(id)
+                )
+                """
+            )
+            self._ensure_column(conn, "source_channels", "featured", "INTEGER NOT NULL DEFAULT 0")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_source_channels_account_id ON source_channels(account_id)")
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS logs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     account_id INTEGER,
@@ -179,6 +199,122 @@ class TikTokProfileManager:
         if account is None:
             raise RuntimeError("Created account could not be loaded.")
         return account
+
+    def list_source_channels(self, account_id: int | None = None) -> list[TikTokSourceChannel]:
+        with self._connect() as conn:
+            if account_id is None:
+                rows = conn.execute(
+                    """
+                    SELECT id, account_id, name, url, note, featured, enabled, created_at, updated_at
+                    FROM source_channels
+                    ORDER BY account_id ASC, featured DESC, id ASC
+                    """
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT id, account_id, name, url, note, featured, enabled, created_at, updated_at
+                    FROM source_channels
+                    WHERE account_id = ?
+                    ORDER BY featured DESC, id ASC
+                    """,
+                    (int(account_id),),
+                ).fetchall()
+        return [self._row_to_source_channel(row) for row in rows]
+
+    def get_source_channel(self, channel_id: int) -> TikTokSourceChannel | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, account_id, name, url, note, featured, enabled, created_at, updated_at
+                FROM source_channels
+                WHERE id = ?
+                """,
+                (int(channel_id),),
+            ).fetchone()
+        return self._row_to_source_channel(row) if row else None
+
+    def add_source_channel(
+        self,
+        account_id: int,
+        name: str,
+        url: str,
+        note: str = "",
+        featured: bool = False,
+        enabled: bool = True,
+    ) -> TikTokSourceChannel:
+        if self.get_account(int(account_id)) is None:
+            raise ValueError("Account not found: %s" % account_id)
+        clean_name = (name or "").strip()
+        clean_url = _normalize_source_channel_url(url)
+        if not clean_name:
+            clean_name = _source_channel_name_from_url(clean_url)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO source_channels (account_id, name, url, note, featured, enabled, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (int(account_id), clean_name, clean_url, note.strip(), 1 if featured else 0, 1 if enabled else 0, now, now),
+            )
+            channel_id = int(cursor.lastrowid)
+        channel = self.get_source_channel(channel_id)
+        if channel is None:
+            raise RuntimeError("Created source channel could not be loaded.")
+        return channel
+
+    def update_source_channel(
+        self,
+        channel_id: int,
+        account_id: int,
+        name: str,
+        url: str,
+        note: str = "",
+        featured: bool = False,
+        enabled: bool = True,
+    ) -> TikTokSourceChannel:
+        if self.get_account(int(account_id)) is None:
+            raise ValueError("Account not found: %s" % account_id)
+        clean_name = (name or "").strip()
+        clean_url = _normalize_source_channel_url(url)
+        if not clean_name:
+            clean_name = _source_channel_name_from_url(clean_url)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE source_channels
+                SET account_id = ?, name = ?, url = ?, note = ?, featured = ?, enabled = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (int(account_id), clean_name, clean_url, note.strip(), 1 if featured else 0, 1 if enabled else 0, now, int(channel_id)),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Source channel not found: %s" % channel_id)
+        channel = self.get_source_channel(channel_id)
+        if channel is None:
+            raise ValueError("Source channel not found: %s" % channel_id)
+        return channel
+
+    def set_source_channel_featured(self, channel_id: int, featured: bool) -> TikTokSourceChannel:
+        now = utc_now_iso()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE source_channels SET featured = ?, updated_at = ? WHERE id = ?",
+                (1 if featured else 0, now, int(channel_id)),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Source channel not found: %s" % channel_id)
+        channel = self.get_source_channel(channel_id)
+        if channel is None:
+            raise ValueError("Source channel not found: %s" % channel_id)
+        return channel
+
+    def delete_source_channel(self, channel_id: int) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM source_channels WHERE id = ?", (int(channel_id),))
+        return bool(cursor.rowcount)
 
     def update_status(self, account_id: int, status: str, note: str | None = None) -> TikTokAccount:
         if status not in ACCOUNT_STATUSES:
@@ -535,6 +671,20 @@ class TikTokProfileManager:
         )
 
     @staticmethod
+    def _row_to_source_channel(row: sqlite3.Row) -> TikTokSourceChannel:
+        return TikTokSourceChannel(
+            id=int(row["id"]),
+            account_id=int(row["account_id"]),
+            name=row["name"],
+            url=row["url"],
+            note=row["note"],
+            featured=bool(row["featured"]),
+            enabled=bool(row["enabled"]),
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
     def _row_to_log(row: sqlite3.Row) -> TikTokLog:
         return TikTokLog(
             id=int(row["id"]),
@@ -635,6 +785,30 @@ def _normalize_publish_mode(value: str) -> str:
     if publish_mode not in PUBLISH_MODES:
         raise ValueError("Unsupported publish mode: %s" % value)
     return publish_mode
+
+
+def _normalize_source_channel_url(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("Source channel URL is required.")
+    if text.startswith("@"):
+        text = "https://www.tiktok.com/%s" % text
+    elif not text.startswith(("http://", "https://")):
+        if text.startswith("tiktok.com/") or text.startswith("www.tiktok.com/"):
+            text = "https://%s" % text
+        else:
+            text = "https://www.tiktok.com/@%s" % text.lstrip("/")
+    parsed = urlparse(text)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("Source channel URL is not valid.")
+    return text
+
+
+def _source_channel_name_from_url(url: str) -> str:
+    path = urlparse(url).path.strip("/")
+    if path:
+        return path.split("/")[0] or "Source channel"
+    return "Source channel"
 
 
 def normalize_hashtags(value: str) -> str:

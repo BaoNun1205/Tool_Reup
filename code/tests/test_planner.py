@@ -6,10 +6,12 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 import unittest
+from unittest import mock
 
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import ImageInfo, SceneRange
 from auto_tiktok_editor.domain.planner import EditPlanner, SceneQualifier
+from auto_tiktok_editor.exceptions import PipelineStageError
 from auto_tiktok_editor.media.overlay import OverlayPlanner
 
 
@@ -90,6 +92,17 @@ class PlannerTests(unittest.TestCase):
 
         self.assertEqual(plan.dropped_scenes, [])
         self.assertTrue(plan.warnings)
+
+    def test_edit_planner_times_out_instead_of_hanging(self):
+        scenes = [
+            SceneRange(0.0, 1.0, 0),
+            SceneRange(1.0, 2.0, 1),
+            SceneRange(2.0, 3.0, 2),
+        ]
+        with mock.patch("auto_tiktok_editor.domain.planner.time.monotonic", side_effect=[0.0, 301.0]):
+            with self.assertRaises(PipelineStageError) as raised:
+                self.planner.build(scenes, seed=123)
+        self.assertIn("timed out after 300 seconds", str(raised.exception))
 
     def test_overlay_planner_uses_stacked_split_layout(self):
         spec = self.overlay_planner.plan(

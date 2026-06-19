@@ -13,16 +13,31 @@ import uuid
 from auto_tiktok_editor.telegram_settings import load_telegram_runtime_settings
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-VENV_SCRIPTS = PROJECT_ROOT / ".venv" / "Scripts"
-TELEGRAM_BOT_TOKEN_FILE = PROJECT_ROOT / "telegram_bot_token.txt"
-VENDOR_TOOLS = PROJECT_ROOT / "vendor" / "tools"
-
-
 def _runtime_root() -> Path | None:
     if getattr(sys, "frozen", False) or globals().get("__compiled__", False):
         return Path(sys.executable).resolve().parent
     return None
+
+
+def _resolve_project_root() -> Path:
+    configured = os.getenv("AUTO_EDITOR_PROJECT_ROOT", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    runtime_root = _runtime_root()
+    if runtime_root is not None:
+        for candidate in (runtime_root, *runtime_root.parents):
+            if (candidate / "tiktok_profile_manager.sqlite3").exists() or (candidate / "telegram_bots.json").exists():
+                return candidate
+        return runtime_root
+
+    return Path(__file__).resolve().parents[2]
+
+
+PROJECT_ROOT = _resolve_project_root()
+VENV_SCRIPTS = PROJECT_ROOT / ".venv" / "Scripts"
+TELEGRAM_BOT_TOKEN_FILE = PROJECT_ROOT / "telegram_bot_token.txt"
+VENDOR_TOOLS = PROJECT_ROOT / "vendor" / "tools"
 
 
 def _find_runtime_binary(relative_path: str):
@@ -77,10 +92,26 @@ def _find_android_sdk_adb():
         [
             Path("C:/Android/platform-tools/adb.exe"),
             Path("C:/platform-tools/adb.exe"),
+            Path("C:/adb/adb.exe"),
             Path("D:/platform-tools/adb.exe"),
             Path("D:/adb/adb.exe"),
         ]
     )
+    for candidate in candidates:
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _find_scrcpy_binary():
+    candidates = [
+        Path("D:/scrcpy/scrcpy.exe"),
+        Path("D:/scrcpy-win64/scrcpy.exe"),
+        Path("D:/tools/scrcpy/scrcpy.exe"),
+        Path("C:/scrcpy/scrcpy.exe"),
+    ]
+    candidates.extend(sorted(Path("D:/").glob("scrcpy-win64-v*/scrcpy.exe"), reverse=True))
+    candidates.extend(sorted(Path("C:/").glob("scrcpy-win64-v*/scrcpy.exe"), reverse=True))
     for candidate in candidates:
         if candidate.exists():
             return str(candidate)
@@ -202,6 +233,7 @@ class PipelineConfig:
     lazy_down_bin: str = "lazy-down"
     realesrgan_bin: str = "realesrgan-ncnn-vulkan"
     adb_bin: str = "adb"
+    scrcpy_bin: str = "scrcpy"
     tikwm_api_url: str = "https://www.tikwm.com/api/"
 
     # Neu True thi TikTok se luon tai qua lazy-down.
@@ -257,6 +289,8 @@ class PipelineConfig:
     min_scene_duration: float = 0.9
     # Do dai toi da cua mot doan sau khi planner chia nho.
     max_scene_duration: float = 2.95
+    # Gioi han thoi gian lap ke hoach shuffle cho tung video.
+    edit_planner_timeout_seconds: float = 300.0
     # Loc bo cac doan qua den / it gia tri.
     blackdetect_duration: float = 0.4
     blackdetect_threshold: float = 0.98
@@ -463,6 +497,15 @@ class PipelineConfig:
                 or _find_winget_binary(["Google.PlatformTools*"], "adb.exe")
                 or "adb"
             ),
+            scrcpy_bin=(
+                os.getenv("AUTO_EDITOR_SCRCPY_BIN")
+                or _find_runtime_binary("tools/scrcpy.exe")
+                or _find_project_binary("scrcpy.exe")
+                or shutil.which("scrcpy")
+                or _find_scrcpy_binary()
+                or _find_winget_binary(["Genymobile.scrcpy*"], "scrcpy.exe")
+                or "scrcpy"
+            ),
             download_via_lazy_down_only=_env_flag("AUTO_EDITOR_LAZY_DOWN_ONLY", True),
             tikwm_api_url=os.getenv("AUTO_EDITOR_TIKWM_API_URL", "https://www.tikwm.com/api/").strip()
             or "https://www.tikwm.com/api/",
@@ -474,6 +517,7 @@ class PipelineConfig:
             video_cut_mode=video_cut_mode,
             fixed_chunk_duration_seconds=fixed_chunk_duration_seconds,
             scene_threshold=scene_threshold,
+            edit_planner_timeout_seconds=max(1.0, _env_float("AUTO_EDITOR_EDIT_PLANNER_TIMEOUT_SECONDS", 300.0)),
             product_image_crop_ratio=product_image_crop_ratio,
             product_image_motion=product_image_motion,
             default_output_root=output_root,

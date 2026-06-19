@@ -35,6 +35,19 @@ class TikTokAccount:
 
 
 @dataclass(frozen=True)
+class TikTokSourceChannel:
+    id: int
+    account_id: int
+    name: str
+    url: str
+    note: str
+    featured: bool
+    enabled: bool
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
 class TikTokVideo:
     id: int
     account_id: int | None

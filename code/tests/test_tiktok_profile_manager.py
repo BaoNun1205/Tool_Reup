@@ -19,6 +19,7 @@ from auto_tiktok_editor.tiktok_profiles.ui import (
     _format_vietnam_datetime,
     _hashtag_tokens_for_ui,
     _telegram_bot_config_for_account,
+    _telegram_product_messages_for_video,
 )
 from auto_tiktok_editor.tiktok_profiles.telegram_queue import enqueue_telegram_video
 from auto_tiktok_editor.config import PipelineConfig
@@ -150,6 +151,38 @@ class TikTokProfileManagerTests(unittest.TestCase):
         )
         self.assertEqual(_compose_video_caption_with_hashtags("", "mymeanvat"), "#mymeanvat")
 
+    def test_telegram_product_messages_are_caption_hashtags_then_product_id(self):
+        video = mock.Mock(
+            id=12,
+            caption="Mo ta mon an",
+            hashtags="#linhanngon anvatcungtien",
+            product_id="1730667245645826792",
+        )
+
+        self.assertEqual(
+            _telegram_product_messages_for_video(video),
+            ("Mo ta mon an\n#linhanngon #anvatcungtien", "1730667245645826792"),
+        )
+
+    def test_telegram_product_messages_allow_missing_product_id(self):
+        video = mock.Mock(id=12, caption="Mo ta mon an", hashtags="#linhanngon", product_id="")
+
+        self.assertEqual(
+            _telegram_product_messages_for_video(video),
+            ("Mo ta mon an\n#linhanngon", ""),
+        )
+
+    def test_telegram_product_messages_reject_invalid_product_id_text(self):
+        video = mock.Mock(
+            id=12,
+            caption="Mo ta mon an",
+            hashtags="#linhanngon",
+            product_id="Mo ta mon an\n#linhanngon",
+        )
+
+        with self.assertRaises(ValueError):
+            _telegram_product_messages_for_video(video)
+
     def test_youtube_tag_input_helpers_normalize_and_map_account_tags(self):
         self.assertEqual(
             _hashtag_tokens_for_ui("linhanngon, #anvatcungtien #LINHANNGON"),
@@ -233,6 +266,50 @@ class TikTokProfileManagerTests(unittest.TestCase):
 
             self.assertEqual(updated.status, "need_login")
             self.assertEqual(updated.note, "manual check")
+
+    def test_source_channel_crud_per_account(self):
+        with _temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            manager = TikTokProfileManager(
+                db_path=root / "accounts.sqlite3",
+                profiles_root=root / "profiles",
+                project_root=root,
+            )
+            account = manager.add_account("Nick 1", "google")
+
+            channel = manager.add_source_channel(account.id, "", "@demo_channel", note="good food")
+
+            self.assertEqual(channel.account_id, account.id)
+            self.assertEqual(channel.name, "@demo_channel")
+            self.assertEqual(channel.url, "https://www.tiktok.com/@demo_channel")
+            self.assertEqual(channel.note, "good food")
+            self.assertFalse(channel.featured)
+            self.assertTrue(channel.enabled)
+            self.assertEqual(manager.list_source_channels(account.id), [channel])
+
+            featured = manager.add_source_channel(account.id, "Top Channel", "@top_channel", featured=True)
+            self.assertTrue(featured.featured)
+            self.assertEqual([item.id for item in manager.list_source_channels(account.id)], [featured.id, channel.id])
+
+            updated = manager.update_source_channel(
+                channel.id,
+                account.id,
+                "Demo Channel",
+                "tiktok.com/@demo_channel",
+                note="updated",
+                enabled=False,
+            )
+
+            self.assertEqual(updated.name, "Demo Channel")
+            self.assertEqual(updated.url, "https://tiktok.com/@demo_channel")
+            self.assertEqual(updated.note, "updated")
+            self.assertFalse(updated.featured)
+            self.assertFalse(updated.enabled)
+            promoted = manager.set_source_channel_featured(updated.id, True)
+            self.assertTrue(promoted.featured)
+            self.assertTrue(manager.delete_source_channel(channel.id))
+            self.assertTrue(manager.delete_source_channel(featured.id))
+            self.assertEqual(manager.list_source_channels(account.id), [])
 
     def test_add_video_and_log_rows(self):
         with _temporary_directory() as temp_dir:

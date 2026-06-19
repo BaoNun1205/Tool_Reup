@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from unittest import mock
 from urllib.error import URLError
 
-from auto_tiktok_editor.app.media_cleanup import cleanup_media_storage
+from auto_tiktok_editor.app.media_cleanup import cleanup_media_storage, cleanup_tool_storage
 from auto_tiktok_editor.app.telegram_bot import (
     TelegramBotService,
     TelegramConversationState,
@@ -1020,6 +1020,48 @@ class TelegramBotServiceTests(unittest.TestCase):
             self.assertEqual(report.deleted_files, 1)
             self.assertFalse(old_video.exists())
             self.assertTrue(recent_video.exists())
+        finally:
+            temp_dir.cleanup()
+
+    def test_cleanup_tool_storage_removes_runtime_data_but_keeps_profiles_database_and_config(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            output_root = base_dir / "output"
+            telegram_input_root = output_root / "_telegram_inputs"
+            paths_to_delete = [
+                output_root / "session_001" / "final_video.mp4",
+                telegram_input_root / "chat_123" / "product.jpg",
+                base_dir / "profile_video_queue" / "profile" / "queued.mp4",
+                base_dir / "tmp" / "temp.bin",
+                base_dir / "phone_screenshots" / "screen.png",
+                base_dir / "logs" / "telegram_bot_stdout.log",
+            ]
+            for path in paths_to_delete:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("data", encoding="utf-8")
+            db_path = base_dir / "tiktok_profile_manager.sqlite3"
+            bot_config_path = base_dir / "telegram_bots.json"
+            profile_cache_path = base_dir / "profiles" / "profile" / "Default" / "Cache" / "blob"
+            db_path.write_text("db", encoding="utf-8")
+            bot_config_path.write_text("{}", encoding="utf-8")
+            profile_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            profile_cache_path.write_text("profile", encoding="utf-8")
+
+            report = cleanup_tool_storage(
+                PipelineConfig(
+                    default_output_root=output_root,
+                    telegram_input_root=telegram_input_root,
+                ),
+                base_dir,
+            )
+
+            self.assertGreaterEqual(report.deleted_files, len(paths_to_delete))
+            for path in paths_to_delete:
+                self.assertFalse(path.exists(), path)
+            self.assertTrue(db_path.exists())
+            self.assertTrue(bot_config_path.exists())
+            self.assertTrue(profile_cache_path.exists())
         finally:
             temp_dir.cleanup()
 

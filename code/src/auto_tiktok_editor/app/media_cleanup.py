@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import shutil
 import time
 from typing import List, Optional, Set
 
@@ -84,6 +85,27 @@ def cleanup_media_storage(
     return report
 
 
+def cleanup_tool_storage(
+    config: PipelineConfig,
+    project_root: Path | str,
+) -> MediaCleanupReport:
+    report = MediaCleanupReport(roots=_tool_cleanup_roots(config, project_root))
+    seen_roots = set()  # type: Set[Path]
+    for root in report.roots:
+        if not root.exists() or not root.is_dir():
+            continue
+        resolved_root = root.resolve()
+        if resolved_root in seen_roots:
+            continue
+        seen_roots.add(resolved_root)
+        _remove_root_contents(root, report)
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            report.errors.append("%s: %s" % (root, exc))
+    return report
+
+
 def format_cleanup_report(report: MediaCleanupReport, *, include_errors: bool = True) -> str:
     if report.deleted_files == 0 and not report.errors:
         return "Khong tim thay video hoac anh nao trong input/output de xoa."
@@ -98,6 +120,20 @@ def format_cleanup_report(report: MediaCleanupReport, *, include_errors: bool = 
     return message
 
 
+def format_tool_cleanup_report(report: MediaCleanupReport, *, include_errors: bool = True) -> str:
+    if report.deleted_files == 0 and report.deleted_directories == 0 and not report.errors:
+        return "Khong tim thay du lieu tool nao de don dep."
+    parts = ["Da xoa %s file" % report.deleted_files]
+    if report.deleted_directories:
+        parts.append("xoa %s thu muc" % report.deleted_directories)
+    if report.freed_bytes > 0:
+        parts.append("giai phong %s" % _human_size(report.freed_bytes))
+    message = ", ".join(parts) + "."
+    if include_errors and report.errors:
+        message += " Co %s muc khong xoa duoc." % len(report.errors)
+    return message
+
+
 def _cleanup_roots(config: PipelineConfig) -> List[Path]:
     unique_roots = []
     seen = set()  # type: Set[Path]
@@ -108,6 +144,86 @@ def _cleanup_roots(config: PipelineConfig) -> List[Path]:
         seen.add(resolved)
         unique_roots.append(resolved)
     return unique_roots
+
+
+def _tool_cleanup_roots(config: PipelineConfig, project_root: Path | str) -> List[Path]:
+    root = Path(project_root).expanduser().resolve()
+    candidates = [
+        Path(config.default_output_root),
+        Path(config.telegram_input_root),
+        root / "profile_video_queue",
+        root / "tmp",
+        root / "phone_screenshots",
+        root / "logs",
+    ]
+    unique_roots = []
+    seen = set()  # type: Set[Path]
+    protected_files = {
+        root / "tiktok_profile_manager.sqlite3",
+        root / "telegram_bots.json",
+        root / "telegram_bots.example.json",
+    }
+    for candidate in candidates:
+        resolved = candidate.expanduser().resolve()
+        if resolved in seen:
+            continue
+        if resolved in protected_files:
+            continue
+        seen.add(resolved)
+        unique_roots.append(resolved)
+    return unique_roots
+
+
+def _remove_root_contents(root: Path, report: MediaCleanupReport) -> None:
+    try:
+        children = list(root.iterdir())
+    except OSError as exc:
+        report.errors.append("%s: %s" % (root, exc))
+        return
+    for child in children:
+        if child.is_file() or child.is_symlink():
+            _delete_file(child, report)
+            continue
+        if child.is_dir():
+            files, directories, bytes_count = _tree_stats(child)
+            try:
+                shutil.rmtree(child)
+                report.deleted_files += files
+                report.deleted_directories += directories + 1
+                report.freed_bytes += bytes_count
+            except OSError as exc:
+                report.errors.append("%s: %s" % (child, exc))
+
+
+def _delete_file(path: Path, report: MediaCleanupReport) -> None:
+    try:
+        report.freed_bytes += path.stat().st_size
+    except OSError:
+        pass
+    try:
+        path.unlink()
+        report.deleted_files += 1
+    except OSError as exc:
+        report.errors.append("%s: %s" % (path, exc))
+
+
+def _tree_stats(root: Path) -> tuple[int, int, int]:
+    files = 0
+    directories = 0
+    bytes_count = 0
+    for path in root.rglob("*"):
+        try:
+            if path.is_file() or path.is_symlink():
+                files += 1
+                try:
+                    bytes_count += path.stat().st_size
+                except OSError:
+                    pass
+            elif path.is_dir():
+                directories += 1
+        except OSError:
+            continue
+    return files, directories, bytes_count
 
 
 def _remove_empty_directories(root: Path, errors: List[str]) -> int:
