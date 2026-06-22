@@ -1406,12 +1406,6 @@ class App(ctk.CTk):
             self._start_phone_control,
             "primary",
         )
-        self.phone_upload_test_button = self._add_action_button(
-            actions,
-            "Upload Test",
-            self._open_tiktok_upload_test,
-            "secondary",
-        )
         self.phone_close_button = self._add_action_button(
             actions,
             "Close",
@@ -1420,7 +1414,6 @@ class App(ctk.CTk):
         )
         self.phone_connect_button.configure(width=82)
         self.phone_control_button.configure(width=82)
-        self.phone_upload_test_button.configure(width=98)
         self.phone_close_button.configure(width=58)
 
         body.grid_columnconfigure(0, weight=1)
@@ -3598,27 +3591,6 @@ class App(ctk.CTk):
             error_title="Phone control",
         )
 
-    def _open_tiktok_upload_test(self) -> None:
-        if not self.phone_controller.is_connected():
-            self.phone_control_status_var.set("Connect the phone before testing upload.")
-            self.phone_metric_var.set("Stopped")
-            messagebox.showinfo("Phone not connected", "Connect the phone first, then test Upload.")
-            return
-        address = self.phone_address_var.get().strip()
-        self.phone_control_status_var.set("Opening TikTok upload deeplink...")
-
-        def on_success(result: dict) -> None:
-            message = str(result.get("message") or "Opened TikTok upload deeplink.")
-            self.phone_control_status_var.set(message)
-            self.status_var.set(message)
-
-        self._run_worker(
-            "Opening TikTok upload deeplink...",
-            lambda: self.phone_controller.open_tiktok_upload(address),
-            on_success=on_success,
-            error_title="TikTok upload test",
-        )
-
     def _phone_control_settings(self, address: str | None = None) -> PhoneControlSettings:
         return PhoneControlSettings(
             address=self.phone_address_var.get().strip() if address is None else address.strip(),
@@ -3716,8 +3688,6 @@ class App(ctk.CTk):
             self.phone_connect_button.configure(state="disabled" if running else "normal")
         if hasattr(self, "phone_control_button"):
             self.phone_control_button.configure(state="normal" if connected and not running else "disabled")
-        if hasattr(self, "phone_upload_test_button"):
-            self.phone_upload_test_button.configure(state="normal" if connected else "disabled")
         if hasattr(self, "phone_close_button"):
             self.phone_close_button.configure(state="normal" if running else "disabled")
         if running:
@@ -4388,39 +4358,140 @@ class App(ctk.CTk):
         video = self._selected_video()
         if video is None:
             return
-        if video.account_id is None:
-            messagebox.showinfo("Missing profile", "Chon profile cho video trong panel ben phai truoc khi auto post.")
+        address = self._phone_video_target_address(require_connected=True)
+        if address is None:
             return
-        account = self.manager.get_account(video.account_id)
-        if account is None:
-            messagebox.showerror("Account missing", "Profile cua video khong con ton tai.")
+        caption_text = _compose_video_caption_with_hashtags(video.caption, video.hashtags)
+        if not caption_text:
+            messagebox.showinfo("Missing description", "Video chua co description/hashtags de dan vao TikTok.")
             return
-        if account.status != "live":
-            messagebox.showinfo("Need live profile", "Profile %s phai o trang thai live truoc khi auto post." % account.name)
+        product_id = str(video.product_id or "").strip()
+        if not product_id:
+            messagebox.showinfo("Missing Product ID", "Video chua co Product ID de tim san pham tren TikTok.")
             return
-        validation_error = self._auto_post_validation_error(video)
-        if validation_error:
-            messagebox.showerror("Video not ready", validation_error)
+        if not product_id.isdigit():
+            messagebox.showerror("Invalid Product ID", "Product ID chi duoc chua chu so: %s" % product_id)
+            return
+        if not self.phone_controller.is_running():
+            messagebox.showinfo("Phone control required", "Open Control first so scrcpy can paste description to the phone.")
+            return
+        try:
+            phone_item = self._phone_video_transfer_item(video)
+        except Exception as exc:
+            messagebox.showerror("Video not ready", str(exc))
             return
 
         def worker() -> dict:
-            counts = {}
+            fresh_video = self.manager.get_video(video.id) or video
+            account_id = fresh_video.account_id
+            try:
+                self.manager.update_video_status(fresh_video.id, "queued")
+                self.manager.add_log(
+                    "info",
+                    "phone_auto_post_start",
+                    "Phone Auto Post started for video %s." % fresh_video.file_path,
+                    account_id=account_id,
+                    video_id=fresh_video.id,
+                )
+                phone_result = self.phone_controller.send_file_to_gallery(address, phone_item["file_path"])
+                upload_result = self.phone_controller.open_tiktok_upload(address)
+                paste_result = self.phone_controller.paste_text_with_scrcpy(caption_text)
+                keyboard_result = self.phone_controller.press_space_and_close_keyboard(address)
+                add_link_result = self.phone_controller.tap_tiktok_add_link(address)
+                product_link_result = self.phone_controller.tap_tiktok_product_link(address)
+                product_search_result = self.phone_controller.tap_tiktok_product_search_field(address)
+                product_id_result = self.phone_controller.search_tiktok_product_id(address, product_id)
+                product_add_result = self.phone_controller.tap_tiktok_product_add_button(address)
+                optional_add_popup_result = self.phone_controller.tap_optional_tiktok_add_popup(address)
+                product_name_result = self.phone_controller.replace_invalid_tiktok_product_name(address)
+                final_add_result = self.phone_controller.tap_tiktok_anchor_final_add_button(address)
+                more_options_result = self.phone_controller.tap_tiktok_more_options(address)
+                schedule_post_result = self.phone_controller.tap_tiktok_schedule_post(address)
+                return {
+                    "video_id": fresh_video.id,
+                    "account_id": account_id,
+                    "phone_result": phone_result,
+                    "upload_result": upload_result,
+                    "paste_result": paste_result,
+                    "keyboard_result": keyboard_result,
+                    "add_link_result": add_link_result,
+                    "product_link_result": product_link_result,
+                    "product_search_result": product_search_result,
+                    "product_id_result": product_id_result,
+                    "product_add_result": product_add_result,
+                    "optional_add_popup_result": optional_add_popup_result,
+                    "product_name_result": product_name_result,
+                    "final_add_result": final_add_result,
+                    "more_options_result": more_options_result,
+                    "schedule_post_result": schedule_post_result,
+                }
+            except Exception as exc:
+                self.manager.update_video_status(fresh_video.id, "error", note=str(exc))
+                self.manager.add_log(
+                    "error",
+                    "phone_auto_post_error",
+                    "Phone Auto Post failed: %s" % exc,
+                    account_id=account_id,
+                    video_id=fresh_video.id,
+                )
+                raise
+
+        def on_success(result: dict) -> None:
+            video_id = result["video_id"]
+            self.manager.update_video_status(
+                video_id,
+                "prepared",
+                note="Opened TikTok publish screen, pasted description, closed keyboard, tapped Add link, tapped Product, focused product search, searched Product ID, tapped product Add, handled optional Add popup, fixed product name if needed, tapped final Add, opened More options, and opened Schedule post.",
+            )
+            phone_result = result["phone_result"]
+            upload_result = result["upload_result"]
+            paste_result = result["paste_result"]
+            keyboard_result = result["keyboard_result"]
+            add_link_result = result["add_link_result"]
+            product_link_result = result["product_link_result"]
+            product_search_result = result["product_search_result"]
+            product_id_result = result["product_id_result"]
+            product_add_result = result["product_add_result"]
+            optional_add_popup_result = result["optional_add_popup_result"]
+            product_name_result = result["product_name_result"]
+            final_add_result = result["final_add_result"]
+            more_options_result = result["more_options_result"]
+            schedule_post_result = result["schedule_post_result"]
             self.manager.add_log(
                 "info",
-                "auto_post_start",
-                "Auto posting selected video: %s." % video.file_path,
-                account_id=account.id,
-                video_id=video.id,
+                "phone_auto_post_ready",
+                "Video sent to phone, publish screen opened, description pasted, keyboard closed, Add link tapped, Product tapped, product search focused, Product ID searched, product Add tapped, optional Add popup handled, product name checked, final Add tapped, More options opened, and Schedule post opened: %s."
+                % phone_result["remote_path"],
+                account_id=result["account_id"],
+                video_id=video_id,
             )
-            fresh_video = self.manager.get_video(video.id) or video
-            self._post_video_for_account(account, fresh_video, counts)
-            return counts
-
-        def on_success(counts: dict) -> None:
             self._refresh_all()
-            self.status_var.set("Video Auto Post finished for video %s: %s" % (video.id, self._format_counts(counts)))
+            self.status_var.set(
+                "Phone Auto Post ready for video %s. %s %s %s %s %s %s %s %s %s %s %s %s %s"
+                % (
+                    video_id,
+                    str(upload_result.get("message") or "TikTok publish screen opened."),
+                    str(paste_result.get("message") or "Description pasted."),
+                    str(keyboard_result.get("message") or "Keyboard closed."),
+                    str(add_link_result.get("message") or "Add link tapped."),
+                    str(product_link_result.get("message") or "Product tapped."),
+                    str(product_search_result.get("message") or "Product search focused."),
+                    str(product_id_result.get("message") or "Product ID searched."),
+                    str(product_add_result.get("message") or "Product Add tapped."),
+                    str(optional_add_popup_result.get("message") or "Optional popup handled."),
+                    str(product_name_result.get("message") or "Product name checked."),
+                    str(final_add_result.get("message") or "Final Add tapped."),
+                    str(more_options_result.get("message") or "More options opened."),
+                    str(schedule_post_result.get("message") or "Schedule post opened."),
+                )
+            )
 
-        self._run_worker("Auto posting selected video...", worker, on_success=on_success)
+        self._run_worker(
+            "Sending video %s to phone and opening TikTok library..." % video.id,
+            worker,
+            on_success=on_success,
+            error_title="Phone Auto Post",
+        )
 
     def _post_video_for_account(self, account, video, counts: dict) -> None:
         try:

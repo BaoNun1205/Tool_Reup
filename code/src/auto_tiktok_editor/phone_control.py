@@ -16,6 +16,7 @@ import time
 from typing import Callable
 from urllib.parse import quote
 from ctypes import wintypes
+import xml.etree.ElementTree as ET
 
 from auto_tiktok_editor.app.device_transfer import AndroidDeviceTransfer
 from auto_tiktok_editor.config import PipelineConfig
@@ -33,6 +34,20 @@ SCRCPY_WINDOW_TITLE = "TikTok Tool - Phone Control"
 SCRCPY_DOCK_WIDTH = 420
 SCREENSHOT_HOTKEY_LABEL = "Ctrl+Alt+S"
 CLOSE_HOTKEY_LABEL = "Ctrl+Alt+Q"
+CF_UNICODETEXT = 13
+GMEM_MOVEABLE = 0x0002
+KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_EXTENDEDKEY = 0x0001
+MAPVK_VK_TO_VSC = 0
+VK_RCONTROL = 0xA3
+VK_V = 0x56
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+ANDROID_KEYCODE_BACK = "4"
+ANDROID_KEYCODE_DEL = "67"
+ANDROID_KEYCODE_ENTER = "66"
+ANDROID_KEYCODE_MOVE_END = "123"
+ANDROID_KEYCODE_SPACE = "62"
 DOCK_POSITIONS = {"off", "left", "right"}
 MONITOR_TARGETS = {"primary", "secondary"}
 SCRCPY_MAX_SIZE_OPTIONS = {1024, 1280, 1600}
@@ -368,7 +383,7 @@ class WindowsScrcpyDock:
             self._remove_locked()
 
     @staticmethod
-    def _find_process_window(process: subprocess.Popen) -> int:
+    def _find_process_window(process: subprocess.Popen, *, require_title: bool = True) -> int:
         process_id = int(getattr(process, "pid", 0) or 0)
         if not process_id:
             return 0
@@ -408,10 +423,13 @@ class WindowsScrcpyDock:
                 return True
             title_length = user32.GetWindowTextLengthW(hwnd)
             if title_length <= 0:
-                return True
+                if require_title:
+                    return True
+                found.value = hwnd
+                return False
             title = ctypes.create_unicode_buffer(title_length + 1)
             user32.GetWindowTextW(hwnd, title, len(title))
-            if title.value == SCRCPY_WINDOW_TITLE:
+            if title.value == SCRCPY_WINDOW_TITLE or not require_title:
                 found.value = hwnd
                 return False
             return True
@@ -716,6 +734,502 @@ class PhoneController:
     def is_connected(self) -> bool:
         return bool(self.connected_serial) or self.is_running()
 
+    def paste_text_with_scrcpy(self, text: str) -> dict[str, object]:
+        clean_text = str(text or "")
+        if not clean_text:
+            return {"pasted": False, "message": "No text to paste."}
+        if not self.is_running():
+            raise RuntimeError("Open Phone Control before pasting text with scrcpy.")
+        self._set_windows_clipboard_text(clean_text)
+        self._send_scrcpy_paste_shortcut()
+        self._emit_event(
+            "info",
+            "phone_text_pasted",
+            "Pasted text to phone through scrcpy (%s characters)." % len(clean_text),
+            text_length=len(clean_text),
+        )
+        return {
+            "pasted": True,
+            "text_length": len(clean_text),
+            "message": "Pasted text to phone through scrcpy.",
+        }
+
+    def press_space_and_close_keyboard(self, address: str = "") -> dict[str, str]:
+        target = normalize_phone_address(address or self.connected_serial)
+        self.runner.ensure_tool(self.config.adb_bin)
+        if not target:
+            raise RuntimeError("Connect the phone before pressing space.")
+        self._send_android_keyevent(target, ANDROID_KEYCODE_SPACE)
+        time.sleep(0.15)
+        self._send_android_keyevent(target, ANDROID_KEYCODE_BACK)
+        self._emit_event(
+            "info",
+            "phone_keyboard_closed",
+            "Pressed space and closed the phone keyboard.",
+            device_serial=target,
+        )
+        return {
+            "address": target,
+            "message": "Pressed space and closed the phone keyboard.",
+        }
+
+    def tap_tiktok_add_link(self, address: str = "") -> dict[str, str]:
+        target = normalize_phone_address(address or self.connected_serial)
+        self.runner.ensure_tool(self.config.adb_bin)
+        if not target:
+            raise RuntimeError("Connect the phone before tapping Add link.")
+        time.sleep(0.4)
+        center = self._tap_ui_text(target, ("\u0054h\u00eam li\u00ean k\u1ebft", "Add link"))
+        if center is None:
+            width, height = self._phone_screen_size(target)
+            tap_x = max(1, int(width * 0.5))
+            tap_y = max(1, int(height * 0.486))
+            self.runner.run(
+                [
+                    self.config.adb_bin,
+                    "-s",
+                    target,
+                    "shell",
+                    "input",
+                    "tap",
+                    str(tap_x),
+                    str(tap_y),
+                ],
+                check=False,
+            )
+        else:
+            tap_x, tap_y = center
+        self._emit_event(
+            "info",
+            "phone_add_link_opened",
+            "Tapped TikTok Add link at %s,%s." % (tap_x, tap_y),
+            device_serial=target,
+            tap_x=tap_x,
+            tap_y=tap_y,
+        )
+        return {
+            "address": target,
+            "tap_x": str(tap_x),
+            "tap_y": str(tap_y),
+            "message": "Tapped TikTok Add link.",
+        }
+
+    def tap_tiktok_product_link(self, address: str = "") -> dict[str, str]:
+        target = normalize_phone_address(address or self.connected_serial)
+        self.runner.ensure_tool(self.config.adb_bin)
+        if not target:
+            raise RuntimeError("Connect the phone before tapping Product.")
+        time.sleep(0.5)
+        center = self._tap_ui_text(target, ("\u0053\u1ea3n ph\u1ea9m", "Product", "Products"))
+        if center is None:
+            width, height = self._phone_screen_size(target)
+            tap_x = max(1, int(width * 0.5))
+            tap_y = max(1, int(height * 0.844))
+            self.runner.run(
+                [
+                    self.config.adb_bin,
+                    "-s",
+                    target,
+                    "shell",
+                    "input",
+                    "tap",
+                    str(tap_x),
+                    str(tap_y),
+                ],
+                check=False,
+            )
+        else:
+            tap_x, tap_y = center
+        self._emit_event(
+            "info",
+            "phone_product_link_opened",
+            "Tapped TikTok Product link at %s,%s." % (tap_x, tap_y),
+            device_serial=target,
+            tap_x=tap_x,
+            tap_y=tap_y,
+        )
+        return {
+            "address": target,
+            "tap_x": str(tap_x),
+            "tap_y": str(tap_y),
+            "message": "Tapped TikTok Product link.",
+        }
+
+    def tap_tiktok_product_search_field(self, address: str = "") -> dict[str, str]:
+        target = normalize_phone_address(address or self.connected_serial)
+        self.runner.ensure_tool(self.config.adb_bin)
+        if not target:
+            raise RuntimeError("Connect the phone before tapping product search.")
+        search_field = None
+        for attempt in range(8):
+            time.sleep(1.0 if attempt == 0 else 0.7)
+            xml_text = self._dump_ui_xml(target)
+            search_field = self._find_product_search_field(xml_text)
+            if search_field is not None:
+                break
+        if search_field is None:
+            raise RuntimeError(
+                "Could not find the TikTok product search text: \u0054\u00ecm ki\u1ebfm s\u1ea3n ph\u1ea9m."
+            )
+        else:
+            tap_x, tap_y = search_field["center"]
+        self.runner.run(
+            [
+                self.config.adb_bin,
+                "-s",
+                target,
+                "shell",
+                "input",
+                "tap",
+                str(tap_x),
+                str(tap_y),
+            ],
+            check=False,
+        )
+        time.sleep(0.4)
+        self._emit_event(
+            "info",
+            "phone_product_search_focused",
+            "Tapped TikTok product search at %s,%s." % (tap_x, tap_y),
+            device_serial=target,
+            tap_x=tap_x,
+            tap_y=tap_y,
+            bounds=str(search_field.get("bounds") or ""),
+            text=str(search_field.get("text") or ""),
+            content_desc=str(search_field.get("content_desc") or ""),
+            class_name=str(search_field.get("class_name") or ""),
+            focused=str(search_field.get("focused") or ""),
+        )
+        return {
+            "address": target,
+            "tap_x": str(tap_x),
+            "tap_y": str(tap_y),
+            "bounds": str(search_field.get("bounds") or ""),
+            "text": str(search_field.get("text") or ""),
+            "class_name": str(search_field.get("class_name") or ""),
+            "focused": str(search_field.get("focused") or ""),
+            "message": "Tapped TikTok product search.",
+        }
+
+    def search_tiktok_product_id(self, address: str, product_id: str) -> dict[str, object]:
+        target = normalize_phone_address(address or self.connected_serial)
+        clean_product_id = str(product_id or "").strip()
+        self.runner.ensure_tool(self.config.adb_bin)
+        if not target:
+            raise RuntimeError("Connect the phone before searching product ID.")
+        if not clean_product_id:
+            raise RuntimeError("Product ID is required before searching TikTok product.")
+        if not clean_product_id.isdigit():
+            raise RuntimeError("Product ID must contain digits only: %s" % clean_product_id)
+        if not self.is_running():
+            raise RuntimeError("Open Phone Control before pasting product ID with scrcpy.")
+        pasted = False
+        for attempt in range(2):
+            time.sleep(0.5)
+            self._set_windows_clipboard_text(clean_product_id)
+            self._send_scrcpy_paste_shortcut()
+            time.sleep(1.0)
+            xml_text = self._dump_ui_xml(target)
+            if clean_product_id in xml_text:
+                pasted = True
+                break
+            if attempt == 0:
+                self.tap_tiktok_product_search_field(target)
+        if not pasted:
+            raise RuntimeError("Could not paste Product ID into TikTok product search.")
+        self._send_android_keyevent(target, ANDROID_KEYCODE_ENTER)
+        self._emit_event(
+            "info",
+            "phone_product_id_searched",
+            "Pasted product ID and pressed Enter on the phone.",
+            device_serial=target,
+            product_id=clean_product_id,
+        )
+        return {
+            "address": target,
+            "product_id": clean_product_id,
+            "message": "Pasted product ID and pressed Enter.",
+        }
+
+    def tap_tiktok_product_add_button(self, address: str = "") -> dict[str, str]:
+        target = normalize_phone_address(address or self.connected_serial)
+        self.runner.ensure_tool(self.config.adb_bin)
+        if not target:
+            raise RuntimeError("Connect the phone before tapping product Add.")
+        time.sleep(1.0)
+        center = self._tap_ui_text(target, ("\u0054h\u00eam", "Add", "button_add_product"))
+        if center is None:
+            width, height = self._phone_screen_size(target)
+            tap_x = max(1, int(width * 0.817))
+            tap_y = max(1, int(height * 0.251))
+            self.runner.run(
+                [
+                    self.config.adb_bin,
+                    "-s",
+                    target,
+                    "shell",
+                    "input",
+                    "tap",
+                    str(tap_x),
+                    str(tap_y),
+                ],
+                check=False,
+            )
+        else:
+            tap_x, tap_y = center
+        self._emit_event(
+            "info",
+            "phone_product_add_tapped",
+            "Tapped TikTok product Add at %s,%s." % (tap_x, tap_y),
+            device_serial=target,
+            tap_x=tap_x,
+            tap_y=tap_y,
+        )
+        return {
+            "address": target,
+            "tap_x": str(tap_x),
+            "tap_y": str(tap_y),
+            "message": "Tapped TikTok product Add.",
+        }
+
+    def tap_optional_tiktok_add_popup(self, address: str = "") -> dict[str, object]:
+        target = normalize_phone_address(address or self.connected_serial)
+        self.runner.ensure_tool(self.config.adb_bin)
+        if not target:
+            raise RuntimeError("Connect the phone before checking optional Add popup.")
+        time.sleep(0.6)
+        xml_text = self._dump_ui_xml(target)
+        center = self._find_ui_text_center(xml_text, ("\u0054h\u00eam", "Add"))
+        source = "text"
+        if center is None:
+            center = self._find_sparse_center_dialog_add_button(xml_text)
+            source = "dialog"
+        if center is None:
+            return {
+                "address": target,
+                "tapped": False,
+                "message": "No optional Add popup.",
+            }
+        tap_x, tap_y = center
+        self.runner.run(
+            [
+                self.config.adb_bin,
+                "-s",
+                target,
+                "shell",
+                "input",
+                "tap",
+                str(tap_x),
+                str(tap_y),
+            ],
+            check=False,
+        )
+        self._emit_event(
+            "info",
+            "phone_optional_add_popup_tapped",
+            "Tapped optional TikTok Add popup at %s,%s." % (tap_x, tap_y),
+            device_serial=target,
+            tap_x=tap_x,
+            tap_y=tap_y,
+            source=source,
+        )
+        return {
+            "address": target,
+            "tapped": True,
+            "tap_x": str(tap_x),
+            "tap_y": str(tap_y),
+            "source": source,
+            "message": "Tapped optional Add popup.",
+        }
+
+    def replace_invalid_tiktok_product_name(
+        self,
+        address: str = "",
+        replacement: str = "Mua \u1edf \u0111\u00e2y",
+    ) -> dict[str, object]:
+        target = normalize_phone_address(address or self.connected_serial)
+        self.runner.ensure_tool(self.config.adb_bin)
+        if not target:
+            raise RuntimeError("Connect the phone before replacing product name.")
+        clean_replacement = str(replacement or "").strip()
+        if not clean_replacement:
+            raise RuntimeError("Replacement product name is required.")
+        time.sleep(0.5)
+        xml_text = self._dump_ui_xml(target)
+        field = self._find_product_name_input(xml_text)
+        if field is None:
+            self._send_android_keyevent(target, ANDROID_KEYCODE_BACK)
+            return {
+                "address": target,
+                "replaced": False,
+                "message": "No invalid product name screen; closed keyboard.",
+            }
+        current_text, center = field
+        if current_text.strip() == clean_replacement:
+            self._send_android_keyevent(target, ANDROID_KEYCODE_BACK)
+            return {
+                "address": target,
+                "replaced": False,
+                "message": "Product name already valid; closed keyboard.",
+            }
+        if not self._has_disabled_anchor_add_button(xml_text):
+            self._send_android_keyevent(target, ANDROID_KEYCODE_BACK)
+            return {
+                "address": target,
+                "replaced": False,
+                "message": "Product name screen is already valid; closed keyboard.",
+            }
+        tap_x, tap_y = center
+        self.runner.run(
+            [self.config.adb_bin, "-s", target, "shell", "input", "tap", str(tap_x), str(tap_y)],
+            check=False,
+        )
+        time.sleep(0.2)
+        self._send_android_keyevent(target, ANDROID_KEYCODE_MOVE_END)
+        delete_count = max(20, len(current_text) + 8)
+        for _index in range(delete_count):
+            self._send_android_keyevent(target, ANDROID_KEYCODE_DEL)
+        self.paste_text_with_scrcpy(clean_replacement)
+        time.sleep(0.3)
+        self._send_android_keyevent(target, ANDROID_KEYCODE_BACK)
+        self._emit_event(
+            "info",
+            "phone_product_name_replaced",
+            "Replaced invalid TikTok product name and closed the keyboard.",
+            device_serial=target,
+            replacement=clean_replacement,
+        )
+        return {
+            "address": target,
+            "replaced": True,
+            "replacement": clean_replacement,
+            "message": "Replaced invalid product name and closed keyboard.",
+        }
+
+    def tap_tiktok_anchor_final_add_button(self, address: str = "") -> dict[str, str]:
+        target = normalize_phone_address(address or self.connected_serial)
+        self.runner.ensure_tool(self.config.adb_bin)
+        if not target:
+            raise RuntimeError("Connect the phone before tapping final Add.")
+        time.sleep(0.5)
+        xml_text = self._dump_ui_xml(target)
+        center = self._find_anchor_add_button_center(xml_text, require_enabled=True)
+        if center is None:
+            width, height = self._phone_screen_size(target)
+            tap_x = max(1, int(width * 0.5))
+            tap_y = max(1, int(height * 0.938))
+        else:
+            tap_x, tap_y = center
+        self.runner.run(
+            [
+                self.config.adb_bin,
+                "-s",
+                target,
+                "shell",
+                "input",
+                "tap",
+                str(tap_x),
+                str(tap_y),
+            ],
+            check=False,
+        )
+        self._emit_event(
+            "info",
+            "phone_anchor_final_add_tapped",
+            "Tapped TikTok final Add at %s,%s." % (tap_x, tap_y),
+            device_serial=target,
+            tap_x=tap_x,
+            tap_y=tap_y,
+        )
+        return {
+            "address": target,
+            "tap_x": str(tap_x),
+            "tap_y": str(tap_y),
+            "message": "Tapped TikTok final Add.",
+        }
+
+    def tap_tiktok_more_options(self, address: str = "") -> dict[str, str]:
+        target = normalize_phone_address(address or self.connected_serial)
+        self.runner.ensure_tool(self.config.adb_bin)
+        if not target:
+            raise RuntimeError("Connect the phone before tapping More options.")
+        time.sleep(0.7)
+        center = self._tap_ui_text(target, ("\u0054\u00f9y ch\u1ecdn kh\u00e1c", "More options", "More"))
+        if center is None:
+            width, height = self._phone_screen_size(target)
+            tap_x = max(1, int(width * 0.5))
+            tap_y = max(1, int(height * 0.642))
+            self.runner.run(
+                [
+                    self.config.adb_bin,
+                    "-s",
+                    target,
+                    "shell",
+                    "input",
+                    "tap",
+                    str(tap_x),
+                    str(tap_y),
+                ],
+                check=False,
+            )
+        else:
+            tap_x, tap_y = center
+        self._emit_event(
+            "info",
+            "phone_more_options_opened",
+            "Tapped TikTok More options at %s,%s." % (tap_x, tap_y),
+            device_serial=target,
+            tap_x=tap_x,
+            tap_y=tap_y,
+        )
+        return {
+            "address": target,
+            "tap_x": str(tap_x),
+            "tap_y": str(tap_y),
+            "message": "Tapped TikTok More options.",
+        }
+
+    def tap_tiktok_schedule_post(self, address: str = "") -> dict[str, str]:
+        target = normalize_phone_address(address or self.connected_serial)
+        self.runner.ensure_tool(self.config.adb_bin)
+        if not target:
+            raise RuntimeError("Connect the phone before tapping Schedule post.")
+        time.sleep(0.7)
+        center = self._tap_ui_text(target, ("\u004c\u00ean l\u1ecbch \u0111\u0103ng", "Schedule post", "Schedule"))
+        if center is None:
+            width, height = self._phone_screen_size(target)
+            tap_x = max(1, int(width * 0.5))
+            tap_y = max(1, int(height * 0.667))
+            self.runner.run(
+                [
+                    self.config.adb_bin,
+                    "-s",
+                    target,
+                    "shell",
+                    "input",
+                    "tap",
+                    str(tap_x),
+                    str(tap_y),
+                ],
+                check=False,
+            )
+        else:
+            tap_x, tap_y = center
+        self._emit_event(
+            "info",
+            "phone_schedule_post_opened",
+            "Tapped TikTok Schedule post at %s,%s." % (tap_x, tap_y),
+            device_serial=target,
+            tap_x=tap_x,
+            tap_y=tap_y,
+        )
+        return {
+            "address": target,
+            "tap_x": str(tap_x),
+            "tap_y": str(tap_y),
+            "message": "Tapped TikTok Schedule post.",
+        }
+
     def open_tiktok_upload(self, address: str = "") -> dict[str, str]:
         target = normalize_phone_address(address or self.connected_serial)
         self.runner.ensure_tool(self.config.adb_bin)
@@ -775,6 +1289,12 @@ class PhoneController:
         create_x, create_y = self._tap_tiktok_create_button(target)
         time.sleep(1.0)
         library_x, library_y = self._tap_tiktok_library_button(target)
+        time.sleep(1.0)
+        first_video_x, first_video_y = self._tap_tiktok_first_library_video(target)
+        time.sleep(1.0)
+        next_x, next_y = self._tap_tiktok_next_button(target)
+        time.sleep(1.2)
+        caption_x, caption_y = self._tap_tiktok_caption_field(target)
         return self._tiktok_upload_opened(
             target,
             opened_deeplink,
@@ -783,6 +1303,12 @@ class PhoneController:
             create_y,
             library_x,
             library_y,
+            first_video_x,
+            first_video_y,
+            next_x,
+            next_y,
+            caption_x,
+            caption_y,
         )
 
     def send_file_to_gallery(self, address: str, local_path: Path) -> dict[str, object]:
@@ -939,6 +1465,429 @@ class PhoneController:
         )
         return tap_x, tap_y
 
+    def _tap_tiktok_first_library_video(self, target: str) -> tuple[int, int]:
+        width, height = self._phone_screen_size(target)
+        tap_x = max(1, int(width / 6))
+        tap_y = max(1, int(height * 0.22))
+        self.runner.run(
+            [
+                self.config.adb_bin,
+                "-s",
+                target,
+                "shell",
+                "input",
+                "tap",
+                str(tap_x),
+                str(tap_y),
+            ],
+            check=False,
+        )
+        return tap_x, tap_y
+
+    def _tap_tiktok_next_button(self, target: str) -> tuple[int, int]:
+        text_match = self._tap_ui_text(target, ("Tiếp", "Next"))
+        if text_match is not None:
+            return text_match
+        width, height = self._phone_screen_size(target)
+        tap_x = max(1, int(width * 0.735))
+        tap_y = max(1, int(height * 0.954))
+        self.runner.run(
+            [
+                self.config.adb_bin,
+                "-s",
+                target,
+                "shell",
+                "input",
+                "tap",
+                str(tap_x),
+                str(tap_y),
+            ],
+            check=False,
+        )
+        return tap_x, tap_y
+
+    def _tap_tiktok_caption_field(self, target: str) -> tuple[int, int]:
+        xml_text = self._dump_ui_xml(target)
+        center = self._find_caption_field_center(xml_text)
+        if center is not None:
+            tap_x, tap_y = center
+        else:
+            width, height = self._phone_screen_size(target)
+            tap_x = max(1, int(width * 0.22))
+            tap_y = max(1, int(height * 0.185))
+        self.runner.run(
+            [
+                self.config.adb_bin,
+                "-s",
+                target,
+                "shell",
+                "input",
+                "tap",
+                str(tap_x),
+                str(tap_y),
+            ],
+            check=False,
+        )
+        return tap_x, tap_y
+
+    def _tap_ui_text(self, target: str, labels: tuple[str, ...]) -> tuple[int, int] | None:
+        xml_text = self._dump_ui_xml(target)
+        center = self._find_ui_text_center(xml_text, labels)
+        if center is None:
+            return None
+        tap_x, tap_y = center
+        self.runner.run(
+            [
+                self.config.adb_bin,
+                "-s",
+                target,
+                "shell",
+                "input",
+                "tap",
+                str(tap_x),
+                str(tap_y),
+            ],
+            check=False,
+        )
+        return tap_x, tap_y
+
+    def _find_ui_text_center(self, xml_text: str, labels: tuple[str, ...]) -> tuple[int, int] | None:
+        if not xml_text:
+            return None
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return None
+        wanted = {label.strip().casefold() for label in labels if label.strip()}
+        for node in root.iter("node"):
+            values = (
+                str(node.attrib.get("text") or "").strip(),
+                str(node.attrib.get("content-desc") or "").strip(),
+            )
+            if not any(value.casefold() in wanted for value in values if value):
+                continue
+            center = self._bounds_center(str(node.attrib.get("bounds") or ""))
+            if center is None:
+                continue
+            return center
+        return None
+
+    def _find_product_search_field_center(self, xml_text: str) -> tuple[int, int] | None:
+        match = self._find_product_search_field(xml_text)
+        if match is None:
+            return None
+        return match["center"]
+
+    def _find_product_search_field(self, xml_text: str) -> dict[str, object] | None:
+        if not xml_text:
+            return None
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return None
+        product_search_labels = (
+            "\u0054\u00ecm ki\u1ebfm s\u1ea3n ph\u1ea9m",
+            "search products",
+        )
+        wanted = tuple(label.casefold() for label in product_search_labels)
+        for node in root.iter("node"):
+            text = str(node.attrib.get("text") or "").strip()
+            desc = str(node.attrib.get("content-desc") or "").strip()
+            values = (text.casefold(), desc.casefold())
+            bounds = str(node.attrib.get("bounds") or "")
+            center = self._bounds_center(bounds)
+            if center is None:
+                continue
+            if any(label in value for value in values if value for label in wanted):
+                return {
+                    "center": center,
+                    "bounds": bounds,
+                    "text": text,
+                    "content_desc": desc,
+                    "class_name": str(node.attrib.get("class") or ""),
+                    "focused": str(node.attrib.get("focused") or ""),
+                }
+        return None
+
+    def _is_tiktok_shop_product_detail_screen(self, xml_text: str) -> bool:
+        if not xml_text:
+            return False
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return False
+        values = []
+        for node in root.iter("node"):
+            for attribute in ("text", "content-desc"):
+                value = str(node.attrib.get(attribute) or "").strip()
+                if value:
+                    values.append(value.casefold())
+        if not values:
+            return False
+        has_shop_tab = any(value == "cửa hàng" or value == "shop" for value in values)
+        has_chat_tab = any(value == "chat" or "bình luận" in value for value in values)
+        has_purchase_action = any(
+            marker in value
+            for value in values
+            for marker in (
+                "đặt trước",
+                "mua ngay",
+                "thêm vào giỏ hàng",
+                "add to cart",
+                "buy now",
+                "pre-order",
+                "preorder",
+            )
+        )
+        return has_shop_tab and has_chat_tab and has_purchase_action
+
+    def _find_sparse_center_dialog_add_button(self, xml_text: str) -> tuple[int, int] | None:
+        if not xml_text:
+            return None
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return None
+        nodes = list(root.iter("node"))
+        visible_text = [
+            value
+            for node in nodes
+            for value in (
+                str(node.attrib.get("text") or "").strip(),
+                str(node.attrib.get("content-desc") or "").strip(),
+            )
+            if value
+        ]
+        if len(nodes) > 20 or visible_text:
+            return None
+        screen_bounds = self._bounds_rect(str(next(root.iter("node")).attrib.get("bounds") or ""))
+        if screen_bounds is None:
+            return None
+        screen_left, screen_top, screen_right, screen_bottom = screen_bounds
+        screen_width = max(1, screen_right - screen_left)
+        screen_height = max(1, screen_bottom - screen_top)
+        for node in nodes:
+            bounds = self._bounds_rect(str(node.attrib.get("bounds") or ""))
+            if bounds is None:
+                continue
+            left, top, right, bottom = bounds
+            width = right - left
+            height = bottom - top
+            center_x = (left + right) // 2
+            center_y = (top + bottom) // 2
+            if not (screen_width * 0.45 <= width <= screen_width * 0.9):
+                continue
+            if not (80 <= height <= 360):
+                continue
+            if abs(center_x - (screen_width // 2)) > screen_width * 0.15:
+                continue
+            if not (screen_height * 0.25 <= center_y <= screen_height * 0.75):
+                continue
+            tap_x = left + int(width * 0.78)
+            tap_y = top + int(height * 0.74)
+            return tap_x, tap_y
+        return None
+
+    def _find_product_name_input(self, xml_text: str) -> tuple[str, tuple[int, int]] | None:
+        if not xml_text:
+            return None
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return None
+        for node in root.iter("node"):
+            desc = str(node.attrib.get("content-desc") or "")
+            class_name = str(node.attrib.get("class") or "")
+            if "edit_anchor_name_input" not in desc and not (
+                class_name.endswith("EditText") and "anchor" in desc
+            ):
+                continue
+            center = self._bounds_center(str(node.attrib.get("bounds") or ""))
+            if center is None:
+                continue
+            return str(node.attrib.get("text") or ""), center
+        return None
+
+    def _has_disabled_anchor_add_button(self, xml_text: str) -> bool:
+        if not xml_text:
+            return False
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return False
+        for node in root.iter("node"):
+            desc = str(node.attrib.get("content-desc") or "").casefold()
+            if "edit_anchor_add_button" in desc and "disabled" in desc:
+                return True
+        return False
+
+    def _find_anchor_add_button_center(self, xml_text: str, *, require_enabled: bool = False) -> tuple[int, int] | None:
+        if not xml_text:
+            return None
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return None
+        for node in root.iter("node"):
+            desc = str(node.attrib.get("content-desc") or "").casefold()
+            if "edit_anchor_add_button" not in desc:
+                continue
+            if require_enabled and "disabled" in desc:
+                return None
+            center = self._bounds_center(str(node.attrib.get("bounds") or ""))
+            if center is not None:
+                return center
+        return None
+
+    def _find_caption_field_center(self, xml_text: str) -> tuple[int, int] | None:
+        if not xml_text:
+            return None
+        try:
+            root = ET.fromstring(xml_text)
+        except ET.ParseError:
+            return None
+        for node in root.iter("node"):
+            text = str(node.attrib.get("text") or "").strip().casefold()
+            class_name = str(node.attrib.get("class") or "")
+            if class_name.endswith("EditText") and ("mô tả" in text or "description" in text):
+                center = self._bounds_center(str(node.attrib.get("bounds") or ""))
+                if center is not None:
+                    return center
+        for node in root.iter("node"):
+            text = str(node.attrib.get("text") or "").strip().casefold()
+            if "mô tả" in text or "description" in text:
+                center = self._bounds_center(str(node.attrib.get("bounds") or ""))
+                if center is not None:
+                    return center
+        return None
+
+    def _dump_ui_xml(self, target: str) -> str:
+        remote_path = "/sdcard/tiktok_tool_window.xml"
+        dump_result = self.runner.run(
+            [self.config.adb_bin, "-s", target, "shell", "uiautomator", "dump", remote_path],
+            check=False,
+        )
+        dump_output = "%s\n%s" % (str(dump_result.stdout or ""), str(dump_result.stderr or ""))
+        if "ERROR:" in dump_output and "dumped to" not in dump_output.casefold():
+            return ""
+        completed = self.runner.run(
+            [self.config.adb_bin, "-s", target, "shell", "cat", remote_path],
+            check=False,
+        )
+        return str(completed.stdout or "")
+
+    def _bounds_center(self, bounds: str) -> tuple[int, int] | None:
+        rect = self._bounds_rect(bounds)
+        if rect is None:
+            return None
+        left, top, right, bottom = rect
+        return (left + right) // 2, (top + bottom) // 2
+
+    def _bounds_rect(self, bounds: str) -> tuple[int, int, int, int] | None:
+        match = re.search(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds)
+        if not match:
+            return None
+        return tuple(int(value) for value in match.groups())
+
+    def _set_windows_clipboard_text(self, text: str) -> None:
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalUnlock.restype = wintypes.BOOL
+        kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalFree.restype = ctypes.c_void_p
+        user32.SetClipboardData.argtypes = [wintypes.UINT, ctypes.c_void_p]
+        user32.SetClipboardData.restype = ctypes.c_void_p
+
+        data = (text + "\0").encode("utf-16le")
+        handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+        if not handle:
+            raise RuntimeError("Could not allocate Windows clipboard memory.")
+        locked = kernel32.GlobalLock(handle)
+        if not locked:
+            kernel32.GlobalFree(handle)
+            raise RuntimeError("Could not lock Windows clipboard memory.")
+        try:
+            ctypes.memmove(locked, data, len(data))
+        finally:
+            kernel32.GlobalUnlock(handle)
+
+        if not user32.OpenClipboard(None):
+            kernel32.GlobalFree(handle)
+            raise RuntimeError("Could not open Windows clipboard.")
+        try:
+            if not user32.EmptyClipboard():
+                raise RuntimeError("Could not clear Windows clipboard.")
+            if not user32.SetClipboardData(CF_UNICODETEXT, handle):
+                raise RuntimeError("Could not set Windows clipboard text.")
+            handle = None
+        finally:
+            user32.CloseClipboard()
+            if handle:
+                kernel32.GlobalFree(handle)
+
+    def _send_scrcpy_paste_shortcut(self) -> None:
+        user32 = ctypes.windll.user32
+        user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+        user32.MapVirtualKeyW.restype = wintypes.UINT
+        hwnd = WindowsScrcpyDock._find_process_window(self.process, require_title=False) if self.process else 0
+        if not hwnd:
+            hwnd = user32.FindWindowW(None, SCRCPY_WINDOW_TITLE)
+        if not hwnd:
+            raise RuntimeError("Could not find the scrcpy window.")
+        rctrl_scan = user32.MapVirtualKeyW(VK_RCONTROL, MAPVK_VK_TO_VSC)
+        v_scan = user32.MapVirtualKeyW(VK_V, MAPVK_VK_TO_VSC)
+        for _attempt in range(3):
+            user32.ShowWindow(hwnd, 9)
+            user32.SetForegroundWindow(hwnd)
+            time.sleep(0.2)
+            if user32.GetForegroundWindow() == hwnd:
+                break
+        if user32.GetForegroundWindow() != hwnd:
+            self._post_scrcpy_paste_shortcut(hwnd, rctrl_scan, v_scan)
+            return
+        user32.keybd_event(VK_RCONTROL, rctrl_scan, KEYEVENTF_EXTENDEDKEY, 0)
+        time.sleep(0.03)
+        user32.keybd_event(VK_V, v_scan, 0, 0)
+        time.sleep(0.03)
+        user32.keybd_event(VK_V, v_scan, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.03)
+        user32.keybd_event(VK_RCONTROL, rctrl_scan, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
+
+    def _post_scrcpy_paste_shortcut(self, hwnd: int, rctrl_scan: int, v_scan: int) -> None:
+        user32 = ctypes.windll.user32
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        user32.PostMessageW.restype = wintypes.BOOL
+
+        def lparam(scan_code: int, *, extended: bool = False, keyup: bool = False) -> int:
+            value = 1 | (int(scan_code or 0) << 16)
+            if extended:
+                value |= 1 << 24
+            if keyup:
+                value |= (1 << 30) | (1 << 31)
+            return value
+
+        messages = (
+            (WM_KEYDOWN, VK_RCONTROL, lparam(rctrl_scan, extended=True)),
+            (WM_KEYDOWN, VK_V, lparam(v_scan)),
+            (WM_KEYUP, VK_V, lparam(v_scan, keyup=True)),
+            (WM_KEYUP, VK_RCONTROL, lparam(rctrl_scan, extended=True, keyup=True)),
+        )
+        for message, virtual_key, params in messages:
+            if not user32.PostMessageW(hwnd, message, virtual_key, params):
+                raise RuntimeError("Could not send paste shortcut to the scrcpy window.")
+            time.sleep(0.03)
+
+    def _send_android_keyevent(self, target: str, keycode: str) -> None:
+        self.runner.run(
+            [self.config.adb_bin, "-s", target, "shell", "input", "keyevent", keycode],
+            check=False,
+        )
+
     def _phone_screen_size(self, target: str) -> tuple[int, int]:
         completed = self.runner.run(
             [self.config.adb_bin, "-s", target, "shell", "wm", "size"],
@@ -958,8 +1907,14 @@ class PhoneController:
         create_y: int,
         library_x: int,
         library_y: int,
+        first_video_x: int,
+        first_video_y: int,
+        next_x: int,
+        next_y: int,
+        caption_x: int,
+        caption_y: int,
     ) -> dict[str, str]:
-        message = "Opened TikTok and tapped Library at %s,%s." % (library_x, library_y)
+        message = "Opened publish screen and focused caption at %s,%s." % (caption_x, caption_y)
         self._emit_event(
             "info",
             "phone_tiktok_upload_opened",
@@ -971,6 +1926,12 @@ class PhoneController:
             create_y=create_y,
             library_x=library_x,
             library_y=library_y,
+            first_video_x=first_video_x,
+            first_video_y=first_video_y,
+            next_x=next_x,
+            next_y=next_y,
+            caption_x=caption_x,
+            caption_y=caption_y,
         )
         return {
             "address": target,
@@ -980,6 +1941,12 @@ class PhoneController:
             "create_y": str(create_y),
             "library_x": str(library_x),
             "library_y": str(library_y),
+            "first_video_x": str(first_video_x),
+            "first_video_y": str(first_video_y),
+            "next_x": str(next_x),
+            "next_y": str(next_y),
+            "caption_x": str(caption_x),
+            "caption_y": str(caption_y),
             "message": message,
         }
 

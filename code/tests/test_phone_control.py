@@ -244,6 +244,26 @@ class PhoneControlTests(unittest.TestCase):
                 CompletedProcessStub(),
                 CompletedProcessStub(stdout="Physical size: 1080x2400\n"),
                 CompletedProcessStub(),
+                CompletedProcessStub(stdout="Physical size: 1080x2400\n"),
+                CompletedProcessStub(),
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='Tiếp' content-desc='' "
+                        "bounds='[751,2298][841,2353]' /></hierarchy>"
+                    ),
+                ),
+                CompletedProcessStub(),
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='Thêm mô tả...' class='android.widget.EditText' "
+                        "bounds='[44,244][654,670]' /></hierarchy>"
+                    ),
+                ),
+                CompletedProcessStub(),
             ]
         )
         events = []
@@ -259,7 +279,15 @@ class PhoneControlTests(unittest.TestCase):
             result = controller.open_tiktok_upload()
 
         self.assertEqual(runner.tools, ["adb"])
-        sleep.assert_has_calls([mock.call(1.2), mock.call(1.0)])
+        sleep.assert_has_calls(
+            [
+                mock.call(1.2),
+                mock.call(1.0),
+                mock.call(1.0),
+                mock.call(1.0),
+                mock.call(1.2),
+            ]
+        )
         self.assertEqual(result["deeplink"], TIKTOK_UPLOAD_DEEPLINKS[0])
         self.assertEqual(result["package_name"], "com.ss.android.ugc.trill")
         self.assertEqual(
@@ -293,7 +321,7 @@ class PhoneControlTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            runner.commands[-1],
+            runner.commands[5],
             [
                 "adb",
                 "-s",
@@ -305,7 +333,657 @@ class PhoneControlTests(unittest.TestCase):
                 "2191",
             ],
         )
+        self.assertEqual(
+            runner.commands[7],
+            [
+                "adb",
+                "-s",
+                "192.168.1.20:5555",
+                "shell",
+                "input",
+                "tap",
+                "180",
+                "528",
+            ],
+        )
+        self.assertEqual(
+            runner.commands[10],
+            [
+                "adb",
+                "-s",
+                "192.168.1.20:5555",
+                "shell",
+                "input",
+                "tap",
+                "796",
+                "2325",
+            ],
+        )
+        self.assertEqual(
+            runner.commands[-1],
+            [
+                "adb",
+                "-s",
+                "192.168.1.20:5555",
+                "shell",
+                "input",
+                "tap",
+                "349",
+                "457",
+            ],
+        )
         self.assertEqual(events[-1]["action"], "phone_tiktok_upload_opened")
+
+    def test_paste_text_with_scrcpy_sets_clipboard_and_sends_shortcut(self):
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=RunnerStub(),
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+        controller.process = ProcessStub()
+
+        with mock.patch.object(controller, "_set_windows_clipboard_text") as set_clipboard, mock.patch.object(
+            controller,
+            "_send_scrcpy_paste_shortcut",
+        ) as send_shortcut:
+            result = controller.paste_text_with_scrcpy("Mô tả\n#hashtag")
+
+        set_clipboard.assert_called_once_with("Mô tả\n#hashtag")
+        send_shortcut.assert_called_once_with()
+        self.assertTrue(result["pasted"])
+        self.assertEqual(events[-1]["action"], "phone_text_pasted")
+
+    def test_press_space_and_close_keyboard_sends_space_then_back(self):
+        runner = RunnerStub()
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep") as sleep:
+            result = controller.press_space_and_close_keyboard("192.168.1.20:5555")
+
+        self.assertEqual(runner.tools, ["adb"])
+        self.assertEqual(
+            runner.commands,
+            [
+                ["adb", "-s", "192.168.1.20:5555", "shell", "input", "keyevent", "62"],
+                ["adb", "-s", "192.168.1.20:5555", "shell", "input", "keyevent", "4"],
+            ],
+        )
+        sleep.assert_called_once_with(0.15)
+        self.assertEqual(result["address"], "192.168.1.20:5555")
+        self.assertEqual(events[-1]["action"], "phone_keyboard_closed")
+
+    def test_tap_tiktok_add_link_uses_ui_text(self):
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='' content-desc='Thêm liên kết' "
+                        "bounds='[0,1122][1080,1268]' /></hierarchy>"
+                    ),
+                ),
+                CompletedProcessStub(),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep") as sleep:
+            result = controller.tap_tiktok_add_link("192.168.1.20:5555")
+
+        self.assertEqual(runner.tools, ["adb"])
+        sleep.assert_called_once_with(0.4)
+        self.assertEqual(
+            runner.commands[-1],
+            [
+                "adb",
+                "-s",
+                "192.168.1.20:5555",
+                "shell",
+                "input",
+                "tap",
+                "540",
+                "1195",
+            ],
+        )
+        self.assertEqual(result["tap_x"], "540")
+        self.assertEqual(result["tap_y"], "1195")
+        self.assertEqual(events[-1]["action"], "phone_add_link_opened")
+
+    def test_tap_tiktok_product_link_uses_ui_text(self):
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='Sản phẩm' content-desc='' "
+                        "bounds='[154,2027][1036,2079]' /></hierarchy>"
+                    ),
+                ),
+                CompletedProcessStub(),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep") as sleep:
+            result = controller.tap_tiktok_product_link("192.168.1.20:5555")
+
+        self.assertEqual(runner.tools, ["adb"])
+        sleep.assert_called_once_with(0.5)
+        self.assertEqual(
+            runner.commands[-1],
+            [
+                "adb",
+                "-s",
+                "192.168.1.20:5555",
+                "shell",
+                "input",
+                "tap",
+                "595",
+                "2053",
+            ],
+        )
+        self.assertEqual(result["tap_x"], "595")
+        self.assertEqual(result["tap_y"], "2053")
+        self.assertEqual(events[-1]["action"], "phone_product_link_opened")
+
+    def test_tap_tiktok_product_search_field_uses_product_search_text_center(self):
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='Tìm kiếm sản phẩm' content-desc='' "
+                        "bounds='[60,260][1020,370]' /></hierarchy>"
+                    ),
+                ),
+                CompletedProcessStub(),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep") as sleep:
+            result = controller.tap_tiktok_product_search_field("192.168.1.20:5555")
+
+        self.assertEqual(runner.tools, ["adb"])
+        sleep.assert_has_calls([mock.call(1.0), mock.call(0.4)])
+        self.assertEqual(
+            runner.commands[-1],
+            [
+                "adb",
+                "-s",
+                "192.168.1.20:5555",
+                "shell",
+                "input",
+                "tap",
+                "540",
+                "315",
+            ],
+        )
+        self.assertEqual(result["tap_x"], "540")
+        self.assertEqual(result["tap_y"], "315")
+        self.assertEqual(result["bounds"], "[60,260][1020,370]")
+        self.assertIn("T", result["text"])
+        self.assertEqual(events[-1]["action"], "phone_product_search_focused")
+        self.assertEqual(events[-1]["bounds"], "[60,260][1020,370]")
+
+    def test_tap_tiktok_product_search_field_ignores_generic_search_until_product_search_text(self):
+        generic_search_xml = (
+            "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+            "<hierarchy><node text='' content-desc='Tìm kiếm' bounds='[189,139][233,183]' /></hierarchy>"
+        )
+        search_xml = (
+            "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+            "<hierarchy><node text='Tìm kiếm sản phẩm' content-desc='' "
+            "bounds='[60,260][1020,370]' /></hierarchy>"
+        )
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(stdout=generic_search_xml),
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(stdout=search_xml),
+                CompletedProcessStub(),
+            ]
+        )
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep"):
+            result = controller.tap_tiktok_product_search_field("192.168.1.20:5555")
+
+        self.assertEqual(
+            runner.commands[-1],
+            ["adb", "-s", "192.168.1.20:5555", "shell", "input", "tap", "540", "315"],
+        )
+        self.assertEqual(result["tap_x"], "540")
+        self.assertEqual(result["tap_y"], "315")
+
+    def test_search_tiktok_product_id_pastes_id_and_presses_enter(self):
+        product_id = "1730667245645826792"
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='1730667245645826792' content-desc='' "
+                        "bounds='[100,100][600,180]' /></hierarchy>"
+                    ),
+                ),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+        controller.process = ProcessStub()
+
+        with mock.patch.object(controller, "_set_windows_clipboard_text") as set_clipboard, mock.patch.object(
+            controller,
+            "_send_scrcpy_paste_shortcut",
+        ) as send_shortcut, mock.patch("auto_tiktok_editor.phone_control.time.sleep") as sleep:
+            result = controller.search_tiktok_product_id("192.168.1.20:5555", " %s " % product_id)
+
+        self.assertEqual(runner.tools, ["adb"])
+        set_clipboard.assert_called_once_with(product_id)
+        send_shortcut.assert_called_once_with()
+        sleep.assert_has_calls([mock.call(0.5), mock.call(1.0)])
+        self.assertEqual(
+            runner.commands,
+            [
+                ["adb", "-s", "192.168.1.20:5555", "shell", "uiautomator", "dump", "/sdcard/tiktok_tool_window.xml"],
+                ["adb", "-s", "192.168.1.20:5555", "shell", "cat", "/sdcard/tiktok_tool_window.xml"],
+                ["adb", "-s", "192.168.1.20:5555", "shell", "input", "keyevent", "66"],
+            ],
+        )
+        self.assertEqual(result["product_id"], product_id)
+        self.assertEqual(events[-1]["action"], "phone_product_id_searched")
+
+    def test_search_tiktok_product_id_refocuses_when_paste_does_not_land(self):
+        product_id = "1730667245645826792"
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(stdout="<hierarchy></hierarchy>"),
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='Tìm kiếm sản phẩm' content-desc='' "
+                        "bounds='[60,260][1020,370]' /></hierarchy>"
+                    ),
+                ),
+                CompletedProcessStub(),
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='1730667245645826792' content-desc='' "
+                        "bounds='[100,100][600,180]' /></hierarchy>"
+                    ),
+                ),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+        controller.process = ProcessStub()
+
+        with mock.patch.object(controller, "_set_windows_clipboard_text") as set_clipboard, mock.patch.object(
+            controller,
+            "_send_scrcpy_paste_shortcut",
+        ) as send_shortcut, mock.patch("auto_tiktok_editor.phone_control.time.sleep"):
+            result = controller.search_tiktok_product_id("192.168.1.20:5555", product_id)
+
+        self.assertEqual(set_clipboard.call_count, 2)
+        self.assertEqual(send_shortcut.call_count, 2)
+        self.assertEqual(result["product_id"], product_id)
+        self.assertIn(
+            ["adb", "-s", "192.168.1.20:5555", "shell", "input", "tap", "540", "315"],
+            runner.commands,
+        )
+        self.assertEqual(runner.commands[-1], ["adb", "-s", "192.168.1.20:5555", "shell", "input", "keyevent", "66"])
+        self.assertEqual(events[-1]["action"], "phone_product_id_searched")
+
+    def test_tap_tiktok_product_add_button_uses_add_button_desc(self):
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='' content-desc='button_add_product' "
+                        "bounds='[728,573][1036,661]' /></hierarchy>"
+                    ),
+                ),
+                CompletedProcessStub(),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep") as sleep:
+            result = controller.tap_tiktok_product_add_button("192.168.1.20:5555")
+
+        self.assertEqual(runner.tools, ["adb"])
+        sleep.assert_called_once_with(1.0)
+        self.assertEqual(
+            runner.commands[-1],
+            [
+                "adb",
+                "-s",
+                "192.168.1.20:5555",
+                "shell",
+                "input",
+                "tap",
+                "882",
+                "617",
+            ],
+        )
+        self.assertEqual(result["tap_x"], "882")
+        self.assertEqual(result["tap_y"], "617")
+        self.assertEqual(events[-1]["action"], "phone_product_add_tapped")
+
+    def test_tap_optional_tiktok_add_popup_uses_sparse_dialog(self):
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='' content-desc='' bounds='[0,0][1080,2416]'>"
+                        "<node text='' content-desc='' bounds='[0,0][1080,2416]' clickable='true' />"
+                        "<node text='' content-desc='' bounds='[155,1008][925,1164]' "
+                        "class='android.widget.ScrollView' focusable='true' />"
+                        "</node></hierarchy>"
+                    ),
+                ),
+                CompletedProcessStub(),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep") as sleep:
+            result = controller.tap_optional_tiktok_add_popup("192.168.1.20:5555")
+
+        self.assertEqual(runner.tools, ["adb"])
+        sleep.assert_called_once_with(0.6)
+        self.assertEqual(
+            runner.commands[-1],
+            [
+                "adb",
+                "-s",
+                "192.168.1.20:5555",
+                "shell",
+                "input",
+                "tap",
+                "755",
+                "1123",
+            ],
+        )
+        self.assertTrue(result["tapped"])
+        self.assertEqual(result["source"], "dialog")
+        self.assertEqual(events[-1]["action"], "phone_optional_add_popup_tapped")
+
+    def test_tap_optional_tiktok_add_popup_skips_when_absent(self):
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='' content-desc='' bounds='[0,0][1080,2416]'>"
+                        "<node text='Product attached' content-desc='' bounds='[44,300][1036,360]' />"
+                        "</node></hierarchy>"
+                    ),
+                ),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep"):
+            result = controller.tap_optional_tiktok_add_popup("192.168.1.20:5555")
+
+        self.assertEqual(len(runner.commands), 2)
+        self.assertFalse(result["tapped"])
+        self.assertEqual(events, [])
+
+    def test_replace_invalid_tiktok_product_name_replaces_disabled_anchor_name(self):
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='' content-desc='' bounds='[0,0][1080,2416]'>"
+                        "<node text='[MUA 3 GIAM 50%] Gel Nha Dam D' "
+                        "content-desc='edit_anchor_name_input' class='android.widget.EditText' "
+                        "bounds='[44,914][1011,963]' />"
+                        "<node text='' content-desc=' disabled,edit_anchor_add_button' "
+                        "bounds='[44,2240][1036,2372]' />"
+                        "</node></hierarchy>"
+                    ),
+                ),
+                CompletedProcessStub(),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+        controller.process = ProcessStub()
+
+        with mock.patch.object(controller, "paste_text_with_scrcpy") as paste, mock.patch(
+            "auto_tiktok_editor.phone_control.time.sleep"
+        ):
+            result = controller.replace_invalid_tiktok_product_name("192.168.1.20:5555")
+
+        self.assertTrue(result["replaced"])
+        paste.assert_called_once_with("Mua ở đây")
+        self.assertEqual(
+            runner.commands[2],
+            ["adb", "-s", "192.168.1.20:5555", "shell", "input", "tap", "527", "938"],
+        )
+        self.assertEqual(
+            runner.commands[3],
+            ["adb", "-s", "192.168.1.20:5555", "shell", "input", "keyevent", "123"],
+        )
+        self.assertEqual(runner.commands[-2], ["adb", "-s", "192.168.1.20:5555", "shell", "input", "keyevent", "67"])
+        self.assertEqual(runner.commands[-1], ["adb", "-s", "192.168.1.20:5555", "shell", "input", "keyevent", "4"])
+        self.assertEqual(events[-1]["action"], "phone_product_name_replaced")
+
+    def test_replace_invalid_tiktok_product_name_skips_when_screen_absent(self):
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='' content-desc='' bounds='[0,0][1080,2416]' /></hierarchy>"
+                    ),
+                ),
+            ]
+        )
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+        )
+
+        with mock.patch.object(controller, "paste_text_with_scrcpy") as paste, mock.patch(
+            "auto_tiktok_editor.phone_control.time.sleep"
+        ):
+            result = controller.replace_invalid_tiktok_product_name("192.168.1.20:5555")
+
+        self.assertFalse(result["replaced"])
+        paste.assert_not_called()
+        self.assertEqual(
+            runner.commands[-1],
+            ["adb", "-s", "192.168.1.20:5555", "shell", "input", "keyevent", "4"],
+        )
+
+    def test_tap_tiktok_anchor_final_add_button_uses_enabled_anchor_button(self):
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='' content-desc='' bounds='[0,0][1080,2416]'>"
+                        "<node text='' content-desc=' edit_anchor_add_button' "
+                        "bounds='[44,2240][1036,2372]' />"
+                        "</node></hierarchy>"
+                    ),
+                ),
+                CompletedProcessStub(),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep") as sleep:
+            result = controller.tap_tiktok_anchor_final_add_button("192.168.1.20:5555")
+
+        sleep.assert_called_once_with(0.5)
+        self.assertEqual(
+            runner.commands[-1],
+            ["adb", "-s", "192.168.1.20:5555", "shell", "input", "tap", "540", "2306"],
+        )
+        self.assertEqual(result["tap_x"], "540")
+        self.assertEqual(result["tap_y"], "2306")
+        self.assertEqual(events[-1]["action"], "phone_anchor_final_add_tapped")
+
+    def test_tap_tiktok_more_options_uses_ui_text(self):
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='Tùy chọn khác' content-desc='' "
+                        "bounds='[121,1560][406,1612]' /></hierarchy>"
+                    ),
+                ),
+                CompletedProcessStub(),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep") as sleep:
+            result = controller.tap_tiktok_more_options("192.168.1.20:5555")
+
+        sleep.assert_called_once_with(0.7)
+        self.assertEqual(
+            runner.commands[-1],
+            ["adb", "-s", "192.168.1.20:5555", "shell", "input", "tap", "263", "1586"],
+        )
+        self.assertEqual(result["tap_x"], "263")
+        self.assertEqual(result["tap_y"], "1586")
+        self.assertEqual(events[-1]["action"], "phone_more_options_opened")
+
+    def test_tap_tiktok_schedule_post_uses_ui_text(self):
+        runner = RunnerStub(
+            responses=[
+                CompletedProcessStub(stdout="UI hierarchy dumped to: /sdcard/tiktok_tool_window.xml\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>"
+                        "<hierarchy><node text='Lên lịch đăng' content-desc='' "
+                        "bounds='[121,1613][384,1665]' /></hierarchy>"
+                    ),
+                ),
+                CompletedProcessStub(),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep") as sleep:
+            result = controller.tap_tiktok_schedule_post("192.168.1.20:5555")
+
+        sleep.assert_called_once_with(0.7)
+        self.assertEqual(
+            runner.commands[-1],
+            ["adb", "-s", "192.168.1.20:5555", "shell", "input", "tap", "252", "1639"],
+        )
+        self.assertEqual(result["tap_x"], "252")
+        self.assertEqual(result["tap_y"], "1639")
+        self.assertEqual(events[-1]["action"], "phone_schedule_post_opened")
 
     def test_capture_screenshot_saves_png_and_emits_event(self):
         temp_dir = tempfile.TemporaryDirectory()
