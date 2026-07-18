@@ -14,7 +14,7 @@ from auto_tiktok_editor.media.normalize import MediaNormalizer
 from auto_tiktok_editor.media.overlay import OverlayPlanner
 from auto_tiktok_editor.media.probe import MediaProbe
 from auto_tiktok_editor.media.product_image import ProductImagePreprocessor
-from auto_tiktok_editor.media.render import FinalCompositor, RoughCutRenderer
+from auto_tiktok_editor.media.render import BackgroundRemovalCompositor, FinalCompositor, RoughCutRenderer
 from auto_tiktok_editor.media.scenes import SceneDetector
 from auto_tiktok_editor.media.speed import SpeedProcessor
 from auto_tiktok_editor.utils.command import CommandRunner
@@ -37,6 +37,7 @@ class PipelineServices:
     rough_cut_renderer: object
     audio_finisher: object
     final_compositor: object
+    background_removal_compositor: object
     artifact_exporter: object
     device_transfer: object
 
@@ -59,6 +60,7 @@ def build_default_services(config: PipelineConfig) -> PipelineServices:
         rough_cut_renderer=RoughCutRenderer(config, runner, probe),
         audio_finisher=AudioFinisher(config, runner),
         final_compositor=FinalCompositor(config, runner),
+        background_removal_compositor=BackgroundRemovalCompositor(config, runner),
         artifact_exporter=ArtifactExporter(),
         device_transfer=AndroidDeviceTransfer(config, runner, logger=logger),
     )

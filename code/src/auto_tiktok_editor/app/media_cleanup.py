@@ -81,7 +81,7 @@ def cleanup_media_storage(
                 report.deleted_files += 1
             except OSError as exc:
                 report.errors.append("%s: %s" % (file_path, exc))
-        report.deleted_directories += _remove_empty_directories(root, report.errors)
+        report.deleted_directories += _remove_empty_directories(root, report.errors, cutoff_timestamp)
     return report
 
 
@@ -226,9 +226,23 @@ def _tree_stats(root: Path) -> tuple[int, int, int]:
     return files, directories, bytes_count
 
 
-def _remove_empty_directories(root: Path, errors: List[str]) -> int:
+def _remove_empty_directories(root: Path, errors: List[str], cutoff_timestamp: Optional[float] = None) -> int:
     removed = 0
-    directories = [path for path in root.rglob("*") if path.is_dir()]
+    directories = []
+    try:
+        candidates = root.rglob("*")
+        for path in candidates:
+            try:
+                if not path.is_dir():
+                    continue
+                if cutoff_timestamp is not None and path.stat().st_mtime > cutoff_timestamp:
+                    continue
+                directories.append(path)
+            except OSError as exc:
+                errors.append("%s: %s" % (path, exc))
+    except OSError as exc:
+        errors.append("%s: %s" % (root, exc))
+        return removed
     directories.sort(key=lambda current: len(current.parts), reverse=True)
     for directory in directories:
         try:

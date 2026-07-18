@@ -8,8 +8,10 @@ from dataclasses import dataclass
 LOGIN_TYPES = ("google", "facebook", "email", "phone")
 ACCOUNT_STATUSES = ("live", "need_login", "checkpoint", "no_shop", "error", "paused")
 VIDEO_STATUSES = (
+    "draft",
     "ready",
     "queued",
+    "rendering",
     "file_selected",
     "prepared",
     "posted",
@@ -20,6 +22,7 @@ VIDEO_STATUSES = (
     "paused",
 )
 PUBLISH_MODES = ("now", "scheduled")
+VIDEO_CUT_MODES = ("fixed", "scene", "original", "remove_background")
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,7 @@ class TikTokAccount:
     profile_path: str
     status: str
     note: str
+    cut_mode: str
     created_at: str
     updated_at: str
 
@@ -60,6 +64,9 @@ class TikTokVideo:
     source: str
     status: str
     note: str
+    cut_mode: str
+    source_video_url: str
+    product_image_path: str
     created_at: str
     updated_at: str
 

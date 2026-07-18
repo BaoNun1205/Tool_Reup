@@ -119,13 +119,15 @@ class ItemPipelineRunner(object):
             metadata["audio_extracted_before_shuffle"] = True
 
             rough_cut = None
-            if self._uses_original_video_mode():
-                metadata["video_cut_mode"] = "original"
+            if self._uses_uncut_video_mode():
+                metadata["video_cut_mode"] = self._video_cut_mode()
                 metadata["cut_and_shuffle_skipped"] = True
                 metadata["scene_detected_count"] = 1
                 metadata["scene_kept_count"] = 1
                 metadata["scene_dropped_count"] = 0
                 metadata["scene_drop_reasons"] = []
+                if self._uses_background_removal_mode():
+                    metadata["background_removal_enabled"] = True
             else:
                 self._transition(recorder, session_id, validated_item, "detecting_scenes", event_callback)
                 raw_scenes, black_ranges, detection_warnings = self.services.scene_detector.detect(processed_master)
@@ -161,11 +163,16 @@ class ItemPipelineRunner(object):
             metadata["product_image_original_path"] = str(validated.image_info.path)
             metadata["product_image_prepared_path"] = str(product_image.image_info.path)
             metadata["product_image_cropped_path"] = str(product_image.cropped_path)
+            metadata["product_image_background_crop_ratio"] = (
+                "1:1"
+                if self._uses_background_removal_mode()
+                else getattr(self.config, "product_image_crop_ratio", "1:1")
+            )
             metadata["product_image_enhanced"] = product_image.enhanced
 
             self._transition(recorder, session_id, validated_item, "rendering_final", event_callback)
             if rough_cut is None:
-                if self._uses_original_video_mode():
+                if self._uses_uncut_video_mode():
                     rough_cut = RoughCutAsset(path=processed_master.path, info=processed_master.info, clip_paths=[])
                 else:
                     rough_cut = self.services.rough_cut_renderer.render(
@@ -174,15 +181,6 @@ class ItemPipelineRunner(object):
                         workspace.clips_dir,
                         workspace.output_dir / "rough_cut.mp4",
                     )
-            overlay_spec = self.services.overlay_planner.plan(
-                product_image.image_info,
-                validated.job_spec.overlay_alpha_ratio,
-            )
-            self._record_warnings(recorder, session_id, validated_item, overlay_spec.warnings, event_callback)
-            metadata["overlay_mode_used"] = overlay_spec.mode
-            metadata["overlay_alpha_ratio_used"] = overlay_spec.separator_max_alpha_ratio
-            metadata["overlay_fade_ratio_used"] = overlay_spec.separator_fade_ratio
-
             final_audio = self.services.audio_finisher.finish(
                 prepared_audio,
                 rough_cut.info.duration_seconds,
@@ -191,12 +189,48 @@ class ItemPipelineRunner(object):
             self._record_warnings(recorder, session_id, validated_item, final_audio.warnings, event_callback)
             final_audio_path = final_audio.path
 
-            final_video_path = self.services.final_compositor.compose(
-                rough_cut,
-                final_audio,
-                overlay_spec,
-                workspace.output_dir / "final_video.mp4",
-            )
+            if self._uses_background_removal_mode():
+                metadata["overlay_mode_used"] = "remove_background_product_cover"
+                metadata["background_removal_backend"] = getattr(self.config, "background_removal_backend", "rembg")
+                metadata["background_removal_model"] = (
+                    getattr(self.config, "rembg_model", "isnet-general-use")
+                    if metadata["background_removal_backend"] == "rembg"
+                    else getattr(self.config, "backgroundremover_model", "u2netp")
+                )
+                metadata["background_removal_providers"] = list(
+                    getattr(self.config, "rembg_providers", ("DmlExecutionProvider", "CPUExecutionProvider"))
+                )
+                metadata["background_removal_post_process_mask"] = bool(
+                    getattr(self.config, "rembg_post_process_mask", False)
+                )
+                metadata["background_removal_mask_expand_pixels"] = int(
+                    getattr(self.config, "rembg_mask_expand_pixels", 3) or 0
+                )
+                metadata["background_image_cover_size"] = "%sx%s" % (
+                    self.config.target_width,
+                    self.config.target_height,
+                )
+                final_video_path = self.services.background_removal_compositor.compose(
+                    rough_cut,
+                    final_audio,
+                    product_image.image_info.path,
+                    workspace.output_dir / "final_video.mp4",
+                )
+            else:
+                overlay_spec = self.services.overlay_planner.plan(
+                    product_image.image_info,
+                    validated.job_spec.overlay_alpha_ratio,
+                )
+                self._record_warnings(recorder, session_id, validated_item, overlay_spec.warnings, event_callback)
+                metadata["overlay_mode_used"] = overlay_spec.mode
+                metadata["overlay_alpha_ratio_used"] = overlay_spec.separator_max_alpha_ratio
+                metadata["overlay_fade_ratio_used"] = overlay_spec.separator_fade_ratio
+                final_video_path = self.services.final_compositor.compose(
+                    rough_cut,
+                    final_audio,
+                    overlay_spec,
+                    workspace.output_dir / "final_video.mp4",
+                )
 
             self._transition(recorder, session_id, validated_item, "exporting_artifacts", event_callback)
             metadata["status"] = "completed"
@@ -315,8 +349,16 @@ class ItemPipelineRunner(object):
             executor.shutdown(wait=False)
 
     def _uses_original_video_mode(self) -> bool:
-        mode = str(getattr(self.config, "video_cut_mode", "fixed") or "fixed").strip().lower()
-        return mode == "original"
+        return self._video_cut_mode() == "original"
+
+    def _uses_background_removal_mode(self) -> bool:
+        return self._video_cut_mode() == "remove_background"
+
+    def _uses_uncut_video_mode(self) -> bool:
+        return self._video_cut_mode() in {"original", "remove_background"}
+
+    def _video_cut_mode(self) -> str:
+        return str(getattr(self.config, "video_cut_mode", "fixed") or "fixed").strip().lower()
 
     def _transition(
         self,

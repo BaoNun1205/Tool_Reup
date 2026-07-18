@@ -79,6 +79,9 @@ class ProductImagePreprocessor(object):
             )
 
     def _crop_ratio(self) -> str:
+        video_mode = str(getattr(self.config, "video_cut_mode", "fixed") or "fixed").strip().lower()
+        if video_mode == "remove_background":
+            return "1:1"
         normalized = str(getattr(self.config, "product_image_crop_ratio", "1:1") or "1:1").strip().lower()
         return normalized if normalized in {"1:1", "4:3"} else "1:1"
 

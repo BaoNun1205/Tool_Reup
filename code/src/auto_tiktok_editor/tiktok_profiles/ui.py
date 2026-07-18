@@ -12,6 +12,7 @@ import sys
 import threading
 import tkinter as tk
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,11 +20,14 @@ from tkinter import filedialog, messagebox, ttk
 
 import customtkinter as ctk
 
+from auto_tiktok_editor.app.orchestrator import SessionOrchestrator
 from auto_tiktok_editor.app.telegram_bot import TelegramBotClient
 from auto_tiktok_editor.app.media_cleanup import cleanup_tool_storage, format_tool_cleanup_report
 from auto_tiktok_editor.config import PipelineConfig
+from auto_tiktok_editor.domain.models import SessionItemSpec, SessionSpec
 from auto_tiktok_editor.phone_control import (
     CLOSE_HOTKEY_LABEL,
+    DEFAULT_ADB_PORT,
     PhoneController,
     PhoneControlSettings,
     SCREENSHOT_HOTKEY_LABEL,
@@ -40,6 +44,7 @@ from auto_tiktok_editor.telegram_settings import (
 from auto_tiktok_editor.tiktok_profiles.models import ACCOUNT_STATUSES, LOGIN_TYPES, PUBLISH_MODES
 from auto_tiktok_editor.tiktok_profiles.profile_browser import TikTokProfileBrowser
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager, normalize_hashtags, slugify
+from auto_tiktok_editor.tiktok_profiles.telegram_queue import copy_rendered_video_to_queue
 
 
 ctk.set_appearance_mode("dark")
@@ -74,15 +79,20 @@ ACCOUNT_DEFAULT_HASHTAGS = {
     "my_me_an_vat": "#mymeanvat",
 }
 PLAY_ICON = "▶"
-VIDEO_CHECKBOX_OFF = "\u2b1c"
-VIDEO_CHECKBOX_ON = "\u2705"
 PLAY_HOVER_ICON = "▶"
 VIDEO_CUT_MODE_LABELS = {
     "fixed": "Fixed chunks",
     "scene": "Scene changes",
     "original": "Keep Original",
+    "remove_background": "Xóa nền",
 }
 VIDEO_CUT_MODE_VALUES = {label: value for value, label in VIDEO_CUT_MODE_LABELS.items()}
+VIDEO_ROW_CUT_MODE_LABELS = {
+    "fixed": VIDEO_CUT_MODE_LABELS["fixed"],
+    "scene": VIDEO_CUT_MODE_LABELS["scene"],
+    "original": VIDEO_CUT_MODE_LABELS["original"],
+}
+VIDEO_ROW_CUT_MODE_VALUES = {label: value for value, label in VIDEO_ROW_CUT_MODE_LABELS.items()}
 PRODUCT_IMAGE_CROP_RATIO_LABELS = {
     "1:1": "1:1",
     "4:3": "4:3",
@@ -468,9 +478,18 @@ class CTkDataTable(ctk.CTkFrame):
             self.displaycolumns = tuple(kwargs.pop("displaycolumns"))
             self.tree.configure(displaycolumns=self.displaycolumns)
             self._configure_columns()
+            self._reset_horizontal_scroll()
+            self.after_idle(self._reset_horizontal_scroll)
         if kwargs:
             return super().configure(**kwargs)
         return None
+
+    def _reset_horizontal_scroll(self) -> None:
+        try:
+            self.update_idletasks()
+            self.tree.xview_moveto(0)
+        except tk.TclError:
+            pass
 
     def clear(self) -> None:
         self.tree.delete(*self.tree.get_children())
@@ -652,8 +671,7 @@ class App(ctk.CTk):
         self.video_detail_autosave_after = None
         self.video_detail_video_id = None
         self.video_detail_restoring_selection = False
-        self.video_delete_mode = False
-        self.video_delete_selection = set()
+        self.video_render_pending_ids = set()
         self.busy = False
         self.closing = False
         self.action_buttons = []
@@ -664,6 +682,10 @@ class App(ctk.CTk):
         self.phone_controls_ui_state: tuple[bool, bool] | None = None
         self.telegram_controls_ui_state: tuple[bool, bool, str] | None = None
         self.phone_controller = PhoneController(self.config, on_event=self._queue_phone_event)
+        self.video_render_executor = ThreadPoolExecutor(
+            max_workers=max(1, int(getattr(self.config, "max_parallel_session_items", 2) or 1)),
+            thread_name_prefix="profile-video-render",
+        )
         self.phone_screenshot_hotkey = WindowsGlobalHotkey(
             self._queue_phone_screenshot_hotkey,
             virtual_key=0x53,
@@ -676,6 +698,9 @@ class App(ctk.CTk):
         )
         phone_settings = load_phone_control_settings()
         self.phone_address_var = tk.StringVar(value=phone_settings.address)
+        phone_ip, phone_port = self._split_phone_address(phone_settings.address)
+        self.phone_ip_var = tk.StringVar(value=phone_ip)
+        self.phone_port_var = tk.StringVar(value=phone_port)
         self.phone_keep_screen_awake_var = tk.BooleanVar(value=phone_settings.keep_screen_awake)
         self.phone_turn_screen_off_var = tk.BooleanVar(value=phone_settings.turn_screen_off)
         self.phone_always_on_top_var = tk.BooleanVar(value=phone_settings.always_on_top)
@@ -1025,19 +1050,22 @@ class App(ctk.CTk):
             self._add_action_button(actions, text, command, kind)
         self.account_table = CTkDataTable(
             body,
-            ("id", "name", "login_type", "status", "profile_path", "note", "updated_at"),
+            ("id", "name", "login_type", "status", "cut_mode", "profile_path", "note", "updated_at"),
             (
                 ("id", "ID", 60),
                 ("name", "Name", 170),
                 ("login_type", "Login", 90),
                 ("status", "Status", 110),
+                ("cut_mode", "Cut Mode", 170),
                 ("profile_path", "Profile Path", 260),
                 ("note", "Note", 220),
                 ("updated_at", "Updated", 170),
             ),
             on_select=self._on_account_selected,
+            on_cell_click=self._on_account_cell_clicked,
         )
-        self.account_table.configure(displaycolumns=("id", "name", "login_type", "status", "profile_path", "updated_at"))
+        self.account_table.configure(displaycolumns=("id", "name", "login_type", "status", "cut_mode", "profile_path", "updated_at"))
+        self.account_table.set_column_alignment("cut_mode", tk.CENTER)
         self.account_table.pack(fill="both", expand=True)
 
     def _build_video_edit_settings_content(self, parent) -> None:
@@ -1093,34 +1121,22 @@ class App(ctk.CTk):
         controls = ctk.CTkFrame(parent, fg_color="transparent")
         controls.grid(row=1, column=0, sticky="w")
 
-        mode_frame = ctk.CTkFrame(controls, fg_color="transparent")
-        mode_frame.grid(row=0, column=0, sticky="w", padx=(0, 8))
-        ctk.CTkLabel(mode_frame, text="Cut mode", text_color=COLORS["muted"], font=(FONT, 11, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 3))
-        self.video_cut_mode_menu = self._option_menu(
-            mode_frame,
-            self.video_cut_mode_var,
-            list(VIDEO_CUT_MODE_VALUES.keys()),
-            command=lambda _value: self._on_video_cut_mode_changed(),
-        )
-        self.video_cut_mode_menu.configure(width=150, height=30)
-        self.video_cut_mode_menu.grid(row=1, column=0, sticky="ew")
-
         chunk_frame = ctk.CTkFrame(controls, fg_color="transparent")
-        chunk_frame.grid(row=0, column=1, sticky="w", padx=(0, 8))
+        chunk_frame.grid(row=0, column=0, sticky="w", padx=(0, 8))
         ctk.CTkLabel(chunk_frame, text="Chunk (s)", text_color=COLORS["muted"], font=(FONT, 11, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 3))
         self.fixed_chunk_duration_entry = self._entry(chunk_frame, self.fixed_chunk_duration_var, "2.27")
         self.fixed_chunk_duration_entry.configure(width=92, height=30)
         self.fixed_chunk_duration_entry.grid(row=1, column=0, sticky="ew")
 
         threshold_frame = ctk.CTkFrame(controls, fg_color="transparent")
-        threshold_frame.grid(row=0, column=2, sticky="w", padx=(0, 8))
+        threshold_frame.grid(row=0, column=1, sticky="w", padx=(0, 8))
         ctk.CTkLabel(threshold_frame, text="Threshold", text_color=COLORS["muted"], font=(FONT, 11, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 3))
         self.scene_threshold_entry = self._entry(threshold_frame, self.scene_threshold_var, "0.35")
         self.scene_threshold_entry.configure(width=92, height=30)
         self.scene_threshold_entry.grid(row=1, column=0, sticky="ew")
 
         ratio_frame = ctk.CTkFrame(controls, fg_color="transparent")
-        ratio_frame.grid(row=0, column=3, sticky="w", padx=(0, 8))
+        ratio_frame.grid(row=0, column=2, sticky="w", padx=(0, 8))
         ctk.CTkLabel(ratio_frame, text="Crop", text_color=COLORS["muted"], font=(FONT, 11, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 3))
         self.product_image_crop_ratio_menu = self._option_menu(
             ratio_frame,
@@ -1132,7 +1148,7 @@ class App(ctk.CTk):
         self.product_image_crop_ratio_menu.grid(row=1, column=0, sticky="ew")
 
         motion_frame = ctk.CTkFrame(controls, fg_color="transparent")
-        motion_frame.grid(row=0, column=4, sticky="w")
+        motion_frame.grid(row=0, column=3, sticky="w")
         ctk.CTkLabel(motion_frame, text="Motion", text_color=COLORS["muted"], font=(FONT, 11, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", pady=(0, 3))
         self.product_image_motion_menu = self._option_menu(
             motion_frame,
@@ -1417,63 +1433,51 @@ class App(ctk.CTk):
         self.phone_close_button.configure(width=58)
 
         body.grid_columnconfigure(0, weight=1)
-        body.grid_columnconfigure(1, weight=1)
 
-        address_frame = ctk.CTkFrame(body, fg_color="transparent")
-        address_frame.grid(row=0, column=0, sticky="ew", padx=(0, 10))
-        address_frame.grid_columnconfigure(0, weight=1)
+        settings_card = ctk.CTkFrame(body, fg_color=COLORS["surface_2"], corner_radius=10)
+        settings_card.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        settings_card.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
-            address_frame,
+            settings_card,
+            text="Phone Settings",
+            font=(FONT, 14, "bold"),
+            text_color=COLORS["text"],
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 8))
+
+        phone_line = ctk.CTkFrame(settings_card, fg_color="transparent")
+        phone_line.grid(row=1, column=0, sticky="ew", padx=12)
+        phone_line.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            phone_line,
             text="Phone IP",
             text_color=COLORS["muted"],
             font=(FONT, 12, "bold"),
             anchor="w",
-        ).grid(row=0, column=0, sticky="ew", pady=(0, 4))
-        self.phone_address_entry = self._entry(
-            address_frame,
-            self.phone_address_var,
-            "Example: 192.168.1.20 or 192.168.1.20:5555",
-        )
-        self.phone_address_entry.grid(row=1, column=0, sticky="ew")
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.phone_address_entry = self._entry(phone_line, self.phone_ip_var, "192.168.1.20")
+        self.phone_address_entry.grid(row=0, column=1, sticky="ew")
         self.phone_address_entry.bind("<Return>", lambda _event: self._connect_phone())
-
-        status_frame = ctk.CTkFrame(body, fg_color=COLORS["surface_2"], corner_radius=10)
-        status_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
         ctk.CTkLabel(
-            status_frame,
-            textvariable=self.phone_control_status_var,
-            text_color=COLORS["text"],
+            phone_line,
+            text="Port",
+            text_color=COLORS["muted"],
             font=(FONT, 12, "bold"),
             anchor="w",
-        ).pack(fill="x", padx=12, pady=(9, 1))
-        ctk.CTkLabel(
-            status_frame,
-            text="ADB: %s\nscrcpy: %s\nScreenshot & copy: %s\nClose: %s"
-            % (
-                Path(self.config.adb_bin).name,
-                Path(self.config.scrcpy_bin).name,
-                SCREENSHOT_HOTKEY_LABEL,
-                CLOSE_HOTKEY_LABEL,
-            ),
-            text_color=COLORS["muted"],
-            font=(FONT, 11),
-            anchor="w",
-            justify="left",
-        ).pack(fill="x", padx=12, pady=(0, 9))
-
-        options = ctk.CTkFrame(body, fg_color="transparent")
-        options.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        for column in range(3):
-            options.grid_columnconfigure(column, weight=1, uniform="phone_option")
+        ).grid(row=0, column=2, sticky="w", padx=(10, 8))
+        self.phone_port_entry = self._entry(phone_line, self.phone_port_var, str(DEFAULT_ADB_PORT))
+        self.phone_port_entry.configure(width=78)
+        self.phone_port_entry.grid(row=0, column=3, sticky="w")
+        self.phone_port_entry.bind("<Return>", lambda _event: self._connect_phone())
         for column, (text, variable) in enumerate(
             (
                 ("Keep screen awake", self.phone_keep_screen_awake_var),
                 ("Turn phone screen off", self.phone_turn_screen_off_var),
                 ("Always on top", self.phone_always_on_top_var),
-            )
+            ),
+            start=4,
         ):
             ctk.CTkSwitch(
-                options,
+                phone_line,
                 text=text,
                 variable=variable,
                 command=self._on_phone_control_settings_changed,
@@ -1481,47 +1485,49 @@ class App(ctk.CTk):
                 button_color=COLORS["text"],
                 text_color=COLORS["text"],
                 font=(FONT, 11),
-            ).grid(row=0, column=column, sticky="w", padx=(0 if column == 0 else 8, 0))
+            ).grid(row=0, column=column, sticky="w", padx=(12, 0))
 
-        quality = ctk.CTkFrame(body, fg_color="transparent")
-        quality.grid(row=2, column=0, columnspan=2, sticky="w", pady=(7, 0))
+        quality = ctk.CTkFrame(settings_card, fg_color="transparent")
+        quality.grid(row=2, column=0, sticky="ew", padx=12, pady=(8, 12))
+        for index in range(5):
+            quality.grid_columnconfigure(index, weight=1, uniform="phone_quality")
         for column, (label, variable, values, width) in enumerate(
             (
-                ("FPS", self.phone_max_fps_var, ("30", "60"), 68),
+                ("FPS", self.phone_max_fps_var, ("30", "60"), 78),
                 (
                     "Resolution",
                     self.phone_max_size_var,
                     ("1024", "1280", "1600"),
-                    84,
+                    104,
                 ),
                 (
                     "Bitrate",
                     self.phone_video_bit_rate_var,
                     ("4 Mbps", "6 Mbps", "8 Mbps"),
-                    88,
+                    112,
                 ),
                 (
                     "Screen",
                     self.phone_monitor_target_var,
                     ("Main", "Secondary"),
-                    88,
+                    104,
                 ),
                 (
                     "Dock",
                     self.phone_dock_position_var,
                     ("Off", "Dock left", "Dock right"),
-                    104,
+                    116,
                 ),
             )
         ):
             item = ctk.CTkFrame(quality, fg_color="transparent")
-            item.grid(row=0, column=column, sticky="w", padx=(0, 14))
+            item.grid(row=0, column=column, sticky="ew", padx=(0, 8 if column < 4 else 0))
             ctk.CTkLabel(
                 item,
                 text=label,
                 text_color=COLORS["muted"],
-                font=(FONT, 11, "bold"),
-            ).pack(side="left", padx=(0, 6))
+                font=(FONT, 10, "bold"),
+            ).pack(side="left", padx=(0, 5))
             menu = self._option_menu(
                 item,
                 variable,
@@ -1607,48 +1613,8 @@ class App(ctk.CTk):
             "danger",
         )
         self.video_delete_button.configure(width=80)
-        self.video_select_button = self._add_action_button(
-            self.video_normal_actions,
-            "Chọn",
-            self._start_video_selection_mode,
-            "secondary",
-        )
-        self.video_select_button.configure(width=78)
-
-        self.video_delete_actions = ctk.CTkFrame(table_actions, fg_color="transparent")
-        self.video_delete_actions.grid(row=0, column=1, sticky="e")
-        self.video_select_all_button = self._add_action_button(
-            self.video_delete_actions,
-            "%s Select All" % VIDEO_CHECKBOX_OFF,
-            self._select_all_videos_for_delete,
-            "secondary",
-        )
-        self.video_select_all_button.configure(width=154)
-        self.video_send_selected_button = self._add_action_button(
-            self.video_delete_actions,
-            "Gửi",
-            self._send_selected_videos_to_phone,
-            "primary",
-        )
-        self.video_send_selected_button.configure(width=80)
-        self.video_delete_selected_button = self._add_action_button(
-            self.video_delete_actions,
-            "Xóa",
-            self._delete_selected_videos,
-            "danger",
-        )
-        self.video_delete_selected_button.configure(width=80)
-        self.video_cancel_delete_button = self._add_action_button(
-            self.video_delete_actions,
-            "Hủy",
-            lambda: self._set_video_delete_mode(False),
-            "secondary",
-        )
-        self.video_cancel_delete_button.configure(width=80)
-        self.video_delete_actions.grid_remove()
 
         columns = (
-            "selected",
             "row_no",
             "play",
             "account_name",
@@ -1663,40 +1629,35 @@ class App(ctk.CTk):
         )
         self.video_normal_columns = (
             "row_no",
-            "play",
             "account_name",
             "caption",
-            "hashtags",
-            "product_id",
-            "publish_mode",
-            "scheduled_at",
             "updated_at",
+            "hashtags",
+            "play",
         )
-        self.video_delete_columns = columns
         self.video_table = CTkDataTable(
             table_body,
             columns,
             (
-                ("selected", "Select", 88),
                 ("row_no", "#", 70),
-                ("play", "Play", 88),
-                ("account_name", "Profile", 220),
+                ("play", "Action", 126),
+                ("account_name", "Profile", 200),
                 ("file_path", "Video File", 320),
-                ("caption", "Description", 620),
+                ("caption", "Description", 760),
                 ("hashtags", "Hashtags", 280),
                 ("product_id", "Product ID", 240),
                 ("publish_mode", "Mode", 120),
                 ("scheduled_at", "Scheduled", 220),
                 ("source", "Source", 90),
-                ("updated_at", "Updated", 210),
+                ("updated_at", "Updated", 180),
             ),
             on_select=self._on_video_selected,
             on_cell_click=self._on_video_cell_clicked,
         )
         self.video_table.configure(displaycolumns=self.video_normal_columns)
         self.video_table.pack(fill="both", expand=True)
-        self.video_table.set_column_alignment("selected", tk.CENTER)
         self.video_table.set_column_alignment("row_no", tk.CENTER)
+        self.video_table.set_column_alignment("play", tk.CENTER)
         self.video_table.bind("<Motion>", self._on_video_table_motion, add="+")
         self.video_table.bind("<Leave>", self._on_video_table_leave, add="+")
 
@@ -1909,6 +1870,7 @@ class App(ctk.CTk):
                     account.name,
                     account.login_type,
                     account.status,
+                    self._account_cut_mode_label(account),
                     account.profile_path,
                     account.note,
                     _format_vietnam_datetime(account.updated_at),
@@ -2199,7 +2161,7 @@ class App(ctk.CTk):
         self._run_worker("Opening source channel on phone...", worker, on_success=on_success, error_title="Open source")
 
     def _resolve_source_phone_target(self) -> str:
-        address = self.phone_address_var.get().strip()
+        address = self._sync_phone_address_from_parts()
         device_serials = self._adb_device_serials()
         if address:
             candidates = []
@@ -2260,6 +2222,41 @@ class App(ctk.CTk):
         self.source_delete_button.configure(state="normal" if selected else "disabled")
         self.source_open_button.configure(state="normal" if selected else "disabled")
 
+    def _video_action_label(self, video) -> str:
+        if self._is_video_rendering(video):
+            return "⏳ Đang tạo"
+        if self._is_video_waiting_to_render(video):
+            return "⏳ Đang chờ"
+        if self._is_video_render_draft(video):
+            return "↻ Tạo lại" if video.status == "error" else "＋ Tạo"
+        if self._video_final_path_exists(video):
+            return "▶ Play"
+        return "＋ Tạo"
+
+    def _is_video_render_draft(self, video) -> bool:
+        if video is None:
+            return False
+        has_inputs = bool(
+            str(getattr(video, "source_video_url", "") or "").strip()
+            and str(getattr(video, "product_image_path", "") or "").strip()
+        )
+        return has_inputs and not self._video_final_path_exists(video)
+
+    def _is_video_waiting_to_render(self, video) -> bool:
+        return bool(video and video.status == "queued")
+
+    def _is_video_rendering(self, video) -> bool:
+        return bool(video and video.status == "rendering")
+
+    def _video_final_path_exists(self, video) -> bool:
+        if video is None:
+            return False
+        try:
+            path = self.manager.resolve_video_path(video)
+        except Exception:
+            return False
+        return path.exists() and path.is_file() and path.suffix.lower() in {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"}
+
     def _refresh_videos(self) -> None:
         selected_id = self._selected_video_id()
         accounts = self.manager.list_accounts()
@@ -2268,8 +2265,6 @@ class App(ctk.CTk):
         self.video_count_var.set(str(len(videos)))
         self._refresh_video_filter_options(accounts, videos)
         visible_videos = self._filter_videos_by_account(videos)
-        existing_video_ids = {video.id for video in videos}
-        self.video_delete_selection.intersection_update(existing_video_ids)
         self.video_table.delete(*self.video_table.get_children())
         for row_number, video in enumerate(visible_videos, start=1):
             self.video_table.insert(
@@ -2278,11 +2273,8 @@ class App(ctk.CTk):
                 iid=str(video.id),
                 tags=(self._status_tag(video.status),),
                 values=(
-                    VIDEO_CHECKBOX_ON
-                    if video.id in self.video_delete_selection
-                    else VIDEO_CHECKBOX_OFF,
                     row_number,
-                    PLAY_ICON,
+                    self._video_action_label(video),
                     account_names.get(video.account_id, ""),
                     video.file_path,
                     video.caption,
@@ -2301,7 +2293,6 @@ class App(ctk.CTk):
         self._refresh_video_account_options()
         self._load_video_detail(self._current_selected_video())
         self.video_snapshot = self._video_snapshot(videos)
-        self._update_video_delete_buttons()
 
     def _refresh_video_filter_options(self, accounts=None, videos=None) -> None:
         if not hasattr(self, "video_filter_account_menu"):
@@ -2331,7 +2322,6 @@ class App(ctk.CTk):
         return [video for video in videos if video.account_id == account_id]
 
     def _on_video_filter_changed(self) -> None:
-        self.video_delete_selection.clear()
         self._refresh_videos()
 
     def _refresh_video_account_options(self) -> None:
@@ -2363,14 +2353,23 @@ class App(ctk.CTk):
         self._load_video_detail(self._current_selected_video())
 
     def _on_video_cell_clicked(self, row_id: str, column: str) -> None:
-        if self.video_delete_mode and column == "selected":
-            try:
-                self._toggle_video_delete_selection(int(row_id))
-            except (TypeError, ValueError):
-                return
-            return
         if column == "play":
+            self._handle_video_action(row_id)
+
+    def _handle_video_action(self, row_id: str) -> None:
+        try:
+            video_id = int(row_id)
+        except (TypeError, ValueError):
+            return
+        video = self.manager.get_video(video_id)
+        if video is None:
+            return
+        if self._is_video_waiting_to_render(video) or self._is_video_rendering(video):
+            return
+        if self._video_final_path_exists(video):
             self._play_video(row_id)
+            return
+        self._queue_video_render(video)
 
     def _play_video(self, row_id: str) -> None:
         try:
@@ -2392,6 +2391,145 @@ class App(ctk.CTk):
             self.status_var.set("Playing video %s." % video.id)
         except Exception as exc:
             messagebox.showerror("Play video failed", str(exc))
+
+    def _queue_video_render(self, video) -> None:
+        if not self._flush_video_detail_autosave(show_errors=True):
+            return
+        fresh_video = self.manager.get_video(video.id)
+        if fresh_video is None:
+            messagebox.showerror("Create video", "Video không còn tồn tại.")
+            return
+        if fresh_video.id in self.video_render_pending_ids:
+            self.status_var.set("Video %s đang nằm trong hàng chờ tạo." % fresh_video.id)
+            return
+        if not self._is_video_render_draft(fresh_video):
+            if self._video_final_path_exists(fresh_video):
+                self._play_video(str(fresh_video.id))
+            else:
+                messagebox.showerror("Create video", "Video %s thiếu link nguồn hoặc ảnh sản phẩm để tạo." % fresh_video.id)
+            return
+        try:
+            self.manager.update_video_status(fresh_video.id, "queued", note=fresh_video.note)
+            self.manager.add_log("info", "video_render_queued", "Queued video %s for rendering." % fresh_video.id, account_id=fresh_video.account_id, video_id=fresh_video.id)
+        except Exception as exc:
+            messagebox.showerror("Create video", str(exc))
+            return
+        self.video_render_pending_ids.add(fresh_video.id)
+        self._refresh_videos()
+        self._refresh_logs()
+        self.status_var.set("Đã đưa video %s vào hàng chờ tạo." % fresh_video.id)
+        future = self.video_render_executor.submit(self._render_video_worker, fresh_video.id)
+        future.add_done_callback(lambda completed, video_id=fresh_video.id: self._queue_video_render_result(video_id, completed))
+
+    def _queue_video_render_result(self, video_id: int, future) -> None:
+        try:
+            result = future.result()
+            self.events.put(("video_render_success", result, None, "Create video"))
+        except Exception as exc:
+            self.events.put(("video_render_error", {"video_id": video_id, "error": exc}, None, "Create video"))
+
+    def _render_video_worker(self, video_id: int) -> dict:
+        video = self.manager.get_video(video_id)
+        if video is None:
+            raise ValueError("Video not found: %s" % video_id)
+        source_video_url = str(getattr(video, "source_video_url", "") or "").strip()
+        product_image_path = self._resolve_project_path(getattr(video, "product_image_path", "") or "")
+        if not source_video_url:
+            raise ValueError("Video %s missing source video URL." % video_id)
+        if product_image_path is None or not product_image_path.exists() or not product_image_path.is_file():
+            raise ValueError("Video %s missing product image: %s" % (video_id, getattr(video, "product_image_path", "")))
+        cut_mode = "original"
+        if video.account_id is not None:
+            account = self.manager.get_account(video.account_id)
+            if account is not None:
+                cut_mode = str(getattr(account, "cut_mode", "") or "original").strip().lower()
+        if cut_mode not in VIDEO_ROW_CUT_MODE_LABELS:
+            cut_mode = "original"
+        try:
+            self.manager.update_video_cut_mode(video_id, cut_mode)
+            self.manager.update_video_status(video_id, "rendering", note=video.note)
+            render_config = replace(self.config, video_cut_mode=cut_mode)
+            orchestrator = SessionOrchestrator(config=render_config, logger=self.logger)
+            session_result = orchestrator.run(
+                SessionSpec(
+                    items=[
+                        SessionItemSpec(
+                            row_id="profile_video_%s" % video_id,
+                            source_video_url=source_video_url,
+                            product_image=product_image_path,
+                        )
+                    ],
+                    output_root_dir=render_config.default_output_root,
+                    session_name="profile_video_%s" % video_id,
+                    cookies_file=None,
+                )
+            )
+            if not session_result.items:
+                raise RuntimeError("Pipeline did not return a rendered item.")
+            item_result = session_result.items[0]
+            final_path = item_result.artifacts.final_video_path
+            if item_result.status != "completed" or final_path is None or not final_path.exists():
+                raise RuntimeError(item_result.error or "Pipeline did not create a final video.")
+            profile_slug = self._video_profile_slug(video)
+            stored_final_path = copy_rendered_video_to_queue(profile_slug, final_path)
+            updated = self.manager.mark_video_rendered(
+                video_id,
+                stored_final_path,
+                source_title=str(item_result.metadata.get("source_title") or "").strip() or None,
+            )
+            self.manager.add_log(
+                "info",
+                "video_render_completed",
+                "Rendered video %s with cut mode %s." % (video_id, cut_mode),
+                account_id=updated.account_id,
+                video_id=video_id,
+            )
+            return {
+                "video_id": video_id,
+                "file_path": updated.file_path,
+                "cut_mode": cut_mode,
+            }
+        except Exception as exc:
+            try:
+                self.manager.update_video_status(video_id, "error", note=str(exc))
+                self.manager.add_log("error", "video_render_error", "Video %s render failed: %s" % (video_id, exc), account_id=video.account_id, video_id=video_id)
+            except Exception:
+                pass
+            raise
+
+    def _handle_video_render_success(self, result: dict) -> None:
+        video_id = int(result.get("video_id") or 0)
+        self.video_render_pending_ids.discard(video_id)
+        self._refresh_videos()
+        self._refresh_logs()
+        if video_id and self.video_table.exists(str(video_id)):
+            self.video_table.selection_set(str(video_id))
+        self.status_var.set("Đã tạo xong video %s. Action đã chuyển thành Play." % video_id)
+
+    def _handle_video_render_error(self, payload: dict) -> None:
+        video_id = int(payload.get("video_id") or 0)
+        error = payload.get("error")
+        self.video_render_pending_ids.discard(video_id)
+        self._refresh_videos()
+        self._refresh_logs()
+        self.status_var.set("Tạo video %s lỗi: %s" % (video_id, error))
+        messagebox.showerror("Create video", "Video %s: %s" % (video_id, error))
+
+    def _resolve_project_path(self, value: str) -> Path | None:
+        text = str(value or "").strip()
+        if not text:
+            return None
+        path = Path(text)
+        if path.is_absolute():
+            return path
+        return (Path(self.manager.project_root).resolve() / path).resolve()
+
+    def _video_profile_slug(self, video) -> str:
+        if video.account_id is not None:
+            account = self.manager.get_account(video.account_id)
+            if account is not None:
+                return slugify(account.name)
+        return "unassigned"
 
     def _open_video_product_link(self, row_id: str) -> None:
         try:
@@ -2430,11 +2568,8 @@ class App(ctk.CTk):
             self._cancel_hide_product_link_tooltip()
             return
         row_id, column = self.video_table.identify_cell(event.x, event.y)
-        checkbox_hover = bool(
-            self.video_delete_mode and row_id and column == "selected"
-        )
         self.video_table.tree.configure(
-            cursor="hand2" if checkbox_hover else "",
+            cursor="hand2" if column == "play" and row_id else "",
         )
         if column == "play" and row_id:
             self._set_video_play_hover(row_id)
@@ -2482,7 +2617,6 @@ class App(ctk.CTk):
         except ValueError:
             return
         if play_index < len(values):
-            values[play_index] = PLAY_HOVER_ICON
             self.video_table.item(row_id, values=values, tags=("play_hover",))
         self.video_play_hover_row_id = str(row_id)
         try:
@@ -2501,7 +2635,7 @@ class App(ctk.CTk):
             except ValueError:
                 play_index = -1
             if 0 <= play_index < len(values):
-                values[play_index] = PLAY_ICON
+                values[play_index] = self._video_action_label(video) if video is not None else ""
             tags = (self._status_tag(video.status),) if video is not None else ()
             self.video_table.item(row_id, values=values, tags=tags)
         try:
@@ -2633,102 +2767,6 @@ class App(ctk.CTk):
             return note_url
         return "https://www.tiktok.com/view/product/%s" % product_id
 
-    def _start_video_selection_mode(self) -> None:
-        if not self.manager.list_videos():
-            messagebox.showinfo("No videos", "There are no videos to select.")
-            return
-        selected_id = self._selected_video_id()
-        self._set_video_delete_mode(True)
-        if selected_id is not None:
-            self.video_delete_selection.add(selected_id)
-            self._refresh_video_delete_marks()
-        self.status_var.set("Select videos to send or delete.")
-
-    def _set_video_delete_mode(self, enabled: bool) -> None:
-        self.video_delete_mode = bool(enabled)
-        if self.video_delete_mode:
-            self.video_table.configure(displaycolumns=self.video_delete_columns)
-            self.video_normal_actions.grid_remove()
-            self.video_delete_actions.grid()
-        else:
-            self.video_delete_selection.clear()
-            self.video_table.configure(displaycolumns=self.video_normal_columns)
-            self.video_delete_actions.grid_remove()
-            self.video_normal_actions.grid()
-        self._refresh_video_delete_marks()
-        self._update_video_delete_buttons()
-
-    def _toggle_video_delete_selection(self, video_id: int) -> None:
-        if video_id in self.video_delete_selection:
-            self.video_delete_selection.remove(video_id)
-        else:
-            self.video_delete_selection.add(video_id)
-        self._refresh_video_delete_marks()
-        self._update_video_delete_buttons()
-
-    def _select_all_videos_for_delete(self) -> None:
-        visible_ids = self._visible_video_ids()
-        if visible_ids and visible_ids.issubset(self.video_delete_selection):
-            self.video_delete_selection.difference_update(visible_ids)
-        else:
-            self.video_delete_selection.update(visible_ids)
-        self._refresh_video_delete_marks()
-        self._update_video_delete_buttons()
-
-    def _visible_video_ids(self) -> set[int]:
-        video_ids = set()
-        if not hasattr(self, "video_table"):
-            return video_ids
-        for row_id in self.video_table.get_children():
-            try:
-                video_ids.add(int(row_id))
-            except (TypeError, ValueError):
-                continue
-        return video_ids
-
-    def _refresh_video_delete_marks(self) -> None:
-        if not hasattr(self, "video_table"):
-            return
-        for row_id in self.video_table.get_children():
-            values = list(self.video_table.item(row_id, "values"))
-            if not values:
-                continue
-            try:
-                video_id = int(row_id)
-            except (TypeError, ValueError):
-                continue
-            values[0] = (
-                VIDEO_CHECKBOX_ON
-                if video_id in self.video_delete_selection
-                else VIDEO_CHECKBOX_OFF
-            )
-            self.video_table.item(row_id, values=values)
-
-    def _update_video_delete_buttons(self) -> None:
-        if not hasattr(self, "video_delete_selected_button"):
-            return
-        visible_ids = self._visible_video_ids()
-        selected_count = len(self.video_delete_selection.intersection(visible_ids))
-        total_visible = len(visible_ids)
-        if selected_count <= 0:
-            select_text = "%s Select All" % VIDEO_CHECKBOX_OFF
-            select_style = "secondary"
-        elif total_visible and selected_count == total_visible:
-            select_text = "%s All Selected: %s" % (VIDEO_CHECKBOX_ON, selected_count)
-            select_style = "primary"
-        else:
-            select_text = "%s Selected: %s" % (VIDEO_CHECKBOX_ON, selected_count)
-            select_style = "primary"
-        if hasattr(self, "video_select_all_button"):
-            self.video_select_all_button.configure(text=select_text, **_button_kwargs(select_style))
-        self.video_delete_selected_button.configure(
-            state="normal" if selected_count else "disabled",
-        )
-        if hasattr(self, "video_send_selected_button"):
-            self.video_send_selected_button.configure(
-                state="normal" if selected_count else "disabled",
-            )
-
     def _delete_current_video(self) -> None:
         video = self._selected_video()
         if video is None:
@@ -2743,35 +2781,6 @@ class App(ctk.CTk):
             return
         for video_id in report["deleted_ids"]:
             self.manager.add_log("info", "video_delete", "Deleted video %s from disk and database." % video_id, video_id=video_id)
-        self._refresh_videos()
-        self._refresh_logs()
-        deleted = report["deleted"]
-        missing = report["missing_files"]
-        errors = report["errors"]
-        if errors:
-            messagebox.showerror("Delete video failed", "\n".join(errors))
-        status = "Deleted %s video(s) from disk and database." % deleted
-        if missing:
-            status += " %s file(s) were already missing." % missing
-        self.status_var.set(status)
-
-    def _delete_selected_videos(self) -> None:
-        video_ids = sorted(self.video_delete_selection)
-        if not video_ids:
-            messagebox.showinfo("Select videos", "Select at least one video to delete.")
-            return
-        message = "Delete %s selected video(s)?\n\nThis will remove the files from this computer." % len(video_ids)
-        if not messagebox.askyesno("Delete videos", message):
-            return
-        try:
-            report = self.manager.delete_videos(video_ids)
-        except Exception as exc:
-            messagebox.showerror("Delete video failed", str(exc))
-            return
-        for video_id in report["deleted_ids"]:
-            self.manager.add_log("info", "video_delete", "Deleted video %s from disk and database." % video_id, video_id=video_id)
-        self.video_delete_selection.clear()
-        self._set_video_delete_mode(False)
         self._refresh_videos()
         self._refresh_logs()
         deleted = report["deleted"]
@@ -2931,7 +2940,7 @@ class App(ctk.CTk):
             self.video_detail_video_id = video.id
             self.video_detail_id_var.set(self._video_display_number(video.id))
             self.video_detail_profile_var.set(account_names.get(video.account_id, "") if video.account_id is not None else "")
-            self.video_detail_file_var.set(video.file_path)
+            self.video_detail_file_var.set(video.file_path if self._video_final_path_exists(video) else "")
             self.video_detail_source_var.set(video.source)
             self.video_detail_status_var.set(video.status)
             self.video_detail_updated_var.set(_format_vietnam_datetime(video.updated_at))
@@ -3044,7 +3053,7 @@ class App(ctk.CTk):
             return "live"
         if value in ("error", "product_error", "selector_error"):
             return "error"
-        if value in ("need_login", "checkpoint", "no_shop", "warning"):
+        if value in ("need_login", "checkpoint", "no_shop", "warning", "queued", "rendering"):
             return "warning"
         return "muted"
 
@@ -3059,7 +3068,12 @@ class App(ctk.CTk):
         if dialog.result is None:
             return
         try:
-            account = self.manager.add_account(name=dialog.result["name"], login_type=dialog.result["login_type"], note=dialog.result["note"])
+            account = self.manager.add_account(
+                name=dialog.result["name"],
+                login_type=dialog.result["login_type"],
+                note=dialog.result["note"],
+                cut_mode=dialog.result["cut_mode"],
+            )
         except Exception as exc:
             messagebox.showerror("Add account failed", str(exc))
             return
@@ -3096,7 +3110,7 @@ class App(ctk.CTk):
         self.status_var.set("Added video: %s" % video.file_path)
 
     def _phone_video_target_address(self, require_connected: bool = False) -> str | None:
-        address = self.phone_address_var.get().strip()
+        address = self._sync_phone_address_from_parts()
         if not address:
             messagebox.showinfo("Phone address missing", "Enter the phone IP address before sending video.")
             return None
@@ -3107,8 +3121,8 @@ class App(ctk.CTk):
 
     def _phone_video_transfer_item(self, video) -> dict:
         video_path = self.manager.resolve_video_path(video)
-        if not video_path.exists() or not video_path.is_file():
-            raise ValueError("Video %s file does not exist: %s" % (video.id, video_path))
+        if not self._video_final_path_exists(video):
+            raise ValueError("Video %s chưa có final video. Bấm Tạo trước." % video.id)
         return {
             "video_id": video.id,
             "account_id": video.account_id,
@@ -3191,121 +3205,6 @@ class App(ctk.CTk):
             error_title="Send",
         )
 
-    def _send_selected_videos_to_phone(self) -> None:
-        video_ids = sorted(self.video_delete_selection)
-        if not video_ids:
-            messagebox.showinfo("Select videos", "Select at least one video to send.")
-            return
-        address = self._phone_video_target_address()
-        items = []
-        validation_errors = []
-        for video_id in video_ids:
-            video = self.manager.get_video(video_id)
-            if video is None:
-                validation_errors.append("Video %s no longer exists." % video_id)
-                continue
-            try:
-                item = {
-                    "video_id": video.id,
-                    "account_id": video.account_id,
-                    "telegram": self._telegram_product_payload_for_video(video),
-                    "file_path": None,
-                }
-                if address is not None:
-                    try:
-                        item["file_path"] = self._phone_video_transfer_item(video)["file_path"]
-                    except Exception as exc:
-                        validation_errors.append("Video %s phone file: %s" % (video.id, exc))
-                items.append(item)
-            except Exception as exc:
-                validation_errors.append(str(exc))
-        if not items:
-            messagebox.showerror("Send Telegram", "\n".join(validation_errors))
-            return
-
-        def worker():
-            clients = {}
-            telegram_sent = []
-            phone_sent = []
-            send_errors = []
-            for item in items:
-                try:
-                    payload = item["telegram"]
-                    token = payload["bot_token"]
-                    client = clients.get(token)
-                    if client is None:
-                        client = TelegramBotClient(token, logger=self.logger)
-                        clients[token] = client
-                    self._send_telegram_product_payload(client, payload)
-                    telegram_sent.append(
-                        {
-                            "video_id": payload["video_id"],
-                            "account_id": payload["account_id"],
-                            "profile": payload["profile"],
-                            "chat_id": payload["chat_id"],
-                            "product_id": payload["product_id"],
-                        }
-                    )
-                except Exception as exc:
-                    send_errors.append("Video %s Telegram: %s" % (item["video_id"], exc))
-                if address is not None and item["file_path"] is not None:
-                    try:
-                        result = self.phone_controller.send_file_to_gallery(address, item["file_path"])
-                        phone_sent.append(
-                            {
-                                "video_id": item["video_id"],
-                                "account_id": item["account_id"],
-                                "result": result,
-                            }
-                        )
-                    except Exception as exc:
-                        send_errors.append("Video %s phone: %s" % (item["video_id"], exc))
-            return {
-                "telegram_sent": telegram_sent,
-                "phone_sent": phone_sent,
-                "errors": validation_errors + send_errors,
-            }
-
-        def on_success(payload):
-            for item in payload["telegram_sent"]:
-                self._log_telegram_product_send(item)
-            for item in payload["phone_sent"]:
-                result = item["result"]
-                self.manager.add_log(
-                    "info",
-                    "phone_video_send",
-                    "Sent video to phone: %s" % result["remote_path"],
-                    account_id=item["account_id"],
-                    video_id=item["video_id"],
-                )
-            self._refresh_logs()
-            if payload["telegram_sent"] or payload["phone_sent"]:
-                self.video_delete_selection.clear()
-                self._set_video_delete_mode(False)
-            telegram_count = len(payload["telegram_sent"])
-            phone_count = len(payload["phone_sent"])
-            error_count = len(payload["errors"])
-            if address is not None:
-                status = "Sent %s Telegram item(s), %s video(s) to phone." % (telegram_count, phone_count)
-            else:
-                status = "Sent %s item(s) to Telegram." % telegram_count
-            if error_count:
-                status += " %s failed." % error_count
-                messagebox.showwarning("Send", "\n".join(payload["errors"]))
-            self.status_var.set(status)
-
-        action_text = (
-            "Sending %s video(s) to phone and Telegram..."
-            if address is not None
-            else "Sending %s item(s) to Telegram..."
-        )
-        self._run_worker(
-            action_text % len(items),
-            worker,
-            on_success=on_success,
-            error_title="Send",
-        )
-
     def _send_selected_video_to_telegram(self) -> None:
         video = self._selected_video()
         if video is None:
@@ -3333,75 +3232,6 @@ class App(ctk.CTk):
             self.status_var.set("Đã gửi sản phẩm của video %s qua Telegram." % result["video_id"])
 
         self._run_worker("Đang gửi sản phẩm của video %s qua Telegram..." % video.id, worker, on_success=on_success)
-
-    def _send_selected_videos_to_telegram(self) -> None:
-        video_ids = sorted(self.video_delete_selection)
-        if not video_ids:
-            messagebox.showinfo("Select videos", "Select at least one video to send.")
-            return
-        payloads = []
-        validation_errors = []
-        for video_id in video_ids:
-            video = self.manager.get_video(video_id)
-            if video is None:
-                validation_errors.append("Video %s không còn tồn tại." % video_id)
-                continue
-            try:
-                payloads.append(self._telegram_product_payload_for_video(video))
-            except Exception as exc:
-                validation_errors.append(str(exc))
-        if not payloads:
-            messagebox.showerror("Send Telegram", "\n".join(validation_errors))
-            return
-
-        def worker():
-            clients = {}
-            sent = []
-            send_errors = []
-            for payload in payloads:
-                try:
-                    token = payload["bot_token"]
-                    client = clients.get(token)
-                    if client is None:
-                        client = TelegramBotClient(token, logger=self.logger)
-                        clients[token] = client
-                    self._send_telegram_product_payload(client, payload)
-                    sent.append(
-                        {
-                            "video_id": payload["video_id"],
-                            "account_id": payload["account_id"],
-                            "profile": payload["profile"],
-                            "chat_id": payload["chat_id"],
-                            "product_id": payload["product_id"],
-                        }
-                    )
-                except Exception as exc:
-                    send_errors.append("Video %s: %s" % (payload["video_id"], exc))
-            return {
-                "sent": sent,
-                "errors": validation_errors + send_errors,
-            }
-
-        def on_success(result):
-            for item in result["sent"]:
-                self._log_telegram_product_send(item)
-            self._refresh_logs()
-            if result["sent"]:
-                self.video_delete_selection.clear()
-                self._set_video_delete_mode(False)
-            sent_count = len(result["sent"])
-            error_count = len(result["errors"])
-            status = "Đã gửi %s sản phẩm qua Telegram." % sent_count
-            if error_count:
-                status += " %s sản phẩm lỗi." % error_count
-                messagebox.showwarning("Send Telegram", "\n".join(result["errors"]))
-            self.status_var.set(status)
-
-        self._run_worker(
-            "Đang gửi %s sản phẩm qua Telegram..." % len(payloads),
-            worker,
-            on_success=on_success,
-        )
 
     def _telegram_product_payload_for_video(self, video) -> dict:
         if video.account_id is None:
@@ -3447,6 +3277,62 @@ class App(ctk.CTk):
 
     def _on_account_selected(self, _event=None) -> None:
         self._update_telegram_target_profile_label()
+
+    def _on_account_cell_clicked(self, row_id: str, column: str) -> None:
+        if column == "cut_mode":
+            self._show_account_cut_mode_menu(row_id)
+
+    def _account_cut_mode_label(self, account, include_arrow: bool = True) -> str:
+        cut_mode = str(getattr(account, "cut_mode", "") or "original").strip().lower()
+        label = VIDEO_ROW_CUT_MODE_LABELS.get(cut_mode, VIDEO_ROW_CUT_MODE_LABELS["original"])
+        return "%s ▾" % label if include_arrow else label
+
+    def _show_account_cut_mode_menu(self, row_id: str) -> None:
+        try:
+            account_id = int(row_id)
+        except (TypeError, ValueError):
+            return
+        account = self.manager.get_account(account_id)
+        if account is None:
+            return
+        menu = tk.Menu(
+            self,
+            tearoff=False,
+            bg=COLORS["surface_2"],
+            fg=COLORS["text"],
+            activebackground=COLORS["surface_3"],
+            activeforeground=COLORS["text"],
+            borderwidth=2,
+            activeborderwidth=2,
+            font=(FONT, 13),
+        )
+        current = str(getattr(account, "cut_mode", "") or "original").strip().lower()
+        for label, value in VIDEO_ROW_CUT_MODE_VALUES.items():
+            prefix = "✓  " if value == current else "   "
+            menu.add_command(
+                label="  %s%s        " % (prefix, label),
+                command=lambda mode=value: self._set_account_cut_mode(account_id, mode),
+            )
+        try:
+            box = self.account_table.tree.bbox(str(row_id), "cut_mode")
+            x_root = self.account_table.tree.winfo_rootx() + (box[0] if box else 0)
+            y_root = self.account_table.tree.winfo_rooty() + (box[1] if box else 0) + (box[3] if box else 0)
+            menu.tk_popup(x_root, y_root)
+        finally:
+            menu.grab_release()
+
+    def _set_account_cut_mode(self, account_id: int, cut_mode: str) -> None:
+        try:
+            updated = self.manager.update_account_cut_mode(account_id, cut_mode)
+            self.manager.add_log("info", "account_cut_mode", "Account %s cut mode set to %s." % (account_id, updated.cut_mode), account_id=account_id)
+        except Exception as exc:
+            messagebox.showerror("Account Cut Mode", str(exc))
+            return
+        self._refresh_accounts()
+        self._refresh_logs()
+        if self.account_table.exists(str(account_id)):
+            self.account_table.selection_set(str(account_id))
+        self.status_var.set("Account %s Cut Mode: %s." % (updated.name, self._account_cut_mode_label(updated, include_arrow=False)))
 
     def _selected_account_for_telegram(self):
         account_id = self._selected_account_id()
@@ -3528,14 +3414,14 @@ class App(ctk.CTk):
             self._refresh_logs()
 
     def _connect_phone(self) -> None:
-        address = self.phone_address_var.get().strip()
+        address = self._sync_phone_address_from_parts()
         settings = self._phone_control_settings(address)
         self.phone_control_status_var.set("Connecting to phone...")
         self.phone_metric_var.set("Connecting")
 
         def on_success(result: dict) -> None:
             normalized_address = str(result.get("address") or address)
-            self.phone_address_var.set(normalized_address)
+            self._set_phone_address(normalized_address)
             try:
                 save_phone_control_settings(self._phone_control_settings(normalized_address))
             except OSError as exc:
@@ -3558,14 +3444,14 @@ class App(ctk.CTk):
             self.phone_metric_var.set("Stopped")
             messagebox.showinfo("Phone not connected", "Connect the phone first, then open Control.")
             return
-        address = self.phone_address_var.get().strip()
+        address = self._sync_phone_address_from_parts()
         settings = self._phone_control_settings(address)
         self.phone_control_status_var.set("Opening phone control...")
         self.phone_metric_var.set("Connecting")
 
         def on_success(result: dict) -> None:
             normalized_address = str(result.get("address") or address)
-            self.phone_address_var.set(normalized_address)
+            self._set_phone_address(normalized_address)
             try:
                 save_phone_control_settings(self._phone_control_settings(normalized_address))
             except OSError as exc:
@@ -3591,9 +3477,47 @@ class App(ctk.CTk):
             error_title="Phone control",
         )
 
+    @staticmethod
+    def _split_phone_address(address: str) -> tuple[str, str]:
+        text = str(address or "").strip()
+        default_port = str(DEFAULT_ADB_PORT)
+        if not text:
+            return "", default_port
+        if ":" not in text:
+            return text, default_port
+        host, _separator, port = text.rpartition(":")
+        if not host:
+            return text, default_port
+        return host.strip(), (port.strip() or default_port)
+
+    def _set_phone_address(self, address: str) -> None:
+        normalized_address = str(address or "").strip()
+        phone_ip, phone_port = self._split_phone_address(normalized_address)
+        self.phone_address_var.set(normalized_address)
+        self.phone_ip_var.set(phone_ip)
+        self.phone_port_var.set(phone_port)
+
+    def _sync_phone_address_from_parts(self) -> str:
+        phone_ip = self.phone_ip_var.get().strip()
+        phone_port = self.phone_port_var.get().strip()
+        if ":" in phone_ip:
+            split_ip, split_port = self._split_phone_address(phone_ip)
+            phone_ip = split_ip
+            if not phone_port or phone_port == str(DEFAULT_ADB_PORT):
+                phone_port = split_port
+            self.phone_ip_var.set(phone_ip)
+        if phone_ip and not phone_port:
+            phone_port = str(DEFAULT_ADB_PORT)
+        self.phone_port_var.set(phone_port)
+        address = "%s:%s" % (phone_ip, phone_port) if phone_ip else ""
+        self.phone_address_var.set(address)
+        return address
+
     def _phone_control_settings(self, address: str | None = None) -> PhoneControlSettings:
+        if address is None:
+            address = self._sync_phone_address_from_parts()
         return PhoneControlSettings(
-            address=self.phone_address_var.get().strip() if address is None else address.strip(),
+            address=address.strip(),
             keep_screen_awake=bool(self.phone_keep_screen_awake_var.get()),
             turn_screen_off=bool(self.phone_turn_screen_off_var.get()),
             always_on_top=bool(self.phone_always_on_top_var.get()),
@@ -3640,7 +3564,7 @@ class App(ctk.CTk):
         if self.busy:
             self._append_telegram_event("Screenshot skipped: another action is running")
             return
-        address = self.phone_address_var.get().strip()
+        address = self._sync_phone_address_from_parts()
         output_dir = Path(self.manager.project_root).resolve() / "phone_screenshots"
 
         def on_success(result: dict) -> None:
@@ -3738,50 +3662,28 @@ class App(ctk.CTk):
         return max(minimum, min(maximum, value))
 
     def _current_video_edit_settings(self) -> tuple[str, float, float, str, str]:
-        video_cut_mode = self._video_cut_mode_value()
-        if video_cut_mode == "fixed":
-            fixed_chunk_duration = self._read_float_setting(self.fixed_chunk_duration_var, "Fixed chunk seconds", 0.5, 30.0)
-            scene_threshold = self._read_float_or_fallback(
-                self.scene_threshold_var,
-                float(getattr(self.config, "scene_threshold", 0.35)),
-                0.01,
-                0.95,
-            )
-        elif video_cut_mode == "scene":
-            fixed_chunk_duration = self._read_float_or_fallback(
-                self.fixed_chunk_duration_var,
-                float(getattr(self.config, "fixed_chunk_duration_seconds", 2.27)),
-                0.5,
-                30.0,
-            )
-            scene_threshold = self._read_float_setting(self.scene_threshold_var, "Scene threshold", 0.01, 0.95)
-        else:
-            fixed_chunk_duration = self._read_float_or_fallback(
-                self.fixed_chunk_duration_var,
-                float(getattr(self.config, "fixed_chunk_duration_seconds", 2.27)),
-                0.5,
-                30.0,
-            )
-            scene_threshold = self._read_float_or_fallback(
-                self.scene_threshold_var,
-                float(getattr(self.config, "scene_threshold", 0.35)),
-                0.01,
-                0.95,
-            )
+        video_cut_mode = "original"
+        fixed_chunk_duration = self._read_float_setting(self.fixed_chunk_duration_var, "Fixed chunk seconds", 0.5, 30.0)
+        scene_threshold = self._read_float_setting(self.scene_threshold_var, "Scene threshold", 0.01, 0.95)
+        product_image_crop_ratio = self._product_image_crop_ratio_value()
+        product_image_motion = self._product_image_motion_value()
         return (
             video_cut_mode,
             fixed_chunk_duration,
             scene_threshold,
-            self._product_image_crop_ratio_value(),
-            self._product_image_motion_value(),
+            product_image_crop_ratio,
+            product_image_motion,
         )
 
     def _update_video_edit_controls_state(self) -> None:
-        mode = self._video_cut_mode_value()
         if hasattr(self, "fixed_chunk_duration_entry"):
-            self.fixed_chunk_duration_entry.configure(state="normal" if mode == "fixed" else "disabled")
+            self.fixed_chunk_duration_entry.configure(state="normal")
         if hasattr(self, "scene_threshold_entry"):
-            self.scene_threshold_entry.configure(state="normal" if mode == "scene" else "disabled")
+            self.scene_threshold_entry.configure(state="normal")
+        if hasattr(self, "product_image_crop_ratio_menu"):
+            self.product_image_crop_ratio_menu.configure(state="normal")
+        if hasattr(self, "product_image_motion_menu"):
+            self.product_image_motion_menu.configure(state="normal")
 
     def _on_video_cut_mode_changed(self) -> None:
         self._update_video_edit_controls_state()
@@ -3983,7 +3885,7 @@ class App(ctk.CTk):
             self.telegram_bot_status_var.set("Bot error")
             return
         (
-            video_cut_mode,
+            _video_cut_mode,
             fixed_chunk_duration,
             scene_threshold,
             product_image_crop_ratio,
@@ -4008,7 +3910,6 @@ class App(ctk.CTk):
                 env["AUTO_EDITOR_TELEGRAM_INPUT_MODE"] = "simple"
                 env["AUTO_EDITOR_TELEGRAM_SEND_RESULT_TO_TELEGRAM"] = "1" if self.telegram_send_result_var.get() else "0"
                 env["AUTO_EDITOR_TELEGRAM_SAVE_RECEIVED_VIDEO_TO_PROFILE"] = "1" if effective_save else "0"
-                env["AUTO_EDITOR_VIDEO_CUT_MODE"] = video_cut_mode
                 env["AUTO_EDITOR_FIXED_CHUNK_DURATION_SECONDS"] = self._format_float_setting(fixed_chunk_duration)
                 env["AUTO_EDITOR_SCENE_THRESHOLD"] = self._format_float_setting(scene_threshold)
                 env["AUTO_EDITOR_PRODUCT_IMAGE_CROP_RATIO"] = product_image_crop_ratio
@@ -4358,7 +4259,7 @@ class App(ctk.CTk):
         video = self._selected_video()
         if video is None:
             return
-        address = self._phone_video_target_address(require_connected=True)
+        address = self._phone_video_target_address()
         if address is None:
             return
         caption_text = _compose_video_caption_with_hashtags(video.caption, video.hashtags)
@@ -4371,9 +4272,6 @@ class App(ctk.CTk):
             return
         if not product_id.isdigit():
             messagebox.showerror("Invalid Product ID", "Product ID chi duoc chua chu so: %s" % product_id)
-            return
-        if not self.phone_controller.is_running():
-            messagebox.showinfo("Phone control required", "Open Control first so scrcpy can paste description to the phone.")
             return
         try:
             phone_item = self._phone_video_transfer_item(video)
@@ -4395,18 +4293,20 @@ class App(ctk.CTk):
                 )
                 phone_result = self.phone_controller.send_file_to_gallery(address, phone_item["file_path"])
                 upload_result = self.phone_controller.open_tiktok_upload(address)
-                paste_result = self.phone_controller.paste_text_with_scrcpy(caption_text)
+                paste_result = self.phone_controller.paste_text_with_adb_keyboard(
+                    address,
+                    caption_text,
+                    restore_keyboard=False,
+                )
                 keyboard_result = self.phone_controller.press_space_and_close_keyboard(address)
-                add_link_result = self.phone_controller.tap_tiktok_add_link(address)
-                product_link_result = self.phone_controller.tap_tiktok_product_link(address)
-                product_search_result = self.phone_controller.tap_tiktok_product_search_field(address)
-                product_id_result = self.phone_controller.search_tiktok_product_id(address, product_id)
-                product_add_result = self.phone_controller.tap_tiktok_product_add_button(address)
-                optional_add_popup_result = self.phone_controller.tap_optional_tiktok_add_popup(address)
-                product_name_result = self.phone_controller.replace_invalid_tiktok_product_name(address)
-                final_add_result = self.phone_controller.tap_tiktok_anchor_final_add_button(address)
-                more_options_result = self.phone_controller.tap_tiktok_more_options(address)
-                schedule_post_result = self.phone_controller.tap_tiktok_schedule_post(address)
+                ime_result = self.phone_controller.restore_android_input_method(address)
+                product_id_clipboard_result = self.phone_controller.copy_text_to_clipboard(
+                    product_id,
+                    label="Product ID",
+                    address=address,
+                    sync_to_phone=True,
+                    require_phone_clipboard=False,
+                )
                 return {
                     "video_id": fresh_video.id,
                     "account_id": account_id,
@@ -4414,16 +4314,8 @@ class App(ctk.CTk):
                     "upload_result": upload_result,
                     "paste_result": paste_result,
                     "keyboard_result": keyboard_result,
-                    "add_link_result": add_link_result,
-                    "product_link_result": product_link_result,
-                    "product_search_result": product_search_result,
-                    "product_id_result": product_id_result,
-                    "product_add_result": product_add_result,
-                    "optional_add_popup_result": optional_add_popup_result,
-                    "product_name_result": product_name_result,
-                    "final_add_result": final_add_result,
-                    "more_options_result": more_options_result,
-                    "schedule_post_result": schedule_post_result,
+                    "ime_result": ime_result,
+                    "product_id_clipboard_result": product_id_clipboard_result,
                 }
             except Exception as exc:
                 self.manager.update_video_status(fresh_video.id, "error", note=str(exc))
@@ -4441,48 +4333,32 @@ class App(ctk.CTk):
             self.manager.update_video_status(
                 video_id,
                 "prepared",
-                note="Opened TikTok publish screen, pasted description, closed keyboard, tapped Add link, tapped Product, focused product search, searched Product ID, tapped product Add, handled optional Add popup, fixed product name if needed, tapped final Add, opened More options, and opened Schedule post.",
+                note="Opened TikTok publish screen, pasted description, closed keyboard, copied Product ID, then stopped for manual product selection.",
             )
             phone_result = result["phone_result"]
             upload_result = result["upload_result"]
             paste_result = result["paste_result"]
             keyboard_result = result["keyboard_result"]
-            add_link_result = result["add_link_result"]
-            product_link_result = result["product_link_result"]
-            product_search_result = result["product_search_result"]
-            product_id_result = result["product_id_result"]
-            product_add_result = result["product_add_result"]
-            optional_add_popup_result = result["optional_add_popup_result"]
-            product_name_result = result["product_name_result"]
-            final_add_result = result["final_add_result"]
-            more_options_result = result["more_options_result"]
-            schedule_post_result = result["schedule_post_result"]
+            ime_result = result["ime_result"]
+            product_id_clipboard_result = result["product_id_clipboard_result"]
             self.manager.add_log(
                 "info",
                 "phone_auto_post_ready",
-                "Video sent to phone, publish screen opened, description pasted, keyboard closed, Add link tapped, Product tapped, product search focused, Product ID searched, product Add tapped, optional Add popup handled, product name checked, final Add tapped, More options opened, and Schedule post opened: %s."
+                "Video sent to phone, publish screen opened, description pasted, keyboard closed, Product ID copied, then automation stopped: %s."
                 % phone_result["remote_path"],
                 account_id=result["account_id"],
                 video_id=video_id,
             )
             self._refresh_all()
             self.status_var.set(
-                "Phone Auto Post ready for video %s. %s %s %s %s %s %s %s %s %s %s %s %s %s"
+                "Phone Auto Post ready for video %s. %s %s %s %s %s"
                 % (
                     video_id,
                     str(upload_result.get("message") or "TikTok publish screen opened."),
                     str(paste_result.get("message") or "Description pasted."),
                     str(keyboard_result.get("message") or "Keyboard closed."),
-                    str(add_link_result.get("message") or "Add link tapped."),
-                    str(product_link_result.get("message") or "Product tapped."),
-                    str(product_search_result.get("message") or "Product search focused."),
-                    str(product_id_result.get("message") or "Product ID searched."),
-                    str(product_add_result.get("message") or "Product Add tapped."),
-                    str(optional_add_popup_result.get("message") or "Optional popup handled."),
-                    str(product_name_result.get("message") or "Product name checked."),
-                    str(final_add_result.get("message") or "Final Add tapped."),
-                    str(more_options_result.get("message") or "More options opened."),
-                    str(schedule_post_result.get("message") or "Schedule post opened."),
+                    str(ime_result.get("message") or "Keyboard restored."),
+                    str(product_id_clipboard_result.get("message") or "Product ID copied to phone clipboard."),
                 )
             )
 
@@ -4519,13 +4395,13 @@ class App(ctk.CTk):
             self.manager.add_log("error", "auto_post_error", "%s -> %s" % (account.name, exc), account_id=account.id, video_id=video.id)
 
     def _is_video_auto_post_candidate(self, video) -> bool:
-        return video.status not in ("posted", "scheduled", "prepared")
+        return video.status not in ("draft", "queued", "rendering", "posted", "scheduled", "prepared") and self._video_final_path_exists(video)
 
     def _auto_post_validation_error(self, video) -> str | None:
         if video.account_id is None:
             return "Video %s does not have an account assigned." % video.id
         video_path = self.manager.resolve_video_path(video)
-        if not video_path.exists() or not video_path.is_file():
+        if not self._video_final_path_exists(video):
             return "Video file does not exist: %s" % video_path
         return None
 
@@ -4653,9 +4529,14 @@ class App(ctk.CTk):
                 if event_type == "phone_close_hotkey":
                     self._stop_phone_control()
                     continue
+                if event_type == "video_render_success":
+                    self._handle_video_render_success(payload)
+                    continue
+                if event_type == "video_render_error":
+                    self._handle_video_render_error(payload)
+                    continue
                 self.busy = False
                 self._set_buttons_state("normal")
-                self._update_video_delete_buttons()
                 self._update_source_detail_buttons()
                 self._set_busy_indicator(False)
                 if event_type == "success":
@@ -4704,7 +4585,18 @@ class App(ctk.CTk):
         self.after(2000, self._poll_database_changes)
 
     def _video_snapshot(self, videos) -> tuple:
-        return tuple((video.id, video.updated_at, video.status) for video in videos)
+        return tuple(
+            (
+                video.id,
+                video.updated_at,
+                video.status,
+                getattr(video, "cut_mode", ""),
+                video.file_path,
+                getattr(video, "source_video_url", ""),
+                getattr(video, "product_image_path", ""),
+            )
+            for video in videos
+        )
 
     def _source_snapshot(self, channels) -> tuple:
         return tuple((channel.id, channel.updated_at, channel.featured) for channel in channels)
@@ -4752,6 +4644,7 @@ class App(ctk.CTk):
         self.phone_close_hotkey.stop()
         self.phone_controller.close()
         self._stop_telegram_bot(show_status=False, hard=True)
+        self.video_render_executor.shutdown(wait=False, cancel_futures=True)
         self.browser_requests.put(None)
         self.browser_thread.join(timeout=5)
         self.destroy()
@@ -4797,6 +4690,7 @@ class AccountDialog(BaseDialog):
 
         self.name_var = tk.StringVar()
         self.login_type_var = tk.StringVar(value=LOGIN_TYPES[0])
+        self.cut_mode_var = tk.StringVar(value=VIDEO_ROW_CUT_MODE_LABELS["original"])
         self.note_var = tk.StringVar()
 
         frame = ctk.CTkFrame(self.window, fg_color=COLORS["surface"], corner_radius=14)
@@ -4807,11 +4701,27 @@ class AccountDialog(BaseDialog):
         self._entry(frame, self.name_var, 0, placeholder="Account name")
         self._label(frame, "Login type", 1)
         ctk.CTkOptionMenu(frame, variable=self.login_type_var, values=list(LOGIN_TYPES), fg_color=COLORS["input"], button_color=COLORS["surface_2"]).grid(row=1, column=1, sticky="ew", pady=(0, 9))
-        self._label(frame, "Note", 2)
-        self._entry(frame, self.note_var, 2, placeholder="Optional note")
+        self._label(frame, "Cut Mode", 2)
+        ctk.CTkOptionMenu(
+            frame,
+            variable=self.cut_mode_var,
+            values=list(VIDEO_ROW_CUT_MODE_VALUES.keys()),
+            fg_color=COLORS["input"],
+            button_color=COLORS["surface_2"],
+            dropdown_fg_color=COLORS["input"],
+            dropdown_hover_color=COLORS["accent"],
+            dropdown_text_color=COLORS["text"],
+            text_color=COLORS["text"],
+            font=(FONT, 14),
+            dropdown_font=(FONT, 14),
+            dynamic_resizing=False,
+            anchor="w",
+        ).grid(row=2, column=1, sticky="ew", pady=(0, 9))
+        self._label(frame, "Note", 3)
+        self._entry(frame, self.note_var, 3, placeholder="Optional note")
 
         button_bar = ctk.CTkFrame(frame, fg_color="transparent")
-        button_bar.grid(row=3, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        button_bar.grid(row=4, column=0, columnspan=2, sticky="e", pady=(8, 0))
         ctk.CTkButton(button_bar, text="Cancel", command=self.window.destroy, **_button_kwargs("secondary")).pack(side="right")
         ctk.CTkButton(button_bar, text="Add", command=self._submit, **_button_kwargs("primary")).pack(side="right", padx=(0, 8))
 
@@ -4825,7 +4735,12 @@ class AccountDialog(BaseDialog):
         if not name:
             messagebox.showerror("Missing name", "Account name is required.", parent=self.window)
             return
-        self.result = {"name": name, "login_type": self.login_type_var.get(), "note": self.note_var.get().strip()}
+        self.result = {
+            "name": name,
+            "login_type": self.login_type_var.get(),
+            "cut_mode": VIDEO_ROW_CUT_MODE_VALUES.get(self.cut_mode_var.get().strip(), "original"),
+            "note": self.note_var.get().strip(),
+        }
         self.window.destroy()
 
 

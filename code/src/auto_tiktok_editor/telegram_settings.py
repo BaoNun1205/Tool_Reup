@@ -56,7 +56,7 @@ def _float_setting(payload: dict[str, object], key: str, default: float) -> floa
 
 def _video_cut_mode(value: object) -> str:
     normalized = str(value or "").strip().lower()
-    return normalized if normalized in {"fixed", "scene", "original"} else "fixed"
+    return normalized if normalized in {"fixed", "scene", "original", "remove_background"} else "fixed"
 
 
 def _product_image_crop_ratio(value: object) -> str:

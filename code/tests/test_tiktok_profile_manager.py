@@ -11,7 +11,7 @@ import unittest
 from unittest import mock
 
 from auto_tiktok_editor.tiktok_profiles import profile_browser
-from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager, slugify
+from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager, slugify, split_caption_and_hashtags
 from auto_tiktok_editor.tiktok_profiles.ui import (
     _compose_video_caption_with_hashtags,
     _default_hashtag_for_account_name,
@@ -21,7 +21,7 @@ from auto_tiktok_editor.tiktok_profiles.ui import (
     _telegram_bot_config_for_account,
     _telegram_product_messages_for_video,
 )
-from auto_tiktok_editor.tiktok_profiles.telegram_queue import enqueue_telegram_video
+from auto_tiktok_editor.tiktok_profiles.telegram_queue import enqueue_telegram_video, enqueue_telegram_video_draft
 from auto_tiktok_editor.config import PipelineConfig
 
 TEST_TEMP_ROOT = ROOT / "_tmp_tests"
@@ -151,6 +151,14 @@ class TikTokProfileManagerTests(unittest.TestCase):
         )
         self.assertEqual(_compose_video_caption_with_hashtags("", "mymeanvat"), "#mymeanvat")
 
+    def test_split_caption_separates_hashtags_attached_to_words(self):
+        caption, hashtags = split_caption_and_hashtags(
+            "Ăn trung thu sớmmmm#review#vir#tiktokshop#banhtrungthuxuantung"
+        )
+
+        self.assertEqual(caption, "Ăn trung thu sớmmmm")
+        self.assertEqual(hashtags, "#review #vir #tiktokshop #banhtrungthuxuantung")
+
     def test_telegram_product_messages_are_caption_hashtags_then_product_id(self):
         video = mock.Mock(
             id=12,
@@ -234,6 +242,7 @@ class TikTokProfileManagerTests(unittest.TestCase):
             self.assertEqual(account.profile_path, "profiles/nick_1")
             self.assertEqual(account.status, "paused")
             self.assertEqual(account.note, "main")
+            self.assertEqual(account.cut_mode, "original")
             self.assertTrue((root / "profiles" / "nick_1").is_dir())
 
     def test_duplicate_names_get_unique_profile_paths(self):
@@ -266,6 +275,33 @@ class TikTokProfileManagerTests(unittest.TestCase):
 
             self.assertEqual(updated.status, "need_login")
             self.assertEqual(updated.note, "manual check")
+
+    def test_account_cut_mode_is_default_for_new_videos(self):
+        with _temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            video_file = root / "demo.mp4"
+            video_file.write_bytes(b"fake video")
+            product_image = root / "product.jpg"
+            product_image.write_bytes(b"image")
+            manager = TikTokProfileManager(
+                db_path=root / "accounts.sqlite3",
+                profiles_root=root / "profiles",
+                project_root=root,
+            )
+            account = manager.add_account("Nick 1", "google", cut_mode="fixed")
+
+            updated_account = manager.update_account_cut_mode(account.id, "scene")
+            video = manager.add_video(video_file, account_id=account.id)
+            draft = manager.add_video_draft(
+                root / "profile_video_queue" / "nick_1" / "draft.pending",
+                source_video_url="https://www.tiktok.com/@store/video/123",
+                product_image_path=product_image,
+                account_id=account.id,
+            )
+
+            self.assertEqual(updated_account.cut_mode, "scene")
+            self.assertEqual(video.cut_mode, "scene")
+            self.assertEqual(draft.cut_mode, "scene")
 
     def test_source_channel_crud_per_account(self):
         with _temporary_directory() as temp_dir:
@@ -446,6 +482,45 @@ class TikTokProfileManagerTests(unittest.TestCase):
             self.assertEqual(updated_video.status, "file_selected")
             self.assertEqual(updated_video.note, "selected")
 
+    def test_add_video_draft_cut_mode_and_mark_rendered(self):
+        with _temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            product_image = root / "product.jpg"
+            product_image.write_bytes(b"image")
+            marker_file = root / "profile_video_queue" / "profile" / "draft.pending"
+            final_video = root / "profile_video_queue" / "profile" / "final.mp4"
+            final_video.parent.mkdir(parents=True, exist_ok=True)
+            final_video.write_bytes(b"video")
+            manager = TikTokProfileManager(
+                db_path=root / "accounts.sqlite3",
+                profiles_root=root / "profiles",
+                project_root=root,
+            )
+            account = manager.add_account("Profile", "google")
+
+            draft = manager.add_video_draft(
+                marker_file,
+                source_video_url="https://www.tiktok.com/@store/video/123",
+                product_image_path=product_image,
+                account_id=account.id,
+                product_id="1730667245645826792",
+            )
+
+            self.assertEqual(draft.status, "draft")
+            self.assertEqual(draft.cut_mode, "original")
+            self.assertEqual(draft.source_video_url, "https://www.tiktok.com/@store/video/123")
+            self.assertTrue(manager.resolve_video_path(draft).exists())
+            self.assertTrue((root / draft.product_image_path).exists())
+
+            updated_cut = manager.update_video_cut_mode(draft.id, "scene")
+            self.assertEqual(updated_cut.cut_mode, "scene")
+
+            rendered = manager.mark_video_rendered(draft.id, final_video, source_title="Demo title #food")
+            self.assertEqual(rendered.status, "ready")
+            self.assertEqual(rendered.caption, "Demo title")
+            self.assertEqual(rendered.hashtags, "#food")
+            self.assertEqual(manager.resolve_video_path(rendered), final_video)
+
     def test_find_account_for_profile_slug_supports_bot_suffix(self):
         with _temporary_directory() as temp_dir:
             root = Path(temp_dir)
@@ -491,6 +566,42 @@ class TikTokProfileManagerTests(unittest.TestCase):
             self.assertEqual(videos[0].source, "telegram")
             self.assertEqual(videos[0].product_id, "1730667245645826792")
             self.assertTrue(manager.resolve_video_path(videos[0]).exists())
+
+    def test_enqueue_telegram_video_draft_copies_inputs_into_profile_queue(self):
+        with _temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            product_image = root / "source_product.png"
+            product_image.write_bytes(b"image")
+            manager = TikTokProfileManager(
+                db_path=root / "accounts.sqlite3",
+                profiles_root=root / "profiles",
+                project_root=root,
+            )
+            account = manager.add_account("Linh An Ngon", "google")
+            config = PipelineConfig(tiktok_profile_slug="linh_an_ngon_bot")
+
+            queued = enqueue_telegram_video_draft(
+                config,
+                source_video_url="https://www.tiktok.com/@store/video/123",
+                product_image_path=product_image,
+                product_id="1730667245645826792",
+                product_url="https://www.tiktok.com/view/product/1730667245645826792",
+                cut_mode="scene",
+                manager=manager,
+                queue_root=root / "profile_video_queue",
+            )
+
+            self.assertTrue(queued)
+            videos = manager.list_videos()
+            self.assertEqual(len(videos), 1)
+            self.assertEqual(videos[0].account_id, account.id)
+            self.assertEqual(videos[0].status, "draft")
+            self.assertEqual(videos[0].cut_mode, "scene")
+            self.assertEqual(videos[0].source, "telegram")
+            self.assertEqual(videos[0].source_video_url, "https://www.tiktok.com/@store/video/123")
+            self.assertEqual(videos[0].product_id, "1730667245645826792")
+            self.assertTrue(manager.resolve_video_path(videos[0]).exists())
+            self.assertTrue((root / videos[0].product_image_path).exists())
 
 
 if __name__ == "__main__":

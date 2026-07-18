@@ -26,6 +26,13 @@ class PipelineConfigTests(unittest.TestCase):
             "AUTO_EDITOR_SCENE_THRESHOLD",
             "AUTO_EDITOR_PRODUCT_IMAGE_CROP_RATIO",
             "AUTO_EDITOR_PRODUCT_IMAGE_MOTION",
+            "AUTO_EDITOR_BACKGROUND_REMOVAL_BACKEND",
+            "AUTO_EDITOR_BACKGROUNDREMOVER_BIN",
+            "AUTO_EDITOR_BACKGROUNDREMOVER_MODEL",
+            "AUTO_EDITOR_REMBG_MODEL",
+            "AUTO_EDITOR_REMBG_PROVIDERS",
+            "AUTO_EDITOR_REMBG_POST_PROCESS_MASK",
+            "AUTO_EDITOR_REMBG_MASK_EXPAND_PIXELS",
             "AUTO_EDITOR_ADB_BIN",
             "AUTO_EDITOR_SCRCPY_BIN",
         )}
@@ -39,6 +46,13 @@ class PipelineConfigTests(unittest.TestCase):
             os.environ["AUTO_EDITOR_SCENE_THRESHOLD"] = "0.42"
             os.environ["AUTO_EDITOR_PRODUCT_IMAGE_CROP_RATIO"] = "4:3"
             os.environ["AUTO_EDITOR_PRODUCT_IMAGE_MOTION"] = "zoom"
+            os.environ["AUTO_EDITOR_BACKGROUND_REMOVAL_BACKEND"] = "backgroundremover"
+            os.environ["AUTO_EDITOR_BACKGROUNDREMOVER_BIN"] = "C:/custom/backgroundremover.exe"
+            os.environ["AUTO_EDITOR_BACKGROUNDREMOVER_MODEL"] = "u2net"
+            os.environ["AUTO_EDITOR_REMBG_MODEL"] = "silueta"
+            os.environ["AUTO_EDITOR_REMBG_PROVIDERS"] = "directml,cpu"
+            os.environ["AUTO_EDITOR_REMBG_POST_PROCESS_MASK"] = "true"
+            os.environ["AUTO_EDITOR_REMBG_MASK_EXPAND_PIXELS"] = "5"
             os.environ["AUTO_EDITOR_ADB_BIN"] = "C:/custom/adb.exe"
             os.environ["AUTO_EDITOR_SCRCPY_BIN"] = "D:/custom/scrcpy.exe"
 
@@ -49,6 +63,13 @@ class PipelineConfigTests(unittest.TestCase):
             self.assertAlmostEqual(config.scene_threshold, 0.42)
             self.assertEqual(config.product_image_crop_ratio, "4:3")
             self.assertEqual(config.product_image_motion, "zoom")
+            self.assertEqual(config.background_removal_backend, "backgroundremover")
+            self.assertEqual(config.backgroundremover_bin, "C:/custom/backgroundremover.exe")
+            self.assertEqual(config.backgroundremover_model, "u2net")
+            self.assertEqual(config.rembg_model, "silueta")
+            self.assertEqual(config.rembg_providers, ("DmlExecutionProvider", "CPUExecutionProvider"))
+            self.assertTrue(config.rembg_post_process_mask)
+            self.assertEqual(config.rembg_mask_expand_pixels, 5)
             self.assertEqual(config.telegram_bot_token, "bot-token")
             self.assertEqual(config.telegram_allowed_chat_ids, (123, 456))
             self.assertEqual(config.telegram_delivery_chat_id, "987654321")
@@ -82,6 +103,33 @@ class PipelineConfigTests(unittest.TestCase):
         self.assertEqual(config.telegram_bot_token, "saved-token")
         self.assertEqual(config.telegram_delivery_chat_id, "123456")
         self.assertEqual(config.telegram_allowed_chat_ids, (123456,))
+
+    def test_from_env_accepts_remove_background_video_cut_mode(self):
+        with mock.patch.dict(os.environ, {"AUTO_EDITOR_VIDEO_CUT_MODE": "remove_background"}, clear=False):
+            config = PipelineConfig.from_env()
+
+        self.assertEqual(config.video_cut_mode, "remove_background")
+
+    def test_from_env_defaults_remove_background_to_rembg_directml_isnet(self):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AUTO_EDITOR_BACKGROUND_REMOVAL_BACKEND": "",
+                "AUTO_EDITOR_REMBG_MODEL": "",
+                "AUTO_EDITOR_REMBG_PROVIDERS": "",
+                "AUTO_EDITOR_REMBG_POST_PROCESS_MASK": "",
+                "AUTO_EDITOR_REMBG_MASK_EXPAND_PIXELS": "",
+            },
+            clear=False,
+        ):
+            config = PipelineConfig.from_env()
+
+        self.assertEqual(config.background_removal_backend, "rembg")
+        self.assertEqual(config.rembg_model, "isnet-general-use")
+        self.assertEqual(config.rembg_providers, ("DmlExecutionProvider", "CPUExecutionProvider"))
+        self.assertFalse(config.rembg_post_process_mask)
+        self.assertEqual(config.rembg_mask_expand_pixels, 3)
+        self.assertEqual(config.backgroundremover_model, "u2netp")
 
     def test_build_ids_have_expected_prefixes(self):
         config = PipelineConfig()

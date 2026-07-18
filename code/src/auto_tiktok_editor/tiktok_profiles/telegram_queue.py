@@ -7,6 +7,7 @@ import shutil
 import time
 
 from auto_tiktok_editor.config import PROJECT_ROOT, PipelineConfig
+from auto_tiktok_editor.tiktok_profiles.models import TikTokVideo
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager, slugify, split_caption_and_hashtags
 
 
@@ -66,6 +67,75 @@ def enqueue_telegram_video(
     return True
 
 
+def enqueue_telegram_video_draft(
+    config: PipelineConfig,
+    source_video_url: str,
+    product_image_path: Path,
+    source_title: str | None = None,
+    product_id: str = "",
+    product_url: str = "",
+    publish_mode: str = "now",
+    scheduled_at: str = "",
+    cut_mode: str | None = None,
+    manager: TikTokProfileManager | None = None,
+    queue_root: Path | None = None,
+) -> TikTokVideo | None:
+    profile_slug = _profile_slug_from_config(config)
+    if not profile_slug:
+        return None
+
+    manager = manager or TikTokProfileManager()
+    account = manager.find_account_for_profile_slug(profile_slug)
+    if account is None:
+        manager.add_log(
+            "error",
+            "telegram_queue",
+            "No profile account found for bot/profile slug %s." % profile_slug,
+        )
+        return None
+
+    draft_paths = _copy_draft_inputs(profile_slug, source_video_url, product_image_path, queue_root=queue_root)
+    caption, hashtags = split_caption_and_hashtags(source_title or "")
+    note_lines = ["Telegram source: %s" % source_video_url]
+    if product_url:
+        note_lines.append("Product link: %s" % product_url)
+    note = "\n".join(note_lines)
+    video = manager.add_video_draft(
+        draft_paths["marker_path"],
+        source_video_url=source_video_url,
+        product_image_path=draft_paths["product_image_path"],
+        caption=caption,
+        hashtags=hashtags,
+        note=note,
+        account_id=account.id,
+        product_id=product_id,
+        publish_mode=publish_mode,
+        scheduled_at=scheduled_at,
+        source="telegram",
+        cut_mode=cut_mode,
+    )
+    manager.add_log(
+        "info",
+        "telegram_queue",
+        "Saved Telegram draft video %s for profile %s." % (video.id, profile_slug),
+        account_id=account.id,
+        video_id=video.id,
+    )
+    return video
+
+
+def copy_rendered_video_to_queue(
+    profile_slug: str,
+    final_video_path: Path,
+    queue_root: Path | None = None,
+) -> Path:
+    return _copy_to_queue(profile_slug, final_video_path, queue_root=queue_root)
+
+
+def profile_slug_from_config(config: PipelineConfig) -> str:
+    return _profile_slug_from_config(config)
+
+
 def _profile_slug_from_config(config: PipelineConfig) -> str:
     configured = str(getattr(config, "tiktok_profile_slug", "") or "").strip()
     if configured:
@@ -87,3 +157,31 @@ def _copy_to_queue(profile_slug: str, final_video_path: Path, queue_root: Path |
         suffix += 1
     shutil.copy2(str(source), str(destination))
     return destination
+
+
+def _copy_draft_inputs(
+    profile_slug: str,
+    source_video_url: str,
+    product_image_path: Path,
+    queue_root: Path | None = None,
+) -> dict:
+    source_image = Path(product_image_path).expanduser().resolve()
+    if not source_image.exists() or not source_image.is_file():
+        raise ValueError("Product image file does not exist: %s" % source_image)
+    destination_dir = (queue_root or QUEUE_VIDEO_ROOT) / slugify(profile_slug)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    image_suffix = source_image.suffix or ".jpg"
+    image_destination = destination_dir / ("%s_product_image%s" % (timestamp, image_suffix))
+    marker_destination = destination_dir / ("%s_draft.pending" % timestamp)
+    suffix = 2
+    while image_destination.exists() or marker_destination.exists():
+        image_destination = destination_dir / ("%s_%02d_product_image%s" % (timestamp, suffix, image_suffix))
+        marker_destination = destination_dir / ("%s_%02d_draft.pending" % (timestamp, suffix))
+        suffix += 1
+    shutil.copy2(str(source_image), str(image_destination))
+    marker_destination.write_text("draft\n%s\n" % source_video_url.strip(), encoding="utf-8")
+    return {
+        "product_image_path": image_destination,
+        "marker_path": marker_destination,
+    }

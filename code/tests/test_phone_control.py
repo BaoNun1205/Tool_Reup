@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 import subprocess
@@ -82,7 +83,50 @@ class ProcessStub:
         self.returncode = -9
 
 
+class UiAutomationStub:
+    instances = []
+
+    def __init__(self, serial):
+        self.serial = serial
+        self.click_text_calls = []
+        self.click_center_calls = []
+        self.ratio_calls = []
+        self.dumps = []
+        self.clipboard_text = ""
+        UiAutomationStub.instances.append(self)
+
+    def click_text(self, labels, timeout=2.0):
+        self.click_text_calls.append(tuple(labels))
+        return 321, 654
+
+    def click_center(self, x, y):
+        self.click_center_calls.append((x, y))
+        return x, y
+
+    def click_ratio(self, x_ratio, y_ratio):
+        self.ratio_calls.append((x_ratio, y_ratio))
+        return int(1080 * x_ratio), int(2400 * y_ratio)
+
+    def window_size(self):
+        return 1080, 2400
+
+    def dump_hierarchy(self):
+        self.dumps.append(True)
+        return "<hierarchy></hierarchy>"
+
+    def set_clipboard(self, text):
+        self.clipboard_text = text
+
+
 class PhoneControlTests(unittest.TestCase):
+    def setUp(self):
+        self.uiautomator_patch = mock.patch(
+            "auto_tiktok_editor.phone_control.UiAutomatorClient",
+            side_effect=RuntimeError("uiautomator disabled in unit tests"),
+        )
+        self.uiautomator_patch.start()
+        self.addCleanup(self.uiautomator_patch.stop)
+
     def test_normalize_phone_address_adds_default_port(self):
         self.assertEqual(normalize_phone_address("192.168.1.20"), "192.168.1.20:5555")
         self.assertEqual(normalize_phone_address("192.168.1.20:37123"), "192.168.1.20:37123")
@@ -395,6 +439,282 @@ class PhoneControlTests(unittest.TestCase):
         self.assertTrue(result["pasted"])
         self.assertEqual(events[-1]["action"], "phone_text_pasted")
 
+    def test_paste_text_with_adb_keyboard_sends_base64_broadcast_and_restores_ime(self):
+        runner = RunnerStub(
+            [
+                CompletedProcessStub(stdout="com.google.android.inputmethod.latin/.LatinIME\n"),
+                CompletedProcessStub(stdout="Input method com.android.adbkeyboard/.AdbIME enabled\n"),
+                CompletedProcessStub(stdout="Input method com.android.adbkeyboard/.AdbIME selected\n"),
+                CompletedProcessStub(stdout="Broadcast completed: result=-1\n"),
+                CompletedProcessStub(stdout="Input method com.google.android.inputmethod.latin/.LatinIME selected\n"),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+        text = "Mô tả\n#hashtag"
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep"):
+            result = controller.paste_text_with_adb_keyboard("192.168.1.20:5555", text)
+
+        encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        self.assertEqual(runner.tools, ["adb", "adb"])
+        self.assertEqual(
+            runner.commands,
+            [
+                [
+                    "adb",
+                    "-s",
+                    "192.168.1.20:5555",
+                    "shell",
+                    "settings",
+                    "get",
+                    "secure",
+                    "default_input_method",
+                ],
+                ["adb", "-s", "192.168.1.20:5555", "shell", "ime", "enable", "com.android.adbkeyboard/.AdbIME"],
+                ["adb", "-s", "192.168.1.20:5555", "shell", "ime", "set", "com.android.adbkeyboard/.AdbIME"],
+                [
+                    "adb",
+                    "-s",
+                    "192.168.1.20:5555",
+                    "shell",
+                    "am",
+                    "broadcast",
+                    "-a",
+                    "ADB_INPUT_B64",
+                    "--es",
+                    "msg",
+                    encoded_text,
+                ],
+                [
+                    "adb",
+                    "-s",
+                    "192.168.1.20:5555",
+                    "shell",
+                    "ime",
+                    "set",
+                    "com.google.android.inputmethod.latin/.LatinIME",
+                ],
+            ],
+        )
+        self.assertTrue(result["pasted"])
+        self.assertEqual(result["message"], "Pasted text to phone through ADBKeyBoard.")
+        self.assertEqual(events[-1]["input_method"], "com.android.adbkeyboard/.AdbIME")
+
+    def test_paste_text_with_adb_keyboard_accepts_zero_broadcast_result(self):
+        runner = RunnerStub(
+            [
+                CompletedProcessStub(stdout="com.google.android.inputmethod.latin/.LatinIME\n"),
+                CompletedProcessStub(stdout="Input method com.android.adbkeyboard/.AdbIME enabled\n"),
+                CompletedProcessStub(stdout="Input method com.android.adbkeyboard/.AdbIME selected\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "Broadcasting: Intent { act=ADB_INPUT_B64 flg=0x400000 (has extras) }\n"
+                        "Broadcast completed: result=0\n"
+                    ),
+                ),
+                CompletedProcessStub(stdout="Input method com.google.android.inputmethod.latin/.LatinIME selected\n"),
+            ]
+        )
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.time.sleep"):
+            result = controller.paste_text_with_adb_keyboard("192.168.1.20:5555", "Mô tả")
+
+        self.assertTrue(result["pasted"])
+
+    def test_paste_text_with_adb_keyboard_requires_installed_ime(self):
+        runner = RunnerStub(
+            [
+                CompletedProcessStub(stdout="com.google.android.inputmethod.latin/.LatinIME\n"),
+                CompletedProcessStub(stdout="Error: Unknown input method com.android.adbkeyboard/.AdbIME\n"),
+                CompletedProcessStub(stdout="Error: Unknown id: com.android.adbkeyboard/.AdbIME\n", returncode=1),
+            ]
+        )
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+        )
+
+        with mock.patch.object(controller, "_adb_keyboard_apk_path", return_value=None):
+            with self.assertRaisesRegex(RuntimeError, "automatic install failed"):
+                controller.paste_text_with_adb_keyboard("192.168.1.20:5555", "Mô tả")
+
+    def test_paste_text_with_adb_keyboard_installs_apk_when_ime_is_missing(self):
+        apk_path = Path("C:/tools/ADBKeyboard.apk")
+        runner = RunnerStub(
+            [
+                CompletedProcessStub(stdout="com.google.android.inputmethod.latin/.LatinIME\n"),
+                CompletedProcessStub(stdout="Error: Unknown input method com.android.adbkeyboard/.AdbIME\n"),
+                CompletedProcessStub(stdout="Error: Unknown id: com.android.adbkeyboard/.AdbIME\n", returncode=1),
+                CompletedProcessStub(stdout="Success\n"),
+                CompletedProcessStub(stdout="Input method com.android.adbkeyboard/.AdbIME enabled\n"),
+                CompletedProcessStub(stdout="Input method com.android.adbkeyboard/.AdbIME selected\n"),
+                CompletedProcessStub(stdout="Broadcast completed: result=-1\n"),
+                CompletedProcessStub(stdout="Input method com.google.android.inputmethod.latin/.LatinIME selected\n"),
+            ]
+        )
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+        )
+
+        with mock.patch.object(controller, "_adb_keyboard_apk_path", return_value=apk_path), mock.patch(
+            "auto_tiktok_editor.phone_control.time.sleep"
+        ):
+            controller.paste_text_with_adb_keyboard("192.168.1.20:5555", "Mô tả")
+
+        self.assertEqual(
+            runner.commands[3],
+            ["adb", "-s", "192.168.1.20:5555", "install", "-r", str(apk_path)],
+        )
+        self.assertEqual(
+            runner.commands[4],
+            ["adb", "-s", "192.168.1.20:5555", "shell", "ime", "enable", "com.android.adbkeyboard/.AdbIME"],
+        )
+
+    def test_copy_text_to_clipboard_can_sync_phone_clipboard_with_uiautomator2(self):
+        UiAutomationStub.instances = []
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=RunnerStub(),
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.UiAutomatorClient", UiAutomationStub), mock.patch.object(
+            controller,
+            "_set_windows_clipboard_text",
+        ) as set_windows_clipboard:
+            result = controller.copy_text_to_clipboard(
+                "123456",
+                label="Product ID",
+                address="192.168.1.20:5555",
+                sync_to_phone=True,
+            )
+
+        set_windows_clipboard.assert_called_once_with("123456")
+        self.assertTrue(result["phone_clipboard"])
+        self.assertEqual(result["phone_clipboard_method"], "uiautomator2")
+        self.assertEqual(UiAutomationStub.instances[0].clipboard_text, "123456")
+        self.assertIn("phone clipboard", result["message"])
+        self.assertEqual(events[-1]["action"], "phone_text_copied_to_clipboard")
+
+    def test_copy_text_to_clipboard_falls_back_to_adb_clipboard_command(self):
+        runner = RunnerStub(
+            [
+                CompletedProcessStub(),
+                CompletedProcessStub(stdout="123456\n"),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch.object(controller, "_ui", return_value=None), mock.patch.object(
+            controller,
+            "_set_windows_clipboard_text",
+        ) as set_windows_clipboard:
+            result = controller.copy_text_to_clipboard(
+                "123456",
+                label="Product ID",
+                address="192.168.1.20:5555",
+                sync_to_phone=True,
+            )
+
+        self.assertEqual(runner.tools, ["adb"])
+        self.assertEqual(
+            runner.commands[0],
+            [
+                "adb",
+                "-s",
+                "192.168.1.20:5555",
+                "shell",
+                "cmd",
+                "clipboard",
+                "set",
+                "123456",
+            ],
+        )
+        set_windows_clipboard.assert_called_once_with("123456")
+        self.assertTrue(result["phone_clipboard"])
+        self.assertEqual(result["phone_clipboard_method"], "adb_cmd_clipboard")
+
+    def test_copy_text_to_clipboard_rejects_unsupported_adb_clipboard_command(self):
+        runner = RunnerStub(
+            [
+                CompletedProcessStub(stdout="No shell command implementation.\n"),
+            ]
+        )
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+        )
+
+        with mock.patch.object(controller, "_ui", return_value=None), mock.patch.object(
+            controller,
+            "_set_windows_clipboard_text",
+        ) as set_windows_clipboard:
+            with self.assertRaisesRegex(RuntimeError, "phone clipboard"):
+                controller.copy_text_to_clipboard(
+                    "123456",
+                    label="Product ID",
+                    address="192.168.1.20:5555",
+                    sync_to_phone=True,
+                )
+
+        set_windows_clipboard.assert_not_called()
+
+    def test_copy_text_to_clipboard_can_continue_when_phone_clipboard_is_optional(self):
+        runner = RunnerStub(
+            [
+                CompletedProcessStub(stdout="No shell command implementation.\n"),
+            ]
+        )
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch.object(controller, "_ui", return_value=None), mock.patch.object(
+            controller,
+            "_set_windows_clipboard_text",
+        ) as set_windows_clipboard:
+            result = controller.copy_text_to_clipboard(
+                "123456",
+                label="Product ID",
+                address="192.168.1.20:5555",
+                sync_to_phone=True,
+                require_phone_clipboard=False,
+            )
+
+        set_windows_clipboard.assert_called_once_with("123456")
+        self.assertTrue(result["copied"])
+        self.assertFalse(result["phone_clipboard"])
+        self.assertIn("Windows clipboard", result["message"])
+        self.assertIn("No shell command implementation", result["phone_clipboard_method"])
+        self.assertEqual(events[-1]["action"], "phone_text_copied_to_clipboard")
+
     def test_press_space_and_close_keyboard_sends_space_then_back(self):
         runner = RunnerStub()
         events = []
@@ -462,6 +782,30 @@ class PhoneControlTests(unittest.TestCase):
         )
         self.assertEqual(result["tap_x"], "540")
         self.assertEqual(result["tap_y"], "1195")
+        self.assertEqual(events[-1]["action"], "phone_add_link_opened")
+
+    def test_tap_tiktok_add_link_prefers_uiautomator2(self):
+        UiAutomationStub.instances = []
+        runner = RunnerStub()
+        events = []
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+            on_event=events.append,
+        )
+
+        with mock.patch("auto_tiktok_editor.phone_control.UiAutomatorClient", UiAutomationStub), mock.patch(
+            "auto_tiktok_editor.phone_control.time.sleep"
+        ):
+            result = controller.tap_tiktok_add_link("192.168.1.20:5555")
+
+        self.assertEqual(runner.tools, ["adb"])
+        self.assertEqual(runner.commands, [])
+        self.assertEqual(result["tap_x"], "321")
+        self.assertEqual(result["tap_y"], "654")
+        self.assertEqual(UiAutomationStub.instances[0].serial, "192.168.1.20:5555")
+        self.assertIn(("Thêm liên kết", "Add link"), UiAutomationStub.instances[0].click_text_calls)
         self.assertEqual(events[-1]["action"], "phone_add_link_opened")
 
     def test_tap_tiktok_product_link_uses_ui_text(self):

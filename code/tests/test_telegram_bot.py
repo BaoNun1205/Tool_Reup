@@ -11,6 +11,7 @@ import unittest
 import os
 import time
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest import mock
 from urllib.error import URLError
 
@@ -133,8 +134,8 @@ class FakeTelegramJobRunner(object):
         self.video_path = video_path
         self.calls = []
 
-    def run(self, chat_id, source_video_url, product_image_path):
-        self.calls.append((chat_id, source_video_url, Path(product_image_path)))
+    def run(self, chat_id, source_video_url, product_image_path, video_cut_mode=None):
+        self.calls.append((chat_id, source_video_url, Path(product_image_path), video_cut_mode))
         return TelegramJobResult(
             ok=True,
             final_video_path=self.video_path,
@@ -150,8 +151,8 @@ class FlakyTelegramJobRunner(object):
         self.error = error
         self.calls = []
 
-    def run(self, chat_id, source_video_url, product_image_path):
-        self.calls.append((chat_id, source_video_url, Path(product_image_path)))
+    def run(self, chat_id, source_video_url, product_image_path, video_cut_mode=None):
+        self.calls.append((chat_id, source_video_url, Path(product_image_path), video_cut_mode))
         if len(self.calls) <= self.failures_before_success:
             return TelegramJobResult(ok=False, error=self.error)
         return TelegramJobResult(
@@ -452,6 +453,115 @@ class TelegramBotServiceTests(unittest.TestCase):
         self.assertEqual(client.sent_documents, [])
         self.assertTrue(any("Da luu video" in text for _, text in client.sent_messages))
         self.assertTrue(any("upload failed" in text for _, text in client.sent_messages))
+
+    def test_save_to_profile_without_send_result_renders_profile_video(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            product_image = base_dir / "product.jpg"
+            product_image.write_text("image", encoding="utf-8")
+            final_video = base_dir / "final_video.mp4"
+            final_video.write_text("video", encoding="utf-8")
+            client = FakeTelegramClient(base_dir)
+            job_runner = FakeTelegramJobRunner(final_video)
+            config = PipelineConfig(
+                allow_local_telegram=True,
+                telegram_bot_token="token",
+                telegram_input_root=base_dir / "telegram_inputs",
+                default_output_root=base_dir / "output",
+                tiktok_profile_slug="demo_profile",
+                telegram_send_result_to_telegram=False,
+                telegram_save_received_video_to_profile=True,
+                telegram_cleanup_after_job_enabled=False,
+            )
+            service = TelegramBotService(
+                config=config,
+                client=client,
+                job_runner=job_runner,
+                executor=InlineExecutor(),
+            )
+
+            draft_video = SimpleNamespace(id=44, account_id=7, cut_mode="scene", note="Telegram source")
+            updated_video = SimpleNamespace(id=44, account_id=7)
+            manager = mock.Mock()
+            manager.mark_video_rendered.return_value = updated_video
+            queued_final = base_dir / "queued_final.mp4"
+            with mock.patch("auto_tiktok_editor.app.telegram_bot.enqueue_telegram_video_draft", return_value=draft_video) as draft_mock:
+                with mock.patch("auto_tiktok_editor.app.telegram_bot.enqueue_telegram_video") as completed_mock:
+                    with mock.patch("auto_tiktok_editor.app.telegram_bot.TikTokProfileManager", return_value=manager):
+                        with mock.patch(
+                            "auto_tiktok_editor.app.telegram_bot.copy_rendered_video_to_queue",
+                            return_value=queued_final,
+                        ) as copy_mock:
+                            service._run_job_and_reply(
+                                123,
+                                "https://www.tiktok.com/@store/video/1234567890",
+                                "https://www.tiktok.com/view/product/1730667245645826792",
+                                "1730667245645826792",
+                                product_image,
+                            )
+
+            draft_mock.assert_called_once()
+            completed_mock.assert_not_called()
+            self.assertEqual(len(job_runner.calls), 1)
+            self.assertEqual(job_runner.calls[0][3], "scene")
+            manager.update_video_status.assert_any_call(44, "queued", note="Telegram source")
+            manager.update_video_status.assert_any_call(44, "rendering", note="Telegram source")
+            manager.mark_video_rendered.assert_called_once_with(44, queued_final, source_title="Demo source title")
+            copy_mock.assert_called_once_with("demo_profile", final_video)
+            self.assertEqual(client.sent_documents, [])
+            self.assertTrue(any("bat dau tao video" in text for _, text in client.sent_messages))
+            self.assertTrue(any("Da tao xong video" in text for _, text in client.sent_messages))
+        finally:
+            temp_dir.cleanup()
+
+    def test_save_to_profile_creates_queued_profile_video_before_job_starts(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            product_image = base_dir / "product.jpg"
+            product_image.write_text("image", encoding="utf-8")
+            client = FakeTelegramClient(base_dir)
+            config = PipelineConfig(
+                allow_local_telegram=True,
+                telegram_bot_token="token",
+                telegram_input_root=base_dir / "telegram_inputs",
+                default_output_root=base_dir / "output",
+                tiktok_profile_slug="demo_profile",
+                telegram_send_result_to_telegram=False,
+                telegram_save_received_video_to_profile=True,
+                telegram_cleanup_after_job_enabled=False,
+            )
+            service = TelegramBotService(
+                config=config,
+                client=client,
+                job_runner=FakeTelegramJobRunner(base_dir / "unused.mp4"),
+                executor=InlineExecutor(),
+            )
+
+            draft_video = SimpleNamespace(id=55, account_id=7, cut_mode="original", note="Telegram source")
+            manager = mock.Mock()
+            with mock.patch("auto_tiktok_editor.app.telegram_bot.enqueue_telegram_video_draft", return_value=draft_video) as draft_mock:
+                with mock.patch("auto_tiktok_editor.app.telegram_bot.TikTokProfileManager", return_value=manager):
+                    service.save_telegram_video_input(
+                        123,
+                        {
+                            "option": 2,
+                            "video_link": "https://www.tiktok.com/@store/video/1234567890",
+                            "product_link": "https://www.tiktok.com/view/product/1730667245645826792",
+                            "image": product_image,
+                        },
+                    )
+
+            draft_mock.assert_called_once()
+            manager.update_video_status.assert_called_once_with(55, "queued", note="Telegram source")
+            queued_jobs = service._chat_states[123].queued_jobs
+            self.assertEqual(len(queued_jobs), 1)
+            self.assertEqual(queued_jobs[0].profile_video_id, 55)
+            self.assertEqual(queued_jobs[0].profile_video_cut_mode, "original")
+            self.assertEqual(service.job_runner.calls, [])
+        finally:
+            temp_dir.cleanup()
 
     def test_send_result_to_telegram_sends_product_id_after_video(self):
         temp_dir = _temporary_directory()
@@ -1020,6 +1130,31 @@ class TelegramBotServiceTests(unittest.TestCase):
             self.assertEqual(report.deleted_files, 1)
             self.assertFalse(old_video.exists())
             self.assertTrue(recent_video.exists())
+        finally:
+            temp_dir.cleanup()
+
+    def test_cleanup_media_storage_keeps_recent_empty_session_directories(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            output_root = base_dir / "output"
+            recent_session_dir = output_root / "session_running" / "items" / "item_001" / "clips"
+            old_session_dir = output_root / "session_old_empty" / "items"
+            recent_session_dir.mkdir(parents=True, exist_ok=True)
+            old_session_dir.mkdir(parents=True, exist_ok=True)
+            old_timestamp = time.time() - 7200
+            for path in (old_session_dir, old_session_dir.parent):
+                os.utime(path, (old_timestamp, old_timestamp))
+            config = PipelineConfig(
+                telegram_input_root=base_dir / "telegram_inputs",
+                default_output_root=output_root,
+            )
+
+            report = cleanup_media_storage(config, older_than_seconds=3600)
+
+            self.assertGreaterEqual(report.deleted_directories, 1)
+            self.assertTrue(recent_session_dir.exists())
+            self.assertFalse(old_session_dir.exists())
         finally:
             temp_dir.cleanup()
 

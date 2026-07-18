@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 import json
 import logging
@@ -26,7 +26,13 @@ from auto_tiktok_editor.app.orchestrator import SessionOrchestrator
 from auto_tiktok_editor.runtime import ensure_local_telegram_allowed
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import SessionItemSpec, SessionSpec
-from auto_tiktok_editor.tiktok_profiles.telegram_queue import enqueue_telegram_video
+from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
+from auto_tiktok_editor.tiktok_profiles.telegram_queue import (
+    copy_rendered_video_to_queue,
+    enqueue_telegram_video,
+    enqueue_telegram_video_draft,
+    profile_slug_from_config,
+)
 
 
 TIKTOK_URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
@@ -301,6 +307,8 @@ class TelegramQueuedJob:
     product_image_path: Path
     publish_mode: str = "now"
     scheduled_at: str = ""
+    profile_video_id: Optional[int] = None
+    profile_video_cut_mode: str = ""
 
 
 @dataclass
@@ -549,13 +557,30 @@ class TelegramJobRunner(object):
     ):
         self.config = config or PipelineConfig.from_env()
         self.logger = logger or logging.getLogger("auto_tiktok_editor.telegram")
+        self.license_checkpoint = license_checkpoint
         self.orchestrator = orchestrator or SessionOrchestrator(
             config=self.config,
             license_checkpoint=license_checkpoint,
             logger=self.logger,
         )
 
-    def run(self, chat_id: int, source_video_url: str, product_image_path: Path) -> TelegramJobResult:
+    def run(
+        self,
+        chat_id: int,
+        source_video_url: str,
+        product_image_path: Path,
+        video_cut_mode: str | None = None,
+    ) -> TelegramJobResult:
+        render_config = self.config
+        orchestrator = self.orchestrator
+        requested_cut_mode = str(video_cut_mode or "").strip().lower()
+        if requested_cut_mode and requested_cut_mode != str(getattr(self.config, "video_cut_mode", "") or "").strip().lower():
+            render_config = replace(self.config, video_cut_mode=requested_cut_mode)
+            orchestrator = SessionOrchestrator(
+                config=render_config,
+                license_checkpoint=self.license_checkpoint,
+                logger=self.logger,
+            )
         session_spec = SessionSpec(
             items=[
                 SessionItemSpec(
@@ -564,11 +589,11 @@ class TelegramJobRunner(object):
                     product_image=Path(product_image_path),
                 )
             ],
-            output_root_dir=self.config.default_output_root,
+            output_root_dir=render_config.default_output_root,
             session_name="telegram_%s" % chat_id,
             cookies_file=None,
         )
-        session_result = self.orchestrator.run(session_spec)
+        session_result = orchestrator.run(session_spec)
         if not session_result.items:
             return TelegramJobResult(
                 ok=False,
@@ -819,22 +844,55 @@ class TelegramBotService(object):
         product_url = str(data.get("product_link") or "").strip()
         product_id = extract_tiktok_product_id(product_url) or ""
         scheduled_at = str(data.get("schedule_time") or "").strip()
+        queued_job = self._prepare_profile_queued_job(
+            chat_id,
+            TelegramQueuedJob(
+                option=int(data.get("option") or 0),
+                source_video_url=str(data.get("video_link") or "").strip(),
+                product_url=product_url,
+                product_id=product_id,
+                product_image_path=Path(data.get("image")),
+                publish_mode="scheduled" if scheduled_at else "now",
+                scheduled_at=scheduled_at,
+            ),
+        )
         with self._state_lock:
             state = self._chat_states.get(chat_id)
             if state is None:
                 state = TelegramConversationState()
                 self._chat_states[chat_id] = state
-            state.queued_jobs.append(
-                TelegramQueuedJob(
-                    option=int(data.get("option") or 0),
-                    source_video_url=str(data.get("video_link") or "").strip(),
-                    product_url=product_url,
-                    product_id=product_id,
-                    product_image_path=Path(data.get("image")),
-                    publish_mode="scheduled" if scheduled_at else "now",
-                    scheduled_at=scheduled_at,
-                )
+            state.queued_jobs.append(queued_job)
+
+    def _prepare_profile_queued_job(self, chat_id: int, queued_job: TelegramQueuedJob) -> TelegramQueuedJob:
+        if not self._should_save_profile_draft() or queued_job.profile_video_id is not None:
+            return queued_job
+        profile_video = self._queue_telegram_video_draft(
+            chat_id,
+            queued_job.source_video_url,
+            queued_job.product_url,
+            queued_job.product_id,
+            queued_job.product_image_path,
+            queued_job.publish_mode,
+            queued_job.scheduled_at,
+            announce=False,
+        )
+        if profile_video is None:
+            return queued_job
+        try:
+            profile_manager = TikTokProfileManager()
+            profile_manager.update_video_status(profile_video.id, "queued", note=profile_video.note)
+            profile_manager.add_log(
+                "info",
+                "telegram_render_queued",
+                "Queued Telegram draft video %s for rendering." % profile_video.id,
+                account_id=profile_video.account_id,
+                video_id=profile_video.id,
             )
+        except Exception as exc:
+            self.logger.warning("Could not mark Telegram draft as queued: %s", exc)
+        queued_job.profile_video_id = profile_video.id
+        queued_job.profile_video_cut_mode = profile_video.cut_mode
+        return queued_job
 
     def _format_caption_error(self, errors: List[str]) -> str:
         return "\n".join(
@@ -996,7 +1054,7 @@ class TelegramBotService(object):
                 send_menu = True
             else:
                 send_menu = False
-                enqueued = self._enqueue_ready_job(state)
+                enqueued = self._enqueue_ready_job(chat_id, state)
                 if enqueued:
                     state.workflow_state = STATE_SELECT_OPTION
                     state.selected_option = None
@@ -1197,7 +1255,7 @@ class TelegramBotService(object):
             if state.pending_timer is not None:
                 state.pending_timer.cancel()
             state.pending_timer = None
-            enqueued_job = self._enqueue_ready_job(state)
+            enqueued_job = self._enqueue_ready_job(chat_id, state)
             response_text = self._compose_state_message(state=state, enqueued_job=enqueued_job)
             should_start_job = enqueued_job
         if response_text:
@@ -1231,6 +1289,8 @@ class TelegramBotService(object):
             queued_job.product_image_path,
             queued_job.publish_mode,
             queued_job.scheduled_at,
+            queued_job.profile_video_id,
+            queued_job.profile_video_cut_mode,
         )
 
     def _run_job_and_reply(
@@ -1242,6 +1302,8 @@ class TelegramBotService(object):
         product_image_path: Optional[Path] = None,
         publish_mode: str = "now",
         scheduled_at: str = "",
+        profile_video_id: int | None = None,
+        profile_video_cut_mode: str = "",
     ) -> None:
         if product_image_path is None:
             product_image_path = Path(product_url_or_image_path)
@@ -1252,7 +1314,75 @@ class TelegramBotService(object):
             product_image_path = Path(product_image_path)
             product_id = product_id or ""
         result = None
+        profile_video = None
+        profile_manager = None
         try:
+            if self._should_save_profile_draft():
+                profile_manager = TikTokProfileManager()
+                if profile_video_id is not None:
+                    profile_video = profile_manager.get_video(profile_video_id)
+                    if profile_video is None:
+                        self.client.send_message(chat_id, "Khong tim thay video da xep hang trong Profile Manager: %s" % profile_video_id)
+                        return
+                else:
+                    profile_video = self._queue_telegram_video_draft(
+                        chat_id,
+                        source_video_url,
+                        product_url,
+                        product_id,
+                        product_image_path,
+                        publish_mode,
+                        scheduled_at,
+                    )
+                    if profile_video is None:
+                        return
+                    profile_manager.update_video_status(profile_video.id, "queued", note=profile_video.note)
+                    profile_manager.add_log(
+                        "info",
+                        "telegram_render_queued",
+                        "Queued Telegram draft video %s for immediate rendering." % profile_video.id,
+                        account_id=profile_video.account_id,
+                        video_id=profile_video.id,
+                    )
+                    self.client.send_message(chat_id, "Da luu video vao profile va bat dau tao video.")
+                profile_manager.update_video_status(profile_video.id, "rendering", note=profile_video.note)
+                render_cut_mode = str(profile_video_cut_mode or profile_video.cut_mode or "original").strip().lower()
+                result = self._run_job_with_processing_retries(
+                    chat_id,
+                    source_video_url,
+                    product_image_path,
+                    video_cut_mode=render_cut_mode,
+                )
+                if not result.ok or result.final_video_path is None or not result.final_video_path.exists():
+                    error_text = result.error or "khong tim thay video dau ra."
+                    profile_manager.update_video_status(profile_video.id, "error", note=error_text)
+                    profile_manager.add_log(
+                        "error",
+                        "telegram_render_error",
+                        "Telegram draft video %s render failed: %s" % (profile_video.id, error_text),
+                        account_id=profile_video.account_id,
+                        video_id=profile_video.id,
+                    )
+                    self.client.send_message(chat_id, "Job bi loi: %s" % error_text)
+                    return
+                stored_final_path = copy_rendered_video_to_queue(
+                    profile_slug_from_config(self.config),
+                    result.final_video_path,
+                )
+                updated_video = profile_manager.mark_video_rendered(
+                    profile_video.id,
+                    stored_final_path,
+                    source_title=result.source_title,
+                )
+                profile_manager.add_log(
+                    "info",
+                    "telegram_render_completed",
+                    "Rendered Telegram draft video %s with cut mode %s." % (profile_video.id, render_cut_mode),
+                    account_id=updated_video.account_id,
+                    video_id=updated_video.id,
+                )
+                self.client.send_message(chat_id, "Da tao xong video va luu vao profile.")
+                return
             result = self._run_job_with_processing_retries(chat_id, source_video_url, product_image_path)
             if not result.ok or result.final_video_path is None or not result.final_video_path.exists():
                 self.client.send_message(
@@ -1284,6 +1414,11 @@ class TelegramBotService(object):
                     self.client.send_message(chat_id, "Đã lưu video vào hàng đợi TikTok Profile Manager.")
         except Exception as exc:
             self.logger.exception("Telegram job failed for chat %s.", chat_id)
+            if profile_video is not None:
+                try:
+                    (profile_manager or TikTokProfileManager()).update_video_status(profile_video.id, "error", note=str(exc))
+                except Exception:
+                    pass
             self.client.send_message(chat_id, "Co loi khi xu ly hoac gui job: %s" % exc)
         finally:
             if self.config.telegram_cleanup_after_job_enabled:
@@ -1343,6 +1478,60 @@ class TelegramBotService(object):
             self.logger.warning("Could not queue Telegram result for TikTok Profile Manager: %s", exc)
             return False
 
+    def _queue_telegram_video_draft(
+        self,
+        chat_id: int,
+        source_video_url: str,
+        product_url: str,
+        product_id: str,
+        product_image_path: Path,
+        publish_mode: str,
+        scheduled_at: str,
+        announce: bool = True,
+    ):
+        if not str(getattr(self.config, "tiktok_profile_slug", "") or "").strip():
+            if announce:
+                self.client.send_message(chat_id, "Bot nay chua duoc map voi profile TikTok de luu video.")
+            return None
+        try:
+            resolved_product_url = product_url
+            resolved_product_id = product_id
+            if resolved_product_url and not resolved_product_id:
+                resolved_product_url, resolved_product_id = self._extract_product_id_after_edit(product_url)
+            if resolved_product_url and not resolved_product_id:
+                self.client.send_message(
+                    chat_id,
+                    "Da nhan link san pham nhung chua lay duoc TikTok product ID. Link: %s" % resolved_product_url,
+                )
+            queued = enqueue_telegram_video_draft(
+                self.config,
+                source_video_url=source_video_url,
+                product_image_path=product_image_path,
+                source_title=None,
+                product_id=resolved_product_id,
+                product_url=resolved_product_url,
+                publish_mode=publish_mode,
+                scheduled_at=scheduled_at,
+            )
+            if queued and announce:
+                if resolved_product_id:
+                    self.client.send_message(chat_id, "Da luu video va product ID %s vao profile." % resolved_product_id)
+                else:
+                    self.client.send_message(chat_id, "Da luu video vao profile.")
+            return queued
+        except Exception as exc:
+            self.logger.warning("Could not queue Telegram draft for TikTok Profile Manager: %s", exc)
+            if announce:
+                self.client.send_message(chat_id, "Khong luu duoc draft vao Profile Manager: %s" % exc)
+            return None
+
+    def _should_save_profile_draft(self) -> bool:
+        return (
+            self._effective_save_to_profile()
+            and bool(str(getattr(self.config, "tiktok_profile_slug", "") or "").strip())
+            and not self._effective_send_result_to_telegram()
+        )
+
     def _effective_save_to_profile(self) -> bool:
         save_to_profile = bool(getattr(self.config, "telegram_save_received_video_to_profile", True))
         send_result = bool(getattr(self.config, "telegram_send_result_to_telegram", False))
@@ -1358,11 +1547,17 @@ class TelegramBotService(object):
         chat_id: int,
         source_video_url: str,
         product_image_path: Path,
+        video_cut_mode: str | None = None,
     ) -> TelegramJobResult:
         last_result = None
         for attempt in range(1, TELEGRAM_JOB_RETRY_ATTEMPTS + 1):
             try:
-                result = self.job_runner.run(chat_id, source_video_url, product_image_path)
+                result = self.job_runner.run(
+                    chat_id,
+                    source_video_url,
+                    product_image_path,
+                    video_cut_mode=video_cut_mode,
+                )
             except Exception as exc:
                 if attempt >= TELEGRAM_JOB_RETRY_ATTEMPTS or not self._should_retry_processing_error(str(exc)):
                     raise
@@ -1521,10 +1716,11 @@ class TelegramBotService(object):
             return "Bot đang chờ link video TikTok cho job hiện tại."
         return self._instruction_text()
 
-    def _enqueue_ready_job(self, state: TelegramConversationState) -> bool:
+    def _enqueue_ready_job(self, chat_id: int, state: TelegramConversationState) -> bool:
         if self._missing_input_parts(state) or state.draft_errors:
             return False
-        state.queued_jobs.append(
+        queued_job = self._prepare_profile_queued_job(
+            chat_id,
             TelegramQueuedJob(
                 option=int(state.selected_option or 0),
                 source_video_url=state.draft_source_video_url,
@@ -1533,8 +1729,9 @@ class TelegramBotService(object):
                 product_image_path=state.draft_product_image_path,
                 publish_mode=state.draft_publish_mode or "now",
                 scheduled_at=state.draft_scheduled_at or "",
-            )
+            ),
         )
+        state.queued_jobs.append(queued_job)
         state.draft_source_video_url = None
         state.draft_product_url = None
         state.draft_product_id = None

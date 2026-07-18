@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import base64
 from dataclasses import dataclass
 from datetime import datetime
 import ipaddress
@@ -11,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import threading
 import time
 from typing import Callable
@@ -20,6 +22,7 @@ import xml.etree.ElementTree as ET
 
 from auto_tiktok_editor.app.device_transfer import AndroidDeviceTransfer
 from auto_tiktok_editor.config import PipelineConfig
+from auto_tiktok_editor.phone_uiautomator import UiAutomatorClient, UiAutomatorUnavailable
 from auto_tiktok_editor.utils.command import CommandRunner
 
 
@@ -78,6 +81,10 @@ TIKTOK_UPLOAD_DEEPLINKS = (
     "snssdk1233://aweme/publish",
     "tiktok://upload",
 )
+ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
+ADB_KEYBOARD_INPUT_B64_ACTION = "ADB_INPUT_B64"
+ADB_KEYBOARD_READY_DELAY_SECONDS = 0.7
+ADB_KEYBOARD_COMMIT_DELAY_SECONDS = 0.8
 
 
 class _AppBarData(ctypes.Structure):
@@ -638,6 +645,11 @@ class PhoneController:
         self._window_dock = WindowsScrcpyDock()
         self._window_dock_thread: threading.Thread | None = None
         self._window_dock_stop = threading.Event()
+        self._ui_automation: UiAutomatorClient | None = None
+        self._ui_automation_serial: str = ""
+        self._ui_automation_unavailable = False
+        self._ui_automation_error = ""
+        self._previous_android_input_method = ""
 
     def connect(self, address: str) -> dict[str, str]:
         target = normalize_phone_address(address)
@@ -734,6 +746,56 @@ class PhoneController:
     def is_connected(self) -> bool:
         return bool(self.connected_serial) or self.is_running()
 
+    def copy_text_to_clipboard(
+        self,
+        text: str,
+        *,
+        label: str = "Text",
+        address: str = "",
+        sync_to_phone: bool = False,
+        require_phone_clipboard: bool = True,
+    ) -> dict[str, object]:
+        clean_text = str(text or "").strip()
+        if not clean_text:
+            return {"copied": False, "message": "No text to copy."}
+        phone_clipboard = False
+        phone_clipboard_method = ""
+        if sync_to_phone:
+            target = normalize_phone_address(address or self.connected_serial)
+            self.runner.ensure_tool(self.config.adb_bin)
+            phone_clipboard, phone_clipboard_method = self._set_android_clipboard_text(
+                target,
+                clean_text,
+            )
+            if not phone_clipboard:
+                detail = str(phone_clipboard_method or "").strip()
+                if require_phone_clipboard:
+                    suffix = " Detail: %s" % detail if detail else ""
+                    raise RuntimeError("Could not copy %s to the phone clipboard.%s" % (label, suffix))
+        self._set_windows_clipboard_text(clean_text)
+        if phone_clipboard:
+            message = "%s copied to phone clipboard." % label
+        elif sync_to_phone and phone_clipboard_method:
+            message = "%s copied to Windows clipboard; phone clipboard sync failed." % label
+        else:
+            message = "%s copied to clipboard." % label
+        self._emit_event(
+            "info",
+            "phone_text_copied_to_clipboard",
+            "%s (%s characters)." % (message, len(clean_text)),
+            text_length=len(clean_text),
+            label=label,
+            phone_clipboard=str(phone_clipboard),
+            phone_clipboard_method=phone_clipboard_method,
+        )
+        return {
+            "copied": True,
+            "phone_clipboard": phone_clipboard,
+            "phone_clipboard_method": phone_clipboard_method,
+            "text_length": len(clean_text),
+            "message": message,
+        }
+
     def paste_text_with_scrcpy(self, text: str) -> dict[str, object]:
         clean_text = str(text or "")
         if not clean_text:
@@ -752,6 +814,85 @@ class PhoneController:
             "pasted": True,
             "text_length": len(clean_text),
             "message": "Pasted text to phone through scrcpy.",
+        }
+
+    def paste_text_with_adb_keyboard(
+        self,
+        address: str,
+        text: str,
+        *,
+        restore_keyboard: bool = True,
+    ) -> dict[str, object]:
+        target = normalize_phone_address(address or self.connected_serial)
+        clean_text = str(text or "")
+        if not clean_text:
+            return {"pasted": False, "message": "No text to paste."}
+        if not target:
+            raise RuntimeError("Connect the phone before pasting text with ADBKeyBoard.")
+        self.runner.ensure_tool(self.config.adb_bin)
+        previous_ime = self._android_default_input_method(target)
+        self._set_adb_keyboard_input_method(target)
+        if previous_ime and previous_ime != ADB_KEYBOARD_IME:
+            self._previous_android_input_method = previous_ime
+        time.sleep(ADB_KEYBOARD_READY_DELAY_SECONDS)
+        encoded_text = base64.b64encode(clean_text.encode("utf-8")).decode("ascii")
+        completed = self.runner.run(
+            [
+                self.config.adb_bin,
+                "-s",
+                target,
+                "shell",
+                "am",
+                "broadcast",
+                "-a",
+                ADB_KEYBOARD_INPUT_B64_ACTION,
+                "--es",
+                "msg",
+                encoded_text,
+            ],
+            check=False,
+        )
+        output = self._completed_output(completed)
+        if getattr(completed, "returncode", 1) != 0 or self._adb_output_has_error(output):
+            raise RuntimeError(
+                "Could not paste text with ADBKeyBoard. Install and enable ADBKeyBoard on the phone, then try again. Detail: %s"
+                % (output.strip() or "ADB broadcast failed.")
+            )
+        time.sleep(ADB_KEYBOARD_COMMIT_DELAY_SECONDS)
+        if restore_keyboard and previous_ime and previous_ime != ADB_KEYBOARD_IME:
+            self.restore_android_input_method(target)
+        self._emit_event(
+            "info",
+            "phone_text_pasted",
+            "Pasted text to phone through ADBKeyBoard (%s characters)." % len(clean_text),
+            text_length=len(clean_text),
+            device_serial=target,
+            input_method=ADB_KEYBOARD_IME,
+        )
+        return {
+            "pasted": True,
+            "text_length": len(clean_text),
+            "message": "Pasted text to phone through ADBKeyBoard.",
+        }
+
+    def restore_android_input_method(self, address: str = "") -> dict[str, object]:
+        target = normalize_phone_address(address or self.connected_serial)
+        previous_ime = self._previous_android_input_method
+        if not previous_ime or previous_ime == ADB_KEYBOARD_IME:
+            return {"restored": False, "message": "No previous Android keyboard to restore."}
+        self.runner.ensure_tool(self.config.adb_bin)
+        completed = self.runner.run(
+            [self.config.adb_bin, "-s", target, "shell", "ime", "set", previous_ime],
+            check=False,
+        )
+        output = self._completed_output(completed)
+        restored = getattr(completed, "returncode", 1) == 0 and not self._adb_output_has_error(output)
+        if restored:
+            self._previous_android_input_method = ""
+        return {
+            "restored": restored,
+            "input_method": previous_ime,
+            "message": "Android keyboard restored." if restored else "Could not restore Android keyboard.",
         }
 
     def press_space_and_close_keyboard(self, address: str = "") -> dict[str, str]:
@@ -784,19 +925,7 @@ class PhoneController:
             width, height = self._phone_screen_size(target)
             tap_x = max(1, int(width * 0.5))
             tap_y = max(1, int(height * 0.486))
-            self.runner.run(
-                [
-                    self.config.adb_bin,
-                    "-s",
-                    target,
-                    "shell",
-                    "input",
-                    "tap",
-                    str(tap_x),
-                    str(tap_y),
-                ],
-                check=False,
-            )
+            self._tap_phone(target, tap_x, tap_y)
         else:
             tap_x, tap_y = center
         self._emit_event(
@@ -825,19 +954,7 @@ class PhoneController:
             width, height = self._phone_screen_size(target)
             tap_x = max(1, int(width * 0.5))
             tap_y = max(1, int(height * 0.844))
-            self.runner.run(
-                [
-                    self.config.adb_bin,
-                    "-s",
-                    target,
-                    "shell",
-                    "input",
-                    "tap",
-                    str(tap_x),
-                    str(tap_y),
-                ],
-                check=False,
-            )
+            self._tap_phone(target, tap_x, tap_y)
         else:
             tap_x, tap_y = center
         self._emit_event(
@@ -873,19 +990,7 @@ class PhoneController:
             )
         else:
             tap_x, tap_y = search_field["center"]
-        self.runner.run(
-            [
-                self.config.adb_bin,
-                "-s",
-                target,
-                "shell",
-                "input",
-                "tap",
-                str(tap_x),
-                str(tap_y),
-            ],
-            check=False,
-        )
+        self._tap_phone(target, tap_x, tap_y)
         time.sleep(0.4)
         self._emit_event(
             "info",
@@ -962,19 +1067,7 @@ class PhoneController:
             width, height = self._phone_screen_size(target)
             tap_x = max(1, int(width * 0.817))
             tap_y = max(1, int(height * 0.251))
-            self.runner.run(
-                [
-                    self.config.adb_bin,
-                    "-s",
-                    target,
-                    "shell",
-                    "input",
-                    "tap",
-                    str(tap_x),
-                    str(tap_y),
-                ],
-                check=False,
-            )
+            self._tap_phone(target, tap_x, tap_y)
         else:
             tap_x, tap_y = center
         self._emit_event(
@@ -1011,19 +1104,7 @@ class PhoneController:
                 "message": "No optional Add popup.",
             }
         tap_x, tap_y = center
-        self.runner.run(
-            [
-                self.config.adb_bin,
-                "-s",
-                target,
-                "shell",
-                "input",
-                "tap",
-                str(tap_x),
-                str(tap_y),
-            ],
-            check=False,
-        )
+        self._tap_phone(target, tap_x, tap_y)
         self._emit_event(
             "info",
             "phone_optional_add_popup_tapped",
@@ -1080,10 +1161,7 @@ class PhoneController:
                 "message": "Product name screen is already valid; closed keyboard.",
             }
         tap_x, tap_y = center
-        self.runner.run(
-            [self.config.adb_bin, "-s", target, "shell", "input", "tap", str(tap_x), str(tap_y)],
-            check=False,
-        )
+        self._tap_phone(target, tap_x, tap_y)
         time.sleep(0.2)
         self._send_android_keyevent(target, ANDROID_KEYCODE_MOVE_END)
         delete_count = max(20, len(current_text) + 8)
@@ -1120,19 +1198,7 @@ class PhoneController:
             tap_y = max(1, int(height * 0.938))
         else:
             tap_x, tap_y = center
-        self.runner.run(
-            [
-                self.config.adb_bin,
-                "-s",
-                target,
-                "shell",
-                "input",
-                "tap",
-                str(tap_x),
-                str(tap_y),
-            ],
-            check=False,
-        )
+        self._tap_phone(target, tap_x, tap_y)
         self._emit_event(
             "info",
             "phone_anchor_final_add_tapped",
@@ -1159,19 +1225,7 @@ class PhoneController:
             width, height = self._phone_screen_size(target)
             tap_x = max(1, int(width * 0.5))
             tap_y = max(1, int(height * 0.642))
-            self.runner.run(
-                [
-                    self.config.adb_bin,
-                    "-s",
-                    target,
-                    "shell",
-                    "input",
-                    "tap",
-                    str(tap_x),
-                    str(tap_y),
-                ],
-                check=False,
-            )
+            self._tap_phone(target, tap_x, tap_y)
         else:
             tap_x, tap_y = center
         self._emit_event(
@@ -1200,19 +1254,7 @@ class PhoneController:
             width, height = self._phone_screen_size(target)
             tap_x = max(1, int(width * 0.5))
             tap_y = max(1, int(height * 0.667))
-            self.runner.run(
-                [
-                    self.config.adb_bin,
-                    "-s",
-                    target,
-                    "shell",
-                    "input",
-                    "tap",
-                    str(tap_x),
-                    str(tap_y),
-                ],
-                check=False,
-            )
+            self._tap_phone(target, tap_x, tap_y)
         else:
             tap_x, tap_y = center
         self._emit_event(
@@ -1409,6 +1451,50 @@ class PhoneController:
                 check=False,
             )
 
+    def _ui(self, target: str) -> UiAutomatorClient | None:
+        if self._ui_automation is not None and self._ui_automation_serial == target:
+            return self._ui_automation
+        try:
+            self._ui_automation = UiAutomatorClient(target)
+            self._ui_automation_serial = target
+            self._ui_automation_error = ""
+        except UiAutomatorUnavailable as exc:
+            self._ui_automation = None
+            self._ui_automation_serial = ""
+            self._ui_automation_unavailable = False
+            self._ui_automation_error = "uiautomator2 is unavailable for %s: %s" % (
+                target,
+                str(exc) or exc.__class__.__name__,
+            )
+        except Exception as exc:
+            self._ui_automation = None
+            self._ui_automation_serial = ""
+            self._ui_automation_error = str(exc) or exc.__class__.__name__
+            return None
+        return self._ui_automation
+
+    def _tap_phone(self, target: str, tap_x: int, tap_y: int) -> tuple[int, int]:
+        ui = self._ui(target)
+        if ui is not None:
+            try:
+                return ui.click_center(tap_x, tap_y)
+            except Exception:
+                pass
+        self.runner.run(
+            [
+                self.config.adb_bin,
+                "-s",
+                target,
+                "shell",
+                "input",
+                "tap",
+                str(tap_x),
+                str(tap_y),
+            ],
+            check=False,
+        )
+        return tap_x, tap_y
+
     def _installed_tiktok_package(self, target: str) -> str:
         for package_name in TIKTOK_ANDROID_PACKAGES:
             completed = self.runner.run(
@@ -1428,61 +1514,40 @@ class PhoneController:
         return ""
 
     def _tap_tiktok_create_button(self, target: str) -> tuple[int, int]:
+        ui = self._ui(target)
+        if ui is not None:
+            try:
+                return ui.click_ratio(0.5, 0.935)
+            except Exception:
+                pass
         width, height = self._phone_screen_size(target)
         tap_x = max(1, width // 2)
         tap_y = max(1, int(height * 0.935))
-        self.runner.run(
-            [
-                self.config.adb_bin,
-                "-s",
-                target,
-                "shell",
-                "input",
-                "tap",
-                str(tap_x),
-                str(tap_y),
-            ],
-            check=False,
-        )
-        return tap_x, tap_y
+        return self._tap_phone(target, tap_x, tap_y)
 
     def _tap_tiktok_library_button(self, target: str) -> tuple[int, int]:
+        ui = self._ui(target)
+        if ui is not None:
+            try:
+                return ui.click_ratio(0.085, 0.913)
+            except Exception:
+                pass
         width, height = self._phone_screen_size(target)
         tap_x = max(1, int(width * 0.085))
         tap_y = max(1, int(height * 0.913))
-        self.runner.run(
-            [
-                self.config.adb_bin,
-                "-s",
-                target,
-                "shell",
-                "input",
-                "tap",
-                str(tap_x),
-                str(tap_y),
-            ],
-            check=False,
-        )
-        return tap_x, tap_y
+        return self._tap_phone(target, tap_x, tap_y)
 
     def _tap_tiktok_first_library_video(self, target: str) -> tuple[int, int]:
+        ui = self._ui(target)
+        if ui is not None:
+            try:
+                return ui.click_ratio(1 / 6, 0.22)
+            except Exception:
+                pass
         width, height = self._phone_screen_size(target)
         tap_x = max(1, int(width / 6))
         tap_y = max(1, int(height * 0.22))
-        self.runner.run(
-            [
-                self.config.adb_bin,
-                "-s",
-                target,
-                "shell",
-                "input",
-                "tap",
-                str(tap_x),
-                str(tap_y),
-            ],
-            check=False,
-        )
-        return tap_x, tap_y
+        return self._tap_phone(target, tap_x, tap_y)
 
     def _tap_tiktok_next_button(self, target: str) -> tuple[int, int]:
         text_match = self._tap_ui_text(target, ("Tiếp", "Next"))
@@ -1491,20 +1556,7 @@ class PhoneController:
         width, height = self._phone_screen_size(target)
         tap_x = max(1, int(width * 0.735))
         tap_y = max(1, int(height * 0.954))
-        self.runner.run(
-            [
-                self.config.adb_bin,
-                "-s",
-                target,
-                "shell",
-                "input",
-                "tap",
-                str(tap_x),
-                str(tap_y),
-            ],
-            check=False,
-        )
-        return tap_x, tap_y
+        return self._tap_phone(target, tap_x, tap_y)
 
     def _tap_tiktok_caption_field(self, target: str) -> tuple[int, int]:
         xml_text = self._dump_ui_xml(target)
@@ -1515,41 +1567,23 @@ class PhoneController:
             width, height = self._phone_screen_size(target)
             tap_x = max(1, int(width * 0.22))
             tap_y = max(1, int(height * 0.185))
-        self.runner.run(
-            [
-                self.config.adb_bin,
-                "-s",
-                target,
-                "shell",
-                "input",
-                "tap",
-                str(tap_x),
-                str(tap_y),
-            ],
-            check=False,
-        )
-        return tap_x, tap_y
+        return self._tap_phone(target, tap_x, tap_y)
 
     def _tap_ui_text(self, target: str, labels: tuple[str, ...]) -> tuple[int, int] | None:
+        ui = self._ui(target)
+        if ui is not None:
+            try:
+                center = ui.click_text(labels)
+                if center is not None:
+                    return center
+            except Exception:
+                pass
         xml_text = self._dump_ui_xml(target)
         center = self._find_ui_text_center(xml_text, labels)
         if center is None:
             return None
         tap_x, tap_y = center
-        self.runner.run(
-            [
-                self.config.adb_bin,
-                "-s",
-                target,
-                "shell",
-                "input",
-                "tap",
-                str(tap_x),
-                str(tap_y),
-            ],
-            check=False,
-        )
-        return tap_x, tap_y
+        return self._tap_phone(target, tap_x, tap_y)
 
     def _find_ui_text_center(self, xml_text: str, labels: tuple[str, ...]) -> tuple[int, int] | None:
         if not xml_text:
@@ -1762,6 +1796,14 @@ class PhoneController:
         return None
 
     def _dump_ui_xml(self, target: str) -> str:
+        ui = self._ui(target)
+        if ui is not None:
+            try:
+                xml_text = ui.dump_hierarchy()
+                if xml_text:
+                    return xml_text
+            except Exception:
+                pass
         remote_path = "/sdcard/tiktok_tool_window.xml"
         dump_result = self.runner.run(
             [self.config.adb_bin, "-s", target, "shell", "uiautomator", "dump", remote_path],
@@ -1888,7 +1930,194 @@ class PhoneController:
             check=False,
         )
 
+    def _android_default_input_method(self, target: str) -> str:
+        completed = self.runner.run(
+            [
+                self.config.adb_bin,
+                "-s",
+                target,
+                "shell",
+                "settings",
+                "get",
+                "secure",
+                "default_input_method",
+            ],
+            check=False,
+        )
+        if getattr(completed, "returncode", 1) != 0:
+            return ""
+        text = str(getattr(completed, "stdout", "") or "").strip()
+        return "" if text == "null" else text
+
+    def _set_adb_keyboard_input_method(self, target: str) -> None:
+        enable = self.runner.run(
+            [self.config.adb_bin, "-s", target, "shell", "ime", "enable", ADB_KEYBOARD_IME],
+            check=False,
+        )
+        set_ime = self.runner.run(
+            [self.config.adb_bin, "-s", target, "shell", "ime", "set", ADB_KEYBOARD_IME],
+            check=False,
+        )
+        output = "%s\n%s" % (self._completed_output(enable), self._completed_output(set_ime))
+        if (
+            getattr(set_ime, "returncode", 1) != 0
+            or "Unknown input method" in output
+            or "Unknown id" in output
+            or "Error" in output
+        ):
+            if self._install_adb_keyboard_if_available(target):
+                enable = self.runner.run(
+                    [self.config.adb_bin, "-s", target, "shell", "ime", "enable", ADB_KEYBOARD_IME],
+                    check=False,
+                )
+                set_ime = self.runner.run(
+                    [self.config.adb_bin, "-s", target, "shell", "ime", "set", ADB_KEYBOARD_IME],
+                    check=False,
+                )
+                output = "%s\n%s" % (self._completed_output(enable), self._completed_output(set_ime))
+                if (
+                    getattr(set_ime, "returncode", 1) == 0
+                    and "Unknown input method" not in output
+                    and "Unknown id" not in output
+                    and "Error" not in output
+                ):
+                    return
+            apk_path = self._adb_keyboard_apk_path()
+            install_hint = (
+                " Put ADBKeyboard.apk at %s and try again." % (Path.cwd() / "tools" / "ADBKeyboard.apk")
+                if apk_path is None
+                else ""
+            )
+            raise RuntimeError(
+                "ADBKeyBoard is not available on the phone and automatic install failed.%s Enable it once with: adb shell ime enable %s"
+                % (install_hint, ADB_KEYBOARD_IME)
+            )
+
+    def _install_adb_keyboard_if_available(self, target: str) -> bool:
+        apk_path = self._adb_keyboard_apk_path()
+        if apk_path is None:
+            return False
+        completed = self.runner.run(
+            [self.config.adb_bin, "-s", target, "install", "-r", str(apk_path)],
+            check=False,
+        )
+        output = self._completed_output(completed)
+        return getattr(completed, "returncode", 1) == 0 and (
+            "Success" in output or not output.strip()
+        )
+
+    def _adb_keyboard_apk_path(self) -> Path | None:
+        candidates = []
+        env_path = os.getenv("AUTO_EDITOR_ADB_KEYBOARD_APK", "").strip()
+        if env_path:
+            candidates.append(Path(env_path))
+        candidates.extend(
+            [
+                Path.cwd() / "tools" / "ADBKeyboard.apk",
+                Path.cwd() / "ADBKeyboard.apk",
+                Path(__file__).resolve().parents[2] / "tools" / "ADBKeyboard.apk",
+                Path(sys.executable).resolve().parent / "tools" / "ADBKeyboard.apk",
+            ]
+        )
+        for candidate in candidates:
+            try:
+                path = candidate.expanduser().resolve()
+            except OSError:
+                continue
+            if path.is_file():
+                return path
+        return None
+
+    @staticmethod
+    def _completed_output(completed: object) -> str:
+        return "%s\n%s" % (
+            str(getattr(completed, "stdout", "") or ""),
+            str(getattr(completed, "stderr", "") or ""),
+        )
+
+    @staticmethod
+    def _adb_output_has_error(output: str) -> bool:
+        lowered = str(output or "").casefold()
+        return any(
+            marker in lowered
+            for marker in (
+                "exception",
+                "securityexception",
+                "permission denial",
+                "not found",
+                "unknown",
+                "error:",
+            )
+        )
+
+    def _set_android_clipboard_text(self, target: str, text: str) -> tuple[bool, str]:
+        clean_text = str(text or "").strip()
+        if not clean_text:
+            return False, ""
+        failure_reasons: list[str] = []
+        ui = self._ui(target)
+        if ui is not None:
+            try:
+                ui.set_clipboard(clean_text)
+                return True, "uiautomator2"
+            except Exception as exc:
+                failure_reasons.append("uiautomator2 failed: %s" % (str(exc) or exc.__class__.__name__))
+        elif self._ui_automation_error:
+            failure_reasons.append(self._ui_automation_error)
+        completed = self.runner.run(
+            [
+                self.config.adb_bin,
+                "-s",
+                target,
+                "shell",
+                "cmd",
+                "clipboard",
+                "set",
+                clean_text,
+            ],
+            check=False,
+        )
+        set_output = "%s\n%s" % (
+            getattr(completed, "stdout", "") or "",
+            getattr(completed, "stderr", "") or "",
+        )
+        if getattr(completed, "returncode", 1) == 0 and "No shell command implementation" not in set_output:
+            verify = self.runner.run(
+                [
+                    self.config.adb_bin,
+                    "-s",
+                    target,
+                    "shell",
+                    "cmd",
+                    "clipboard",
+                    "get",
+                ],
+                check=False,
+            )
+            verify_output = "%s\n%s" % (
+                getattr(verify, "stdout", "") or "",
+                getattr(verify, "stderr", "") or "",
+            )
+            if (
+                getattr(verify, "returncode", 1) == 0
+                and "No shell command implementation" not in verify_output
+                and clean_text in verify_output
+            ):
+                return True, "adb_cmd_clipboard"
+            failure_reasons.append("adb cmd clipboard verify failed: %s" % verify_output.strip())
+        else:
+            failure_reasons.append("adb cmd clipboard set failed: %s" % set_output.strip())
+        if getattr(completed, "returncode", 1) == 0 and clean_text in set_output:
+            return True, "adb_cmd_clipboard"
+        return False, "; ".join(reason for reason in failure_reasons if reason)
+
     def _phone_screen_size(self, target: str) -> tuple[int, int]:
+        ui = self._ui(target)
+        if ui is not None:
+            try:
+                return ui.window_size()
+            except Exception:
+                pass
         completed = self.runner.run(
             [self.config.adb_bin, "-s", target, "shell", "wm", "size"],
             check=False,

@@ -27,7 +27,7 @@ class TelegramSettingsTests(unittest.TestCase):
             sample = TelegramRuntimeSettings(
                 bot_token="bot-token-demo",
                 delivery_chat_id="123456",
-                video_cut_mode="original",
+                video_cut_mode="remove_background",
                 product_image_crop_ratio="4:3",
                 product_image_motion="zoom",
             )

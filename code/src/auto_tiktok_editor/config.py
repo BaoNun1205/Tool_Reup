@@ -171,7 +171,7 @@ def _env_float(name: str, default: float) -> float:
 
 def _normalize_video_cut_mode(value: str) -> str:
     normalized = str(value or "").strip().lower()
-    return normalized if normalized in {"fixed", "scene", "original"} else "fixed"
+    return normalized if normalized in {"fixed", "scene", "original", "remove_background"} else "fixed"
 
 
 def _normalize_product_image_crop_ratio(value: str) -> str:
@@ -182,6 +182,67 @@ def _normalize_product_image_crop_ratio(value: str) -> str:
 def _normalize_product_image_motion(value: str) -> str:
     normalized = str(value or "").strip().lower()
     return normalized if normalized in {"still", "zoom"} else "still"
+
+
+def _normalize_backgroundremover_model(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"u2net", "u2net_human_seg", "u2netp"} else "u2netp"
+
+
+def _normalize_background_removal_backend(value: str) -> str:
+    normalized = str(value or "").strip().lower().replace("-", "_")
+    return normalized if normalized in {"rembg", "backgroundremover"} else "rembg"
+
+
+def _normalize_rembg_model(value: str) -> str:
+    normalized = str(value or "").strip().lower().replace("_", "-")
+    allowed = {
+        "u2net",
+        "u2netp",
+        "u2net-human-seg",
+        "u2net-cloth-seg",
+        "silueta",
+        "isnet-general-use",
+        "isnet-anime",
+        "birefnet-general",
+    }
+    if normalized == "u2net_human_seg":
+        normalized = "u2net-human-seg"
+    if normalized == "u2net_cloth_seg":
+        normalized = "u2net-cloth-seg"
+    return normalized if normalized in allowed else "isnet-general-use"
+
+
+def _normalize_rembg_providers(value) -> tuple:
+    if isinstance(value, (tuple, list)):
+        chunks = value
+    else:
+        chunks = str(value or "").split(",")
+    providers = []
+    mapping = {
+        "directml": "DmlExecutionProvider",
+        "dml": "DmlExecutionProvider",
+        "dmlexecutionprovider": "DmlExecutionProvider",
+        "cpu": "CPUExecutionProvider",
+        "cpuexecutionprovider": "CPUExecutionProvider",
+        "cuda": "CUDAExecutionProvider",
+        "cudaexecutionprovider": "CUDAExecutionProvider",
+        "rocm": "ROCMExecutionProvider",
+        "rocmexecutionprovider": "ROCMExecutionProvider",
+    }
+    for chunk in chunks:
+        raw = str(chunk or "").strip()
+        if not raw:
+            continue
+        normalized = raw.lower().replace("_", "").replace("-", "")
+        provider = mapping.get(normalized, raw)
+        if provider not in providers:
+            providers.append(provider)
+    if not providers:
+        providers = ["DmlExecutionProvider", "CPUExecutionProvider"]
+    if "CPUExecutionProvider" not in providers:
+        providers.append("CPUExecutionProvider")
+    return tuple(providers)
 
 
 def _env_chat_ids(name: str):
@@ -232,6 +293,13 @@ class PipelineConfig:
     ytdlp_bin: str = "yt-dlp"
     lazy_down_bin: str = "lazy-down"
     realesrgan_bin: str = "realesrgan-ncnn-vulkan"
+    background_removal_backend: str = "rembg"
+    backgroundremover_bin: str = "backgroundremover"
+    backgroundremover_model: str = "u2netp"
+    rembg_model: str = "isnet-general-use"
+    rembg_providers: tuple = ("DmlExecutionProvider", "CPUExecutionProvider")
+    rembg_post_process_mask: bool = False
+    rembg_mask_expand_pixels: int = 3
     adb_bin: str = "adb"
     scrcpy_bin: str = "scrcpy"
     tikwm_api_url: str = "https://www.tikwm.com/api/"
@@ -280,6 +348,8 @@ class PipelineConfig:
     # Cat chunk va bao toan muc tieu shuffle.
     # Mode "fixed" cat chunk co dinh; mode "scene" cat theo diem chuyen canh;
     # mode "original" bo qua buoc cat va xao tron, cac buoc con lai van chay.
+    # mode "remove_background" bo qua cat/xao tron, xoa nen video va dung anh
+    # san pham 1:1 phong cover thanh nen 9:16.
     video_cut_mode: str = "fixed"
     # Do dai chunk co dinh. Neu muon moi doan deu duoi 3 giay thi giu gia tri nay < 3.0.
     fixed_chunk_duration_seconds: float = 2.27
@@ -488,6 +558,25 @@ class PipelineConfig:
                 [],
                 "realesrgan-ncnn-vulkan.exe",
             ),
+            backgroundremover_bin=_resolve_tool(
+                "AUTO_EDITOR_BACKGROUNDREMOVER_BIN",
+                "backgroundremover",
+                "backgroundremover.exe",
+                [],
+                "backgroundremover.exe",
+            ),
+            backgroundremover_model=_normalize_backgroundremover_model(
+                os.getenv("AUTO_EDITOR_BACKGROUNDREMOVER_MODEL", "u2netp")
+            ),
+            background_removal_backend=_normalize_background_removal_backend(
+                os.getenv("AUTO_EDITOR_BACKGROUND_REMOVAL_BACKEND", "rembg")
+            ),
+            rembg_model=_normalize_rembg_model(os.getenv("AUTO_EDITOR_REMBG_MODEL", "isnet-general-use")),
+            rembg_providers=_normalize_rembg_providers(
+                os.getenv("AUTO_EDITOR_REMBG_PROVIDERS", "DmlExecutionProvider,CPUExecutionProvider")
+            ),
+            rembg_post_process_mask=_env_flag("AUTO_EDITOR_REMBG_POST_PROCESS_MASK", False),
+            rembg_mask_expand_pixels=max(0, _env_int("AUTO_EDITOR_REMBG_MASK_EXPAND_PIXELS", 3)),
             adb_bin=(
                 os.getenv("AUTO_EDITOR_ADB_BIN")
                 or _find_runtime_binary("tools/adb.exe")

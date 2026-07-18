@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
+import shutil
 
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import EditPlan, FinalAudioAsset, OverlaySpec, ProcessedMaster, RoughCutAsset, SceneRange
+from auto_tiktok_editor.exceptions import ExternalToolError
 from auto_tiktok_editor.media.probe import MediaProbe
 from auto_tiktok_editor.utils.command import CommandRunner
 from auto_tiktok_editor.utils.timecode import format_seconds
@@ -370,3 +373,406 @@ class FinalCompositor(object):
 
     def _ffmpeg_color(self, value: str) -> str:
         return value.replace('#', '0x')
+
+
+class RembgFrameProcessor(object):
+    def process(
+        self,
+        input_frames_dir: Path,
+        output_frames_dir: Path,
+        model_name: str,
+        providers: tuple,
+        post_process_mask: bool,
+        mask_expand_pixels: int,
+    ) -> tuple:
+        try:
+            import onnxruntime as ort
+            import numpy as np
+            from PIL import Image, ImageFilter
+            from rembg.bg import post_process
+        except ImportError as exc:
+            raise ExternalToolError(
+                "rembg/onnxruntime-directml is not installed. Install rembg and onnxruntime-directml to use remove-background mode."
+            ) from exc
+
+        selected_providers = self._select_available_providers(ort, providers)
+        session = self._new_rembg_session(ort, model_name, selected_providers)
+        frame_paths = sorted(input_frames_dir.glob("frame_*.png"))
+        if not frame_paths:
+            raise ExternalToolError("No frames were extracted for rembg background removal.")
+
+        output_frames_dir.mkdir(parents=True, exist_ok=True)
+        for frame_path in frame_paths:
+            with Image.open(frame_path) as image:
+                rgb_image = image.convert("RGB")
+                masks = session.predict(rgb_image)
+                if not masks:
+                    raise ExternalToolError("rembg did not return a foreground mask for '%s'." % frame_path)
+                mask = masks[0]
+                if post_process_mask:
+                    mask = Image.fromarray(post_process(np.array(mask)))
+                mask = self._relax_mask(mask, mask_expand_pixels, ImageFilter)
+                cutout = rgb_image.convert("RGBA")
+                cutout.putalpha(mask)
+                cutout.save(output_frames_dir / frame_path.name)
+        return selected_providers
+
+    def _relax_mask(self, mask, expand_pixels: int, image_filter):
+        normalized = mask.convert("L")
+        if expand_pixels <= 0:
+            return normalized
+        filter_size = (int(expand_pixels) * 2) + 1
+        return normalized.filter(image_filter.MaxFilter(filter_size))
+
+    def _select_available_providers(self, ort, configured_providers: tuple) -> tuple:
+        available = set(ort.get_available_providers())
+        selected = [provider for provider in configured_providers if provider in available]
+        if "CPUExecutionProvider" in available and "CPUExecutionProvider" not in selected:
+            selected.append("CPUExecutionProvider")
+        if not selected:
+            selected = ["CPUExecutionProvider"]
+        return tuple(selected)
+
+    def _new_rembg_session(self, ort, model_name: str, providers: tuple):
+        try:
+            from rembg.sessions import sessions_class
+
+            session_class = None
+            for candidate in sessions_class:
+                if candidate.name() == model_name:
+                    session_class = candidate
+                    break
+            if session_class is None:
+                raise ValueError("No rembg session class found for model '%s'" % model_name)
+            session_options = ort.SessionOptions()
+            if "DmlExecutionProvider" in providers:
+                session_options.enable_mem_pattern = False
+                session_options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            if "OMP_NUM_THREADS" in os.environ:
+                threads = int(os.environ["OMP_NUM_THREADS"])
+                session_options.inter_op_num_threads = threads
+                session_options.intra_op_num_threads = threads
+            return session_class(model_name, session_options, providers=list(providers))
+        except Exception as exc:
+            raise ExternalToolError("Unable to create rembg session for model '%s': %s" % (model_name, exc)) from exc
+
+
+class BackgroundRemovalCompositor(object):
+    def __init__(self, config: PipelineConfig, runner: CommandRunner, rembg_processor=None):
+        self.config = config
+        self.runner = runner
+        self.rembg_processor = rembg_processor or RembgFrameProcessor()
+
+    def compose(
+        self,
+        rough_cut: RoughCutAsset,
+        final_audio: FinalAudioAsset,
+        product_image_path: Path,
+        output_path: Path,
+    ) -> Path:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if self._backend_name() == "backgroundremover":
+            return self._compose_with_backgroundremover(
+                rough_cut,
+                final_audio,
+                product_image_path,
+                output_path,
+            )
+        return self._compose_with_rembg(
+            rough_cut,
+            final_audio,
+            product_image_path,
+            output_path,
+        )
+
+    def _compose_with_backgroundremover(
+        self,
+        rough_cut: RoughCutAsset,
+        final_audio: FinalAudioAsset,
+        product_image_path: Path,
+        output_path: Path,
+    ) -> Path:
+        subject_path = output_path.with_name("%s_subject_alpha.mov" % output_path.stem)
+        self._remove_video_background(rough_cut.path, subject_path)
+        self._compose_subject_over_product_background(
+            subject_path,
+            product_image_path,
+            final_audio,
+            rough_cut.info.duration_seconds,
+            output_path,
+        )
+        return output_path
+
+    def _compose_with_rembg(
+        self,
+        rough_cut: RoughCutAsset,
+        final_audio: FinalAudioAsset,
+        product_image_path: Path,
+        output_path: Path,
+    ) -> Path:
+        work_dir = output_path.with_name("%s_rembg_frames" % output_path.stem)
+        raw_frames_dir = work_dir / "raw"
+        cutout_frames_dir = work_dir / "cutout"
+        try:
+            self._reset_directory(raw_frames_dir)
+            self._reset_directory(cutout_frames_dir)
+            self._extract_video_frames(rough_cut.path, raw_frames_dir)
+            self.rembg_processor.process(
+                raw_frames_dir,
+                cutout_frames_dir,
+                self._rembg_model_name(),
+                self._rembg_providers(),
+                self._rembg_post_process_mask(),
+                self._rembg_mask_expand_pixels(),
+            )
+            self._compose_rembg_frames_over_product_background(
+                cutout_frames_dir,
+                product_image_path,
+                final_audio,
+                rough_cut.info.duration_seconds,
+                output_path,
+            )
+        finally:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        return output_path
+
+    def _extract_video_frames(self, input_path: Path, output_frames_dir: Path) -> None:
+        filter_complex = (
+            "fps=%d,scale=%d:%d:force_original_aspect_ratio=increase,"
+            "crop=%d:%d,setsar=1"
+            % (
+                self.config.target_fps,
+                self.config.target_width,
+                self.config.target_height,
+                self.config.target_width,
+                self.config.target_height,
+            )
+        )
+        command = [
+            self.config.ffmpeg_bin,
+            "-y",
+            "-i",
+            str(input_path),
+            "-vf",
+            filter_complex,
+            "-an",
+            str(output_frames_dir / "frame_%06d.png"),
+        ]
+        self.runner.run(command)
+
+    def _remove_video_background(self, input_path: Path, output_path: Path) -> None:
+        command = [
+            self.config.backgroundremover_bin,
+            "-i",
+            str(input_path),
+            "--model",
+            self._model_name(),
+            "-tv",
+            "-o",
+            str(output_path),
+        ]
+        self.runner.run(command)
+
+    def _compose_rembg_frames_over_product_background(
+        self,
+        cutout_frames_dir: Path,
+        product_image_path: Path,
+        final_audio: FinalAudioAsset,
+        duration_seconds: float,
+        output_path: Path,
+    ) -> None:
+        filter_complex = (
+            "[0:v]scale=%d:%d:force_original_aspect_ratio=increase,"
+            "crop=%d:%d,setsar=1,format=rgba[bg];"
+            "[1:v]scale=%d:%d:force_original_aspect_ratio=increase,"
+            "crop=%d:%d,setsar=1,format=rgba[fg];"
+            "[bg][fg]overlay=0:0:shortest=1:format=auto,format=yuv420p[vout]"
+            % (
+                self.config.target_width,
+                self.config.target_height,
+                self.config.target_width,
+                self.config.target_height,
+                self.config.target_width,
+                self.config.target_height,
+                self.config.target_width,
+                self.config.target_height,
+            )
+        )
+        command = [
+            self.config.ffmpeg_bin,
+            "-y",
+            "-loop",
+            "1",
+            "-i",
+            str(product_image_path),
+            "-framerate",
+            str(self.config.target_fps),
+            "-i",
+            str(cutout_frames_dir / "frame_%06d.png"),
+            "-i",
+            str(final_audio.path),
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[vout]",
+            "-map",
+            "2:a:0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-profile:v",
+            "high",
+            "-level",
+            "4.2",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            str(self.config.target_fps),
+            "-b:v",
+            self.config.final_video_bitrate,
+            "-maxrate",
+            self.config.final_video_maxrate,
+            "-bufsize",
+            self.config.final_video_bufsize,
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-c:a",
+            "aac",
+            "-b:a",
+            self.config.final_audio_bitrate,
+            "-ar",
+            str(self.config.target_sample_rate),
+            "-t",
+            format_seconds(duration_seconds),
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        self.runner.run(command)
+
+    def _compose_subject_over_product_background(
+        self,
+        subject_path: Path,
+        product_image_path: Path,
+        final_audio: FinalAudioAsset,
+        duration_seconds: float,
+        output_path: Path,
+    ) -> None:
+        filter_complex = (
+            "[0:v]scale=%d:%d:force_original_aspect_ratio=increase,"
+            "crop=%d:%d,setsar=1,format=rgba[bg];"
+            "[1:v]scale=%d:%d:force_original_aspect_ratio=increase,"
+            "crop=%d:%d,setsar=1,format=rgba[fg];"
+            "[bg][fg]overlay=0:0:shortest=1:format=auto,format=yuv420p[vout]"
+            % (
+                self.config.target_width,
+                self.config.target_height,
+                self.config.target_width,
+                self.config.target_height,
+                self.config.target_width,
+                self.config.target_height,
+                self.config.target_width,
+                self.config.target_height,
+            )
+        )
+        command = [
+            self.config.ffmpeg_bin,
+            "-y",
+            "-loop",
+            "1",
+            "-i",
+            str(product_image_path),
+            "-i",
+            str(subject_path),
+            "-i",
+            str(final_audio.path),
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[vout]",
+            "-map",
+            "2:a:0",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-profile:v",
+            "high",
+            "-level",
+            "4.2",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            str(self.config.target_fps),
+            "-b:v",
+            self.config.final_video_bitrate,
+            "-maxrate",
+            self.config.final_video_maxrate,
+            "-bufsize",
+            self.config.final_video_bufsize,
+            "-colorspace",
+            "bt709",
+            "-color_primaries",
+            "bt709",
+            "-color_trc",
+            "bt709",
+            "-color_range",
+            "tv",
+            "-c:a",
+            "aac",
+            "-b:a",
+            self.config.final_audio_bitrate,
+            "-ar",
+            str(self.config.target_sample_rate),
+            "-t",
+            format_seconds(duration_seconds),
+            "-movflags",
+            "+faststart",
+            str(output_path),
+        ]
+        self.runner.run(command)
+
+    def _reset_directory(self, path: Path) -> None:
+        shutil.rmtree(path, ignore_errors=True)
+        path.mkdir(parents=True, exist_ok=True)
+
+    def _backend_name(self) -> str:
+        backend = str(getattr(self.config, "background_removal_backend", "rembg") or "rembg").strip().lower()
+        return backend if backend in {"rembg", "backgroundremover"} else "rembg"
+
+    def _rembg_model_name(self) -> str:
+        model_name = str(getattr(self.config, "rembg_model", "isnet-general-use") or "isnet-general-use").strip().lower()
+        allowed = {
+            "u2net",
+            "u2netp",
+            "u2net-human-seg",
+            "u2net-cloth-seg",
+            "silueta",
+            "isnet-general-use",
+            "isnet-anime",
+            "birefnet-general",
+        }
+        return model_name if model_name in allowed else "isnet-general-use"
+
+    def _rembg_providers(self) -> tuple:
+        providers = getattr(self.config, "rembg_providers", ("DmlExecutionProvider", "CPUExecutionProvider"))
+        if isinstance(providers, str):
+            providers = tuple(chunk.strip() for chunk in providers.split(",") if chunk.strip())
+        return tuple(providers or ("DmlExecutionProvider", "CPUExecutionProvider"))
+
+    def _rembg_post_process_mask(self) -> bool:
+        return bool(getattr(self.config, "rembg_post_process_mask", False))
+
+    def _rembg_mask_expand_pixels(self) -> int:
+        return max(0, int(getattr(self.config, "rembg_mask_expand_pixels", 3) or 0))
+
+    def _model_name(self) -> str:
+        model_name = str(getattr(self.config, "backgroundremover_model", "u2netp") or "u2netp").strip().lower()
+        return model_name if model_name in {"u2net", "u2net_human_seg", "u2netp"} else "u2netp"

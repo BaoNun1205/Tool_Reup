@@ -104,6 +104,27 @@ class ProductImagePreprocessorTests(unittest.TestCase):
         finally:
             cleanup_temp_dir(temp_dir)
 
+    def test_remove_background_mode_forces_1_1_crop_even_when_4_3_is_configured(self):
+        temp_dir = tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT))
+        try:
+            base_dir = Path(temp_dir.name)
+            source_path = base_dir / "product.png"
+            write_fake_png(source_path, 1600, 1200, has_alpha=True)
+            runner = ProductImageRunner(fail_realesrgan=True)
+            preprocessor = ProductImagePreprocessor(
+                PipelineConfig(video_cut_mode="remove_background", product_image_crop_ratio="4:3"),
+                runner,
+            )
+
+            result = preprocessor.prepare(probe_image(source_path), base_dir / "processed")
+
+            self.assertFalse(result.enhanced)
+            self.assertEqual(result.image_info.path.name, "product_1x1.png")
+            crop_filter = runner.commands[0][runner.commands[0].index("-vf") + 1]
+            self.assertIn("crop='if(gte(iw/ih\\,1.0000)\\,ih*1.0000\\,iw)'", crop_filter)
+        finally:
+            cleanup_temp_dir(temp_dir)
+
     def test_uses_cropped_image_when_realesrgan_is_unavailable(self):
         temp_dir = tempfile.TemporaryDirectory(dir=str(TEST_TEMP_ROOT))
         try:

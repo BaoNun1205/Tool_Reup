@@ -15,6 +15,7 @@ from auto_tiktok_editor.tiktok_profiles.models import (
     ACCOUNT_STATUSES,
     LOGIN_TYPES,
     PUBLISH_MODES,
+    VIDEO_CUT_MODES,
     VIDEO_STATUSES,
     TikTokAccount,
     TikTokLog,
@@ -25,7 +26,7 @@ from auto_tiktok_editor.tiktok_profiles.models import (
 
 DEFAULT_DB_PATH = PROJECT_ROOT / "tiktok_profile_manager.sqlite3"
 DEFAULT_PROFILES_ROOT = PROJECT_ROOT / "profiles"
-HASHTAG_RE = re.compile(r"(?<!\w)#[\w\u0080-\uffff]+", re.UNICODE)
+HASHTAG_RE = re.compile(r"#[\w\u0080-\uffff]+", re.UNICODE)
 
 
 def slugify(value: str) -> str:
@@ -64,11 +65,13 @@ class TikTokProfileManager:
                     profile_path TEXT NOT NULL UNIQUE,
                     status TEXT NOT NULL,
                     note TEXT NOT NULL DEFAULT '',
+                    cut_mode TEXT NOT NULL DEFAULT 'original',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            self._ensure_column(conn, "accounts", "cut_mode", "TEXT NOT NULL DEFAULT 'original'")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status)")
             conn.execute(
                 """
@@ -84,6 +87,9 @@ class TikTokProfileManager:
                     source TEXT NOT NULL DEFAULT 'manual',
                     status TEXT NOT NULL,
                     note TEXT NOT NULL DEFAULT '',
+                    cut_mode TEXT NOT NULL DEFAULT 'original',
+                    source_video_url TEXT NOT NULL DEFAULT '',
+                    product_image_path TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(account_id) REFERENCES accounts(id)
@@ -97,6 +103,9 @@ class TikTokProfileManager:
             self._ensure_column(conn, "videos", "publish_mode", "TEXT NOT NULL DEFAULT 'now'")
             self._ensure_column(conn, "videos", "scheduled_at", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "videos", "source", "TEXT NOT NULL DEFAULT 'manual'")
+            self._ensure_column(conn, "videos", "cut_mode", "TEXT NOT NULL DEFAULT 'original'")
+            self._ensure_column(conn, "videos", "source_video_url", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "videos", "product_image_path", "TEXT NOT NULL DEFAULT ''")
             self._migrate_caption_hashtags(conn)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_status ON videos(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_account_id ON videos(account_id)")
@@ -138,7 +147,7 @@ class TikTokProfileManager:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, name, login_type, profile_path, status, note, created_at, updated_at
+                SELECT id, name, login_type, profile_path, status, note, cut_mode, created_at, updated_at
                 FROM accounts
                 ORDER BY id ASC
                 """
@@ -149,7 +158,7 @@ class TikTokProfileManager:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, name, login_type, profile_path, status, note, created_at, updated_at
+                SELECT id, name, login_type, profile_path, status, note, cut_mode, created_at, updated_at
                 FROM accounts
                 WHERE id = ?
                 """,
@@ -174,12 +183,13 @@ class TikTokProfileManager:
                     return account
         return None
 
-    def add_account(self, name: str, login_type: str, note: str = "") -> TikTokAccount:
+    def add_account(self, name: str, login_type: str, note: str = "", cut_mode: str = "original") -> TikTokAccount:
         clean_name = (name or "").strip()
         if not clean_name:
             raise ValueError("Account name is required.")
         if login_type not in LOGIN_TYPES:
             raise ValueError("Unsupported login type: %s" % login_type)
+        cut_mode = _normalize_video_cut_mode(cut_mode)
 
         profile_path = self._build_unique_profile_path(clean_name)
         profile_path.mkdir(parents=True, exist_ok=False)
@@ -189,15 +199,30 @@ class TikTokProfileManager:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO accounts (name, login_type, profile_path, status, note, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO accounts (name, login_type, profile_path, status, note, cut_mode, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (clean_name, login_type, stored_profile_path, "paused", note.strip(), now, now),
+                (clean_name, login_type, stored_profile_path, "paused", note.strip(), cut_mode, now, now),
             )
             account_id = int(cursor.lastrowid)
         account = self.get_account(account_id)
         if account is None:
             raise RuntimeError("Created account could not be loaded.")
+        return account
+
+    def update_account_cut_mode(self, account_id: int, cut_mode: str) -> TikTokAccount:
+        normalized = _normalize_video_cut_mode(cut_mode)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE accounts SET cut_mode = ?, updated_at = ? WHERE id = ?",
+                (normalized, now, int(account_id)),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Account not found: %s" % account_id)
+        account = self.get_account(account_id)
+        if account is None:
+            raise ValueError("Account not found: %s" % account_id)
         return account
 
     def list_source_channels(self, account_id: int | None = None) -> list[TikTokSourceChannel]:
@@ -341,7 +366,8 @@ class TikTokProfileManager:
             rows = conn.execute(
                 """
                 SELECT id, account_id, file_path, caption, hashtags, product_id, publish_mode,
-                       scheduled_at, source, status, note, created_at, updated_at
+                       scheduled_at, source, status, note, cut_mode, source_video_url,
+                       product_image_path, created_at, updated_at
                 FROM videos
                 ORDER BY id ASC
                 """
@@ -353,7 +379,8 @@ class TikTokProfileManager:
             row = conn.execute(
                 """
                 SELECT id, account_id, file_path, caption, hashtags, product_id, publish_mode,
-                       scheduled_at, source, status, note, created_at, updated_at
+                       scheduled_at, source, status, note, cut_mode, source_video_url,
+                       product_image_path, created_at, updated_at
                 FROM videos
                 WHERE id = ?
                 """,
@@ -372,25 +399,32 @@ class TikTokProfileManager:
         publish_mode: str = "now",
         scheduled_at: str = "",
         source: str = "manual",
+        cut_mode: str | None = None,
+        source_video_url: str = "",
+        product_image_path: Path | str = "",
     ) -> TikTokVideo:
         resolved = Path(file_path).expanduser().resolve()
         if not resolved.exists() or not resolved.is_file():
             raise ValueError("Video file does not exist: %s" % resolved)
-        if account_id is not None and self.get_account(account_id) is None:
+        account = self.get_account(account_id) if account_id is not None else None
+        if account_id is not None and account is None:
             raise ValueError("Account not found: %s" % account_id)
         publish_mode = _normalize_publish_mode(publish_mode)
         scheduled_at = _normalize_scheduled_at(publish_mode, scheduled_at)
+        cut_mode = _normalize_video_cut_mode(cut_mode if cut_mode is not None else (account.cut_mode if account else "original"))
         clean_caption, clean_hashtags = split_caption_and_hashtags(caption, hashtags)
         stored_path = self._path_for_storage(resolved)
+        stored_product_image_path = self._optional_path_for_storage(product_image_path)
         now = utc_now_iso()
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO videos (
                     account_id, file_path, caption, hashtags, product_id, publish_mode,
-                    scheduled_at, source, status, note, created_at, updated_at
+                    scheduled_at, source, status, note, cut_mode, source_video_url,
+                    product_image_path, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     account_id,
@@ -403,6 +437,9 @@ class TikTokProfileManager:
                     source.strip() or "manual",
                     "ready",
                     note.strip(),
+                    cut_mode,
+                    source_video_url.strip(),
+                    stored_product_image_path,
                     now,
                     now,
                 ),
@@ -411,6 +448,72 @@ class TikTokProfileManager:
         video = self.get_video(video_id)
         if video is None:
             raise RuntimeError("Created video could not be loaded.")
+        return video
+
+    def add_video_draft(
+        self,
+        marker_path: Path | str,
+        source_video_url: str,
+        product_image_path: Path | str,
+        caption: str = "",
+        hashtags: str = "",
+        note: str = "",
+        account_id: int | None = None,
+        product_id: str = "",
+        publish_mode: str = "now",
+        scheduled_at: str = "",
+        source: str = "telegram",
+        cut_mode: str | None = None,
+    ) -> TikTokVideo:
+        resolved_marker = Path(marker_path).expanduser().resolve()
+        resolved_marker.parent.mkdir(parents=True, exist_ok=True)
+        if not resolved_marker.exists():
+            resolved_marker.write_text("draft\n%s\n" % source_video_url.strip(), encoding="utf-8")
+        account = self.get_account(account_id) if account_id is not None else None
+        if account_id is not None and account is None:
+            raise ValueError("Account not found: %s" % account_id)
+        image_path = Path(product_image_path).expanduser().resolve()
+        if not image_path.exists() or not image_path.is_file():
+            raise ValueError("Product image file does not exist: %s" % image_path)
+        if not str(source_video_url or "").strip():
+            raise ValueError("Source video URL is required.")
+        publish_mode = _normalize_publish_mode(publish_mode)
+        scheduled_at = _normalize_scheduled_at(publish_mode, scheduled_at)
+        cut_mode = _normalize_video_cut_mode(cut_mode if cut_mode is not None else (account.cut_mode if account else "original"))
+        clean_caption, clean_hashtags = split_caption_and_hashtags(caption, hashtags)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO videos (
+                    account_id, file_path, caption, hashtags, product_id, publish_mode,
+                    scheduled_at, source, status, note, cut_mode, source_video_url,
+                    product_image_path, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    account_id,
+                    self._path_for_storage(resolved_marker),
+                    clean_caption,
+                    clean_hashtags,
+                    product_id.strip(),
+                    publish_mode,
+                    scheduled_at,
+                    source.strip() or "telegram",
+                    "draft",
+                    note.strip(),
+                    cut_mode,
+                    source_video_url.strip(),
+                    self._path_for_storage(image_path),
+                    now,
+                    now,
+                ),
+            )
+            video_id = int(cursor.lastrowid)
+        video = self.get_video(video_id)
+        if video is None:
+            raise RuntimeError("Created video draft could not be loaded.")
         return video
 
     def update_video_schedule(
@@ -500,6 +603,57 @@ class TikTokProfileManager:
                     "UPDATE videos SET status = ?, note = ?, updated_at = ? WHERE id = ?",
                     (status, note.strip(), now, video_id),
                 )
+        video = self.get_video(video_id)
+        if video is None:
+            raise ValueError("Video not found: %s" % video_id)
+        return video
+
+    def update_video_cut_mode(self, video_id: int, cut_mode: str) -> TikTokVideo:
+        normalized = _normalize_video_cut_mode(cut_mode)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE videos SET cut_mode = ?, updated_at = ? WHERE id = ?",
+                (normalized, now, video_id),
+            )
+        video = self.get_video(video_id)
+        if video is None:
+            raise ValueError("Video not found: %s" % video_id)
+        return video
+
+    def mark_video_rendered(
+        self,
+        video_id: int,
+        final_video_path: Path | str,
+        source_title: str | None = None,
+    ) -> TikTokVideo:
+        resolved = Path(final_video_path).expanduser().resolve()
+        if not resolved.exists() or not resolved.is_file():
+            raise ValueError("Final video file does not exist: %s" % resolved)
+        video = self.get_video(video_id)
+        if video is None:
+            raise ValueError("Video not found: %s" % video_id)
+        caption = video.caption
+        hashtags = video.hashtags
+        if source_title and not caption.strip():
+            caption, hashtags = split_caption_and_hashtags(source_title, hashtags)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE videos
+                SET file_path = ?, caption = ?, hashtags = ?, status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    self._path_for_storage(resolved),
+                    caption,
+                    hashtags,
+                    "ready",
+                    now,
+                    video_id,
+                ),
+            )
         video = self.get_video(video_id)
         if video is None:
             raise ValueError("Video not found: %s" % video_id)
@@ -639,6 +793,11 @@ class TikTokProfileManager:
         except ValueError:
             return str(resolved)
 
+    def _optional_path_for_storage(self, path: Path | str) -> str:
+        if not str(path or "").strip():
+            return ""
+        return self._path_for_storage(Path(path).expanduser().resolve())
+
     @staticmethod
     def _row_to_account(row: sqlite3.Row) -> TikTokAccount:
         return TikTokAccount(
@@ -648,6 +807,7 @@ class TikTokProfileManager:
             profile_path=row["profile_path"],
             status=row["status"],
             note=row["note"],
+            cut_mode=row["cut_mode"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -666,6 +826,9 @@ class TikTokProfileManager:
             source=row["source"],
             status=row["status"],
             note=row["note"],
+            cut_mode=row["cut_mode"],
+            source_video_url=row["source_video_url"],
+            product_image_path=row["product_image_path"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -733,6 +896,9 @@ class TikTokProfileManager:
                 source TEXT NOT NULL DEFAULT 'manual',
                 status TEXT NOT NULL,
                 note TEXT NOT NULL DEFAULT '',
+                cut_mode TEXT NOT NULL DEFAULT 'original',
+                source_video_url TEXT NOT NULL DEFAULT '',
+                product_image_path TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(account_id) REFERENCES accounts(id)
@@ -751,6 +917,9 @@ class TikTokProfileManager:
             "source",
             "status",
             "note",
+            "cut_mode",
+            "source_video_url",
+            "product_image_path",
             "created_at",
             "updated_at",
         )
@@ -785,6 +954,13 @@ def _normalize_publish_mode(value: str) -> str:
     if publish_mode not in PUBLISH_MODES:
         raise ValueError("Unsupported publish mode: %s" % value)
     return publish_mode
+
+
+def _normalize_video_cut_mode(value: str) -> str:
+    normalized = (value or "original").strip().lower()
+    if normalized not in VIDEO_CUT_MODES:
+        raise ValueError("Unsupported video cut mode: %s" % value)
+    return normalized
 
 
 def _normalize_source_channel_url(value: str) -> str:

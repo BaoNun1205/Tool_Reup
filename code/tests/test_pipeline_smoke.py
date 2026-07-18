@@ -186,8 +186,22 @@ class FakeAudioFinisher(object):
 
 
 class FakeFinalCompositor(object):
+    def __init__(self):
+        self.inputs = []
+
     def compose(self, rough_cut, final_audio, overlay_spec, output_path):
+        self.inputs.append((rough_cut.path, final_audio.path, overlay_spec.mode, output_path))
         output_path.write_text("video", encoding="utf-8")
+        return output_path
+
+
+class FakeBackgroundRemovalCompositor(object):
+    def __init__(self):
+        self.inputs = []
+
+    def compose(self, rough_cut, final_audio, product_image_path, output_path):
+        self.inputs.append((rough_cut.path, final_audio.path, product_image_path, output_path))
+        output_path.write_text("background-removed-video", encoding="utf-8")
         return output_path
 
 
@@ -198,6 +212,8 @@ class SessionSmokeTests(unittest.TestCase):
         scene_detector = FakeSceneDetector()
         edit_planner = FakeEditPlanner()
         rough_cut_renderer = FakeRoughCutRenderer()
+        final_compositor = FakeFinalCompositor()
+        background_removal_compositor = FakeBackgroundRemovalCompositor()
         return SimpleNamespace(
             validator=FakeValidator(),
             downloader=FakeDownloader(),
@@ -211,7 +227,8 @@ class SessionSmokeTests(unittest.TestCase):
             overlay_planner=FakeOverlayPlanner(),
             rough_cut_renderer=rough_cut_renderer,
             audio_finisher=audio_finisher,
-            final_compositor=FakeFinalCompositor(),
+            final_compositor=final_compositor,
+            background_removal_compositor=background_removal_compositor,
             artifact_exporter=ArtifactExporter(),
         )
 
@@ -358,6 +375,59 @@ class SessionSmokeTests(unittest.TestCase):
             self.assertEqual(services.scene_detector.inputs, [])
             self.assertEqual(services.edit_planner.inputs, [])
             self.assertEqual(services.rough_cut_renderer.inputs, [])
+        finally:
+            temp_dir.cleanup()
+
+    def test_remove_background_mode_skips_shuffle_and_uses_background_removal_compositor(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            base_dir = Path(temp_dir.name)
+            image_path = base_dir / "product.png"
+            image_path.write_text("fake-image", encoding="utf-8")
+            config = PipelineConfig(default_output_root=base_dir / "out", video_cut_mode="remove_background")
+            services = self.build_services()
+            validator = SessionValidator(item_validator=FakeValidator(), config=config)
+            orchestrator = SessionOrchestrator(config=config, services=services, session_validator=validator)
+
+            result = orchestrator.run(
+                SessionSpec(
+                    items=[
+                        SessionItemSpec(
+                            row_id="row_001",
+                            source_video_url="https://www.tiktok.com/@store/video/1234567890",
+                            product_image=image_path,
+                        )
+                    ],
+                    output_root_dir=base_dir / "out",
+                )
+            )
+
+            item = result.items[0]
+            self.assertEqual(item.status, "completed")
+            self.assertEqual(item.metadata["video_cut_mode"], "remove_background")
+            self.assertTrue(item.metadata["background_removal_enabled"])
+            self.assertEqual(item.metadata["overlay_mode_used"], "remove_background_product_cover")
+            self.assertEqual(item.metadata["background_removal_backend"], "rembg")
+            self.assertEqual(item.metadata["background_removal_model"], "isnet-general-use")
+            self.assertEqual(
+                item.metadata["background_removal_providers"],
+                ["DmlExecutionProvider", "CPUExecutionProvider"],
+            )
+            self.assertFalse(item.metadata["background_removal_post_process_mask"])
+            self.assertEqual(item.metadata["background_removal_mask_expand_pixels"], 3)
+            self.assertEqual(item.metadata["background_image_cover_size"], "1080x1920")
+            self.assertEqual(item.metadata["product_image_background_crop_ratio"], "1:1")
+            self.assertEqual(item.artifacts.final_video_path.read_text(encoding="utf-8"), "background-removed-video")
+            self.assertEqual(services.scene_detector.inputs, [])
+            self.assertEqual(services.edit_planner.inputs, [])
+            self.assertEqual(services.rough_cut_renderer.inputs, [])
+            self.assertEqual(len(services.final_compositor.inputs), 0)
+            self.assertEqual(len(services.background_removal_compositor.inputs), 1)
+            rough_cut_path, final_audio_path, product_image_path, output_path = services.background_removal_compositor.inputs[0]
+            self.assertEqual(rough_cut_path.name, "processed_master.mp4")
+            self.assertEqual(final_audio_path.name, "final_audio.m4a")
+            self.assertEqual(product_image_path, image_path)
+            self.assertEqual(output_path.name, "final_video.mp4")
         finally:
             temp_dir.cleanup()
 
