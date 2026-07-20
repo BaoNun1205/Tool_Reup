@@ -43,7 +43,12 @@ from auto_tiktok_editor.telegram_settings import (
 )
 from auto_tiktok_editor.tiktok_profiles.models import ACCOUNT_STATUSES, LOGIN_TYPES, PUBLISH_MODES
 from auto_tiktok_editor.tiktok_profiles.profile_browser import TikTokProfileBrowser
-from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager, normalize_hashtags, slugify
+from auto_tiktok_editor.tiktok_profiles.profile_manager import (
+    TikTokProfileManager,
+    default_hashtag_for_account_name,
+    normalize_hashtags,
+    slugify,
+)
 from auto_tiktok_editor.tiktok_profiles.telegram_queue import copy_rendered_video_to_queue
 
 
@@ -73,13 +78,9 @@ COLORS = {
 
 FONT = "Segoe UI"
 VIETNAM_TZ = timezone(timedelta(hours=7))
-ACCOUNT_DEFAULT_HASHTAGS = {
-    "linh_an_ngon": "#linhanngon",
-    "an_vat_cung_tien": "#anvatcungtien",
-    "my_me_an_vat": "#mymeanvat",
-}
 PLAY_ICON = "▶"
 PLAY_HOVER_ICON = "▶"
+SEND_ICON = "\u27A4"
 VIDEO_CUT_MODE_LABELS = {
     "fixed": "Fixed chunks",
     "scene": "Scene changes",
@@ -222,14 +223,7 @@ def _hashtag_tokens_for_ui(value: str) -> list[str]:
 
 
 def _default_hashtag_for_account_name(account_name: str) -> str:
-    normalized = slugify(account_name)
-    compact = normalized.replace("_", "")
-    if normalized in ACCOUNT_DEFAULT_HASHTAGS:
-        return ACCOUNT_DEFAULT_HASHTAGS[normalized]
-    for account_slug, hashtag in ACCOUNT_DEFAULT_HASHTAGS.items():
-        if compact == account_slug.replace("_", ""):
-            return hashtag
-    return ""
+    return default_hashtag_for_account_name(account_name)
 
 
 def _account_name_from_label(account_label: str) -> str:
@@ -764,6 +758,10 @@ class App(ctk.CTk):
         self.product_link_tooltip_url = ""
         self.product_link_tooltip_row_id = ""
         self.product_link_tooltip_after = None
+        self.success_notification = None
+        self.success_notification_after = None
+        self.account_hashtags_editor = None
+        self.account_hashtags_editor_info = None
         self.video_play_hover_row_id = ""
         self.app_icon_image = None
         self.source_account_var = tk.StringVar(value="No accounts")
@@ -832,6 +830,55 @@ class App(ctk.CTk):
         self._maximize_window()
         self.deiconify()
         self.lift()
+
+    def _show_success_notification(self, message: str, duration_ms: int = 3000) -> None:
+        if self.closing:
+            return
+        self._hide_success_notification()
+        notification = tk.Toplevel(self)
+        notification.withdraw()
+        notification.overrideredirect(True)
+        notification.configure(bg=COLORS["success"])
+        try:
+            notification.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        label = tk.Label(
+            notification,
+            text=message,
+            bg=COLORS["success"],
+            fg="#052E16",
+            padx=18,
+            pady=10,
+            justify="left",
+            font=(FONT, 11, "bold"),
+        )
+        label.pack(fill="both", expand=True)
+        notification.update_idletasks()
+        width = min(max(label.winfo_reqwidth(), 260), 520)
+        height = max(label.winfo_reqheight(), 44)
+        x = self.winfo_rootx() + max(16, self.winfo_width() - width - 32)
+        y = self.winfo_rooty() + 28
+        notification.geometry("%dx%d+%d+%d" % (width, height, x, y))
+        notification.deiconify()
+        self.success_notification = notification
+        self.success_notification_after = self.after(duration_ms, self._hide_success_notification)
+
+    def _hide_success_notification(self) -> None:
+        if self.success_notification_after is not None:
+            try:
+                self.after_cancel(self.success_notification_after)
+            except tk.TclError:
+                pass
+            self.success_notification_after = None
+        notification = self.success_notification
+        self.success_notification = None
+        if notification is None:
+            return
+        try:
+            notification.destroy()
+        except tk.TclError:
+            pass
 
     def _maximize_window(self) -> None:
         try:
@@ -1050,13 +1097,14 @@ class App(ctk.CTk):
             self._add_action_button(actions, text, command, kind)
         self.account_table = CTkDataTable(
             body,
-            ("id", "name", "login_type", "status", "cut_mode", "profile_path", "note", "updated_at"),
+            ("id", "name", "login_type", "status", "cut_mode", "hashtags", "profile_path", "note", "updated_at"),
             (
                 ("id", "ID", 60),
                 ("name", "Name", 170),
                 ("login_type", "Login", 90),
                 ("status", "Status", 110),
                 ("cut_mode", "Cut Mode", 170),
+                ("hashtags", "Hashtags", 260),
                 ("profile_path", "Profile Path", 260),
                 ("note", "Note", 220),
                 ("updated_at", "Updated", 170),
@@ -1064,8 +1112,9 @@ class App(ctk.CTk):
             on_select=self._on_account_selected,
             on_cell_click=self._on_account_cell_clicked,
         )
-        self.account_table.configure(displaycolumns=("id", "name", "login_type", "status", "cut_mode", "profile_path", "updated_at"))
+        self.account_table.configure(displaycolumns=("id", "name", "login_type", "status", "cut_mode", "hashtags", "profile_path", "updated_at"))
         self.account_table.set_column_alignment("cut_mode", tk.CENTER)
+        self.account_table.bind("<Double-1>", self._on_account_cell_double_clicked, add="+")
         self.account_table.pack(fill="both", expand=True)
 
     def _build_video_edit_settings_content(self, parent) -> None:
@@ -1645,7 +1694,7 @@ class App(ctk.CTk):
                 ("file_path", "Video File", 320),
                 ("caption", "Description", 760),
                 ("hashtags", "Hashtags", 280),
-                ("product_id", "Product ID", 240),
+                ("product_id", "Product ID", 170),
                 ("publish_mode", "Mode", 120),
                 ("scheduled_at", "Scheduled", 220),
                 ("source", "Source", 90),
@@ -1784,16 +1833,27 @@ class App(ctk.CTk):
 
         two_col = ctk.CTkFrame(form, fg_color="transparent")
         two_col.grid(row=row, column=0, sticky="ew", pady=(0, 9))
-        two_col.grid_columnconfigure(0, weight=1)
-        two_col.grid_columnconfigure(1, weight=1)
+        two_col.grid_columnconfigure(0, weight=0, minsize=166)
+        two_col.grid_columnconfigure(1, weight=0, minsize=40)
+        two_col.grid_columnconfigure(2, weight=1)
         ctk.CTkLabel(two_col, text="Product ID", text_color=COLORS["muted"], font=(FONT, 12, "bold"), anchor="w").grid(row=0, column=0, sticky="ew", padx=(0, 8), pady=(0, 5))
-        ctk.CTkLabel(two_col, text="Mode", text_color=COLORS["muted"], font=(FONT, 12, "bold"), anchor="w").grid(row=0, column=1, sticky="ew", padx=(8, 0), pady=(0, 5))
-        self._entry(two_col, self.video_detail_product_var, "Product ID").grid(row=1, column=0, sticky="ew", padx=(0, 8))
+        ctk.CTkLabel(two_col, text="Mode", text_color=COLORS["muted"], font=(FONT, 12, "bold"), anchor="w").grid(row=0, column=2, sticky="ew", padx=(8, 0), pady=(0, 5))
+        self._entry(two_col, self.video_detail_product_var, "Product ID").grid(row=1, column=0, sticky="ew", padx=(0, 6))
+        self.video_detail_product_send_button = ctk.CTkButton(
+            two_col,
+            text=SEND_ICON,
+            width=36,
+            height=32,
+            command=self._send_video_detail_product_id_to_phone_clipboard,
+            **_button_kwargs("secondary"),
+        )
+        self.video_detail_product_send_button.grid(row=1, column=1, sticky="e", padx=(0, 8))
+        self.action_buttons.append(self.video_detail_product_send_button)
         self._option_menu(
             two_col,
             variable=self.video_detail_publish_mode_var,
             values=list(PUBLISH_MODES),
-        ).grid(row=1, column=1, sticky="ew", padx=(8, 0))
+        ).grid(row=1, column=2, sticky="ew", padx=(8, 0))
         row += 1
 
         ctk.CTkLabel(form, text="Scheduled", text_color=COLORS["muted"], font=(FONT, 12, "bold"), anchor="w", height=18).grid(row=row, column=0, sticky="ew", pady=(0, 4))
@@ -1855,6 +1915,8 @@ class App(ctk.CTk):
                 break
 
     def _refresh_accounts(self) -> None:
+        if getattr(self, "account_hashtags_editor", None) is not None:
+            return
         selected_id = self._selected_account_id()
         self.account_table.delete(*self.account_table.get_children())
         accounts = self.manager.list_accounts()
@@ -1871,6 +1933,7 @@ class App(ctk.CTk):
                     account.login_type,
                     account.status,
                     self._account_cut_mode_label(account),
+                    account.hashtags,
                     account.profile_path,
                     account.note,
                     _format_vietnam_datetime(account.updated_at),
@@ -2822,6 +2885,54 @@ class App(ctk.CTk):
             return
         self.status_var.set("Copied description and hashtags.")
 
+    def _send_video_detail_product_id_to_phone_clipboard(self) -> None:
+        if not self._flush_video_detail_autosave(show_errors=True):
+            return
+        video = self._selected_video()
+        if video is None:
+            return
+        product_id = str(self.video_detail_product_var.get() or video.product_id or "").strip()
+        if not product_id:
+            messagebox.showinfo("Missing Product ID", "Video chua co Product ID de gui sang clipboard dien thoai.")
+            return
+        if not product_id.isdigit():
+            messagebox.showerror("Invalid Product ID", "Product ID chi duoc chua chu so: %s" % product_id)
+            return
+        address = self._phone_video_target_address()
+        if address is None:
+            return
+
+        def worker() -> dict:
+            if not self.phone_controller.is_connected():
+                self.phone_controller.connect(address)
+            return self.phone_controller.copy_text_to_clipboard(
+                product_id,
+                label="Product ID",
+                address=address,
+                sync_to_phone=True,
+                require_phone_clipboard=True,
+            )
+
+        def on_success(result: dict) -> None:
+            message = str(result.get("message") or "Product ID copied to phone clipboard.")
+            self.status_var.set(message)
+            self.manager.add_log(
+                "info",
+                "phone_product_id_clipboard",
+                message,
+                account_id=video.account_id,
+                video_id=video.id,
+            )
+            self._refresh_logs()
+            self._show_success_notification("Đã copy Product ID vào clipboard điện thoại.")
+
+        self._run_worker(
+            "Copying Product ID to phone clipboard...",
+            worker,
+            on_success=on_success,
+            error_title="Product ID clipboard",
+        )
+
     def _set_video_detail_hashtags(self, value: str) -> None:
         if hasattr(self, "video_detail_hashtags_input"):
             self.video_detail_hashtags_input.set_hashtags(value)
@@ -2834,11 +2945,16 @@ class App(ctk.CTk):
     def _ensure_video_detail_account_hashtag(self) -> bool:
         if not hasattr(self, "video_detail_hashtags_input"):
             return False
-        account_name = _account_name_from_label(self.video_detail_account_var.get())
-        hashtag = _default_hashtag_for_account_name(account_name)
-        if not hashtag:
+        account_label = self.video_detail_account_var.get().strip()
+        account_id = getattr(self, "video_account_ids_by_label", {}).get(account_label)
+        account = self.manager.get_account(account_id) if account_id is not None else None
+        hashtags = getattr(account, "hashtags", "") if account is not None else ""
+        if not hashtags:
             return False
-        return self.video_detail_hashtags_input.add_hashtag(hashtag, notify=False)
+        changed = False
+        for hashtag in _hashtag_tokens_for_ui(hashtags):
+            changed = self.video_detail_hashtags_input.add_hashtag(hashtag, notify=False) or changed
+        return changed
 
     def _limit_textbox_lines(self, textbox, max_lines: int) -> None:
         text = textbox.get("1.0", "end-1c")
@@ -3073,6 +3189,7 @@ class App(ctk.CTk):
                 login_type=dialog.result["login_type"],
                 note=dialog.result["note"],
                 cut_mode=dialog.result["cut_mode"],
+                hashtags=dialog.result["hashtags"],
             )
         except Exception as exc:
             messagebox.showerror("Add account failed", str(exc))
@@ -3282,6 +3399,13 @@ class App(ctk.CTk):
         if column == "cut_mode":
             self._show_account_cut_mode_menu(row_id)
 
+    def _on_account_cell_double_clicked(self, event) -> str | None:
+        row_id, column = self.account_table.identify_cell(event.x, event.y)
+        if column != "hashtags" or not row_id:
+            return None
+        self._begin_account_hashtags_edit(row_id)
+        return "break"
+
     def _account_cut_mode_label(self, account, include_arrow: bool = True) -> str:
         cut_mode = str(getattr(account, "cut_mode", "") or "original").strip().lower()
         label = VIDEO_ROW_CUT_MODE_LABELS.get(cut_mode, VIDEO_ROW_CUT_MODE_LABELS["original"])
@@ -3333,6 +3457,94 @@ class App(ctk.CTk):
         if self.account_table.exists(str(account_id)):
             self.account_table.selection_set(str(account_id))
         self.status_var.set("Account %s Cut Mode: %s." % (updated.name, self._account_cut_mode_label(updated, include_arrow=False)))
+
+    def _begin_account_hashtags_edit(self, row_id: str) -> None:
+        try:
+            account_id = int(row_id)
+        except (TypeError, ValueError):
+            return
+        account = self.manager.get_account(account_id)
+        if account is None:
+            return
+        self._cancel_account_hashtags_edit()
+        box = self.account_table.tree.bbox(str(row_id), "hashtags")
+        if not box:
+            return
+        x, y, width, height = box
+        variable = tk.StringVar(value=getattr(account, "hashtags", "") or "")
+        editor = tk.Entry(
+            self.account_table.tree,
+            textvariable=variable,
+            bg=COLORS["input"],
+            fg=COLORS["text"],
+            insertbackground=COLORS["text"],
+            relief="solid",
+            bd=1,
+            font=(FONT, 14),
+        )
+        editor.place(x=x, y=y, width=width, height=height)
+        editor.select_range(0, tk.END)
+        editor.focus_set()
+        self.account_hashtags_editor = editor
+        self.account_hashtags_editor_info = {
+            "account_id": account_id,
+            "variable": variable,
+        }
+        editor.bind("<Return>", lambda _event: self._commit_account_hashtags_edit())
+        editor.bind("<FocusOut>", lambda _event: self._commit_account_hashtags_edit())
+        editor.bind("<Escape>", lambda _event: self._cancel_account_hashtags_edit())
+
+    def _commit_account_hashtags_edit(self, show_errors: bool = True) -> str:
+        editor = getattr(self, "account_hashtags_editor", None)
+        info = getattr(self, "account_hashtags_editor_info", None)
+        if editor is None or not info:
+            return "break"
+        self.account_hashtags_editor = None
+        self.account_hashtags_editor_info = None
+        try:
+            value = info["variable"].get()
+        except Exception:
+            value = ""
+        try:
+            editor.destroy()
+        except tk.TclError:
+            pass
+        try:
+            account_id = int(info["account_id"])
+            normalized = normalize_hashtags(value)
+            account = self.manager.get_account(account_id)
+            if account is not None and (account.hashtags or "").strip() == normalized:
+                return "break"
+            updated = self.manager.update_account_hashtags(account_id, normalized)
+            self.manager.add_log(
+                "info",
+                "account_hashtags",
+                "Account %s hashtags set to %s." % (updated.id, updated.hashtags or "(none)"),
+                account_id=updated.id,
+            )
+        except Exception as exc:
+            if show_errors:
+                messagebox.showerror("Account Hashtags", str(exc))
+            else:
+                self.status_var.set("Account hashtags save failed: %s" % exc)
+            return "break"
+        self._refresh_accounts()
+        self._refresh_logs()
+        if self.account_table.exists(str(updated.id)):
+            self.account_table.selection_set(str(updated.id))
+        self.status_var.set("Account %s hashtags: %s." % (updated.name, updated.hashtags or "(none)"))
+        return "break"
+
+    def _cancel_account_hashtags_edit(self) -> str:
+        editor = getattr(self, "account_hashtags_editor", None)
+        self.account_hashtags_editor = None
+        self.account_hashtags_editor_info = None
+        if editor is not None:
+            try:
+                editor.destroy()
+            except tk.TclError:
+                pass
+        return "break"
 
     def _selected_account_for_telegram(self):
         account_id = self._selected_account_id()
@@ -4330,22 +4542,29 @@ class App(ctk.CTk):
 
         def on_success(result: dict) -> None:
             video_id = result["video_id"]
+            product_id_clipboard_result = result["product_id_clipboard_result"]
+            product_id_phone_clipboard = product_id_clipboard_result.get("phone_clipboard") is True
+            product_id_step_note = (
+                "copied Product ID to the phone clipboard"
+                if product_id_phone_clipboard
+                else "could not confirm the phone clipboard; Product ID is on the Windows clipboard"
+            )
             self.manager.update_video_status(
                 video_id,
                 "prepared",
-                note="Opened TikTok publish screen, pasted description, closed keyboard, copied Product ID, then stopped for manual product selection.",
+                note="Opened TikTok publish screen, pasted description, closed keyboard, %s, then stopped for manual product selection."
+                % product_id_step_note,
             )
             phone_result = result["phone_result"]
             upload_result = result["upload_result"]
             paste_result = result["paste_result"]
             keyboard_result = result["keyboard_result"]
             ime_result = result["ime_result"]
-            product_id_clipboard_result = result["product_id_clipboard_result"]
             self.manager.add_log(
                 "info",
                 "phone_auto_post_ready",
-                "Video sent to phone, publish screen opened, description pasted, keyboard closed, Product ID copied, then automation stopped: %s."
-                % phone_result["remote_path"],
+                "Video sent to phone, publish screen opened, description pasted, keyboard closed, %s, then automation stopped: %s."
+                % (product_id_step_note, phone_result["remote_path"]),
                 account_id=result["account_id"],
                 video_id=video_id,
             )
@@ -4361,6 +4580,8 @@ class App(ctk.CTk):
                     str(product_id_clipboard_result.get("message") or "Product ID copied to phone clipboard."),
                 )
             )
+            if product_id_phone_clipboard:
+                self._show_success_notification("Đã copy Product ID vào clipboard điện thoại.")
 
         self._run_worker(
             "Sending video %s to phone and opening TikTok library..." % video.id,
@@ -4637,8 +4858,10 @@ class App(ctk.CTk):
             self.busy_progress.grid_remove()
 
     def _on_close(self) -> None:
+        self._commit_account_hashtags_edit(show_errors=False)
         self._flush_video_detail_autosave(show_errors=False)
         self._hide_product_link_tooltip()
+        self._hide_success_notification()
         self.closing = True
         self.phone_screenshot_hotkey.stop()
         self.phone_close_hotkey.stop()
@@ -4691,6 +4914,7 @@ class AccountDialog(BaseDialog):
         self.name_var = tk.StringVar()
         self.login_type_var = tk.StringVar(value=LOGIN_TYPES[0])
         self.cut_mode_var = tk.StringVar(value=VIDEO_ROW_CUT_MODE_LABELS["original"])
+        self.hashtags_var = tk.StringVar()
         self.note_var = tk.StringVar()
 
         frame = ctk.CTkFrame(self.window, fg_color=COLORS["surface"], corner_radius=14)
@@ -4717,11 +4941,13 @@ class AccountDialog(BaseDialog):
             dynamic_resizing=False,
             anchor="w",
         ).grid(row=2, column=1, sticky="ew", pady=(0, 9))
-        self._label(frame, "Note", 3)
-        self._entry(frame, self.note_var, 3, placeholder="Optional note")
+        self._label(frame, "Hashtags", 3)
+        self._entry(frame, self.hashtags_var, 3, placeholder="#tag1 #tag2")
+        self._label(frame, "Note", 4)
+        self._entry(frame, self.note_var, 4, placeholder="Optional note")
 
         button_bar = ctk.CTkFrame(frame, fg_color="transparent")
-        button_bar.grid(row=4, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        button_bar.grid(row=5, column=0, columnspan=2, sticky="e", pady=(8, 0))
         ctk.CTkButton(button_bar, text="Cancel", command=self.window.destroy, **_button_kwargs("secondary")).pack(side="right")
         ctk.CTkButton(button_bar, text="Add", command=self._submit, **_button_kwargs("primary")).pack(side="right", padx=(0, 8))
 
@@ -4739,6 +4965,7 @@ class AccountDialog(BaseDialog):
             "name": name,
             "login_type": self.login_type_var.get(),
             "cut_mode": VIDEO_ROW_CUT_MODE_VALUES.get(self.cut_mode_var.get().strip(), "original"),
+            "hashtags": self.hashtags_var.get().strip() or _default_hashtag_for_account_name(name),
             "note": self.note_var.get().strip(),
         }
         self.window.destroy()

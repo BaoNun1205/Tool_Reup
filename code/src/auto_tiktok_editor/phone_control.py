@@ -85,6 +85,8 @@ ADB_KEYBOARD_IME = "com.android.adbkeyboard/.AdbIME"
 ADB_KEYBOARD_INPUT_B64_ACTION = "ADB_INPUT_B64"
 ADB_KEYBOARD_READY_DELAY_SECONDS = 0.7
 ADB_KEYBOARD_COMMIT_DELAY_SECONDS = 0.8
+ANDROID_CLIPBOARD_VERIFY_ATTEMPTS = 3
+ANDROID_CLIPBOARD_VERIFY_DELAY_SECONDS = 0.25
 
 
 class _AppBarData(ctypes.Structure):
@@ -2081,7 +2083,11 @@ class PhoneController:
             getattr(completed, "stdout", "") or "",
             getattr(completed, "stderr", "") or "",
         )
-        if getattr(completed, "returncode", 1) == 0 and "No shell command implementation" not in set_output:
+        if getattr(completed, "returncode", 1) != 0 or "No shell command implementation" in set_output:
+            failure_reasons.append("adb cmd clipboard set failed: %s" % set_output.strip())
+            return False, "; ".join(reason for reason in failure_reasons if reason)
+        verify_output = ""
+        for attempt in range(ANDROID_CLIPBOARD_VERIFY_ATTEMPTS):
             verify = self.runner.run(
                 [
                     self.config.adb_bin,
@@ -2104,11 +2110,9 @@ class PhoneController:
                 and clean_text in verify_output
             ):
                 return True, "adb_cmd_clipboard"
-            failure_reasons.append("adb cmd clipboard verify failed: %s" % verify_output.strip())
-        else:
-            failure_reasons.append("adb cmd clipboard set failed: %s" % set_output.strip())
-        if getattr(completed, "returncode", 1) == 0 and clean_text in set_output:
-            return True, "adb_cmd_clipboard"
+            if attempt + 1 < ANDROID_CLIPBOARD_VERIFY_ATTEMPTS:
+                time.sleep(ANDROID_CLIPBOARD_VERIFY_DELAY_SECONDS)
+        failure_reasons.append("adb cmd clipboard verify failed: %s" % verify_output.strip())
         return False, "; ".join(reason for reason in failure_reasons if reason)
 
     def _phone_screen_size(self, target: str) -> tuple[int, int]:

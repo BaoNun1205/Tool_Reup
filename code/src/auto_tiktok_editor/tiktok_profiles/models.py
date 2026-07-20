@@ -34,6 +34,7 @@ class TikTokAccount:
     status: str
     note: str
     cut_mode: str
+    hashtags: str
     created_at: str
     updated_at: str
 

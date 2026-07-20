@@ -715,6 +715,40 @@ class PhoneControlTests(unittest.TestCase):
         self.assertIn("No shell command implementation", result["phone_clipboard_method"])
         self.assertEqual(events[-1]["action"], "phone_text_copied_to_clipboard")
 
+    def test_copy_text_to_clipboard_does_not_trust_unverified_adb_set_output(self):
+        runner = RunnerStub(
+            [
+                CompletedProcessStub(stdout="123456\n"),
+                CompletedProcessStub(stdout="stale clipboard\n"),
+                CompletedProcessStub(stdout="stale clipboard\n"),
+                CompletedProcessStub(stdout="stale clipboard\n"),
+            ]
+        )
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+        )
+
+        with mock.patch.object(controller, "_ui", return_value=None), mock.patch.object(
+            controller,
+            "_set_windows_clipboard_text",
+        ) as set_windows_clipboard, mock.patch("auto_tiktok_editor.phone_control.time.sleep") as sleep:
+            result = controller.copy_text_to_clipboard(
+                "123456",
+                label="Product ID",
+                address="192.168.1.20:5555",
+                sync_to_phone=True,
+                require_phone_clipboard=False,
+            )
+
+        set_windows_clipboard.assert_called_once_with("123456")
+        self.assertFalse(result["phone_clipboard"])
+        self.assertIn("Windows clipboard", result["message"])
+        self.assertIn("verify failed", result["phone_clipboard_method"])
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(len(runner.commands), 4)
+
     def test_press_space_and_close_keyboard_sends_space_then_back(self):
         runner = RunnerStub()
         events = []

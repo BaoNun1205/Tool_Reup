@@ -19,6 +19,11 @@
       "name": "tep_riu",
       "bot_token": "7768491864:AAEsemtd6icWutP0l23gW3xLk7VrBXi_XXw",
       "chat_id": 6547959450
+    },
+    {
+      "name": "an_nhan_nhan",
+      "bot_token": "8609269989:AAFLZF9lEFxSRu7o-ab_mhZrGEhkx1Rt8p0",
+      "chat_id": 6547959450
     }
   ]
 }

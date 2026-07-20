@@ -243,6 +243,7 @@ class TikTokProfileManagerTests(unittest.TestCase):
             self.assertEqual(account.status, "paused")
             self.assertEqual(account.note, "main")
             self.assertEqual(account.cut_mode, "original")
+            self.assertEqual(account.hashtags, "")
             self.assertTrue((root / "profiles" / "nick_1").is_dir())
 
     def test_duplicate_names_get_unique_profile_paths(self):
@@ -302,6 +303,38 @@ class TikTokProfileManagerTests(unittest.TestCase):
             self.assertEqual(updated_account.cut_mode, "scene")
             self.assertEqual(video.cut_mode, "scene")
             self.assertEqual(draft.cut_mode, "scene")
+
+    def test_account_hashtags_are_editable_and_apply_to_new_videos(self):
+        with _temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            video_file = root / "demo.mp4"
+            video_file.write_bytes(b"fake video")
+            product_image = root / "product.jpg"
+            product_image.write_bytes(b"image")
+            final_video = root / "final.mp4"
+            final_video.write_bytes(b"rendered")
+            manager = TikTokProfileManager(
+                db_path=root / "accounts.sqlite3",
+                profiles_root=root / "profiles",
+                project_root=root,
+            )
+            account = manager.add_account("Nick 1", "google", hashtags="brand, #food")
+
+            updated_account = manager.update_account_hashtags(account.id, "#brand #daily")
+            video = manager.add_video(video_file, hashtags="#source #brand", account_id=account.id)
+            draft = manager.add_video_draft(
+                root / "profile_video_queue" / "nick_1" / "draft.pending",
+                source_video_url="https://www.tiktok.com/@store/video/123",
+                product_image_path=product_image,
+                hashtags="#draft",
+                account_id=account.id,
+            )
+            rendered = manager.mark_video_rendered(draft.id, final_video, source_title="Demo title #source")
+
+            self.assertEqual(updated_account.hashtags, "#brand #daily")
+            self.assertEqual(video.hashtags, "#source #brand #daily")
+            self.assertEqual(draft.hashtags, "#draft #brand #daily")
+            self.assertEqual(rendered.hashtags, "#draft #brand #daily #source")
 
     def test_source_channel_crud_per_account(self):
         with _temporary_directory() as temp_dir:
@@ -562,7 +595,7 @@ class TikTokProfileManagerTests(unittest.TestCase):
             self.assertEqual(len(videos), 1)
             self.assertEqual(videos[0].account_id, account.id)
             self.assertEqual(videos[0].caption, "Demo title")
-            self.assertEqual(videos[0].hashtags, "#topmo #anvat")
+            self.assertEqual(videos[0].hashtags, "#topmo #anvat #linhanngon")
             self.assertEqual(videos[0].source, "telegram")
             self.assertEqual(videos[0].product_id, "1730667245645826792")
             self.assertTrue(manager.resolve_video_path(videos[0]).exists())
@@ -600,6 +633,7 @@ class TikTokProfileManagerTests(unittest.TestCase):
             self.assertEqual(videos[0].source, "telegram")
             self.assertEqual(videos[0].source_video_url, "https://www.tiktok.com/@store/video/123")
             self.assertEqual(videos[0].product_id, "1730667245645826792")
+            self.assertEqual(videos[0].hashtags, "#linhanngon")
             self.assertTrue(manager.resolve_video_path(videos[0]).exists())
             self.assertTrue((root / videos[0].product_image_path).exists())
 

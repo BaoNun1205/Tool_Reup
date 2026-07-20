@@ -27,6 +27,11 @@ from auto_tiktok_editor.tiktok_profiles.models import (
 DEFAULT_DB_PATH = PROJECT_ROOT / "tiktok_profile_manager.sqlite3"
 DEFAULT_PROFILES_ROOT = PROJECT_ROOT / "profiles"
 HASHTAG_RE = re.compile(r"#[\w\u0080-\uffff]+", re.UNICODE)
+ACCOUNT_DEFAULT_HASHTAGS = {
+    "linh_an_ngon": "#linhanngon",
+    "an_vat_cung_tien": "#anvatcungtien",
+    "my_me_an_vat": "#mymeanvat",
+}
 
 
 def slugify(value: str) -> str:
@@ -38,6 +43,17 @@ def slugify(value: str) -> str:
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def default_hashtag_for_account_name(account_name: str) -> str:
+    normalized = slugify(account_name)
+    compact = normalized.replace("_", "")
+    if normalized in ACCOUNT_DEFAULT_HASHTAGS:
+        return ACCOUNT_DEFAULT_HASHTAGS[normalized]
+    for account_slug, hashtag in ACCOUNT_DEFAULT_HASHTAGS.items():
+        if compact == account_slug.replace("_", ""):
+            return hashtag
+    return ""
 
 
 class TikTokProfileManager:
@@ -66,12 +82,16 @@ class TikTokProfileManager:
                     status TEXT NOT NULL,
                     note TEXT NOT NULL DEFAULT '',
                     cut_mode TEXT NOT NULL DEFAULT 'original',
+                    hashtags TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
             self._ensure_column(conn, "accounts", "cut_mode", "TEXT NOT NULL DEFAULT 'original'")
+            account_hashtags_added = self._ensure_column(conn, "accounts", "hashtags", "TEXT NOT NULL DEFAULT ''")
+            if account_hashtags_added:
+                self._migrate_account_hashtags(conn)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status)")
             conn.execute(
                 """
@@ -147,7 +167,7 @@ class TikTokProfileManager:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, name, login_type, profile_path, status, note, cut_mode, created_at, updated_at
+                SELECT id, name, login_type, profile_path, status, note, cut_mode, hashtags, created_at, updated_at
                 FROM accounts
                 ORDER BY id ASC
                 """
@@ -158,7 +178,7 @@ class TikTokProfileManager:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, name, login_type, profile_path, status, note, cut_mode, created_at, updated_at
+                SELECT id, name, login_type, profile_path, status, note, cut_mode, hashtags, created_at, updated_at
                 FROM accounts
                 WHERE id = ?
                 """,
@@ -183,13 +203,21 @@ class TikTokProfileManager:
                     return account
         return None
 
-    def add_account(self, name: str, login_type: str, note: str = "", cut_mode: str = "original") -> TikTokAccount:
+    def add_account(
+        self,
+        name: str,
+        login_type: str,
+        note: str = "",
+        cut_mode: str = "original",
+        hashtags: str | None = None,
+    ) -> TikTokAccount:
         clean_name = (name or "").strip()
         if not clean_name:
             raise ValueError("Account name is required.")
         if login_type not in LOGIN_TYPES:
             raise ValueError("Unsupported login type: %s" % login_type)
         cut_mode = _normalize_video_cut_mode(cut_mode)
+        clean_hashtags = normalize_hashtags(default_hashtag_for_account_name(clean_name) if hashtags is None else hashtags)
 
         profile_path = self._build_unique_profile_path(clean_name)
         profile_path.mkdir(parents=True, exist_ok=False)
@@ -199,15 +227,30 @@ class TikTokProfileManager:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO accounts (name, login_type, profile_path, status, note, cut_mode, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO accounts (name, login_type, profile_path, status, note, cut_mode, hashtags, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (clean_name, login_type, stored_profile_path, "paused", note.strip(), cut_mode, now, now),
+                (clean_name, login_type, stored_profile_path, "paused", note.strip(), cut_mode, clean_hashtags, now, now),
             )
             account_id = int(cursor.lastrowid)
         account = self.get_account(account_id)
         if account is None:
             raise RuntimeError("Created account could not be loaded.")
+        return account
+
+    def update_account_hashtags(self, account_id: int, hashtags: str) -> TikTokAccount:
+        clean_hashtags = normalize_hashtags(hashtags)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE accounts SET hashtags = ?, updated_at = ? WHERE id = ?",
+                (clean_hashtags, now, int(account_id)),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Account not found: %s" % account_id)
+        account = self.get_account(account_id)
+        if account is None:
+            raise ValueError("Account not found: %s" % account_id)
         return account
 
     def update_account_cut_mode(self, account_id: int, cut_mode: str) -> TikTokAccount:
@@ -413,6 +456,7 @@ class TikTokProfileManager:
         scheduled_at = _normalize_scheduled_at(publish_mode, scheduled_at)
         cut_mode = _normalize_video_cut_mode(cut_mode if cut_mode is not None else (account.cut_mode if account else "original"))
         clean_caption, clean_hashtags = split_caption_and_hashtags(caption, hashtags)
+        clean_hashtags = _merge_hashtags(clean_hashtags, account.hashtags if account else "")
         stored_path = self._path_for_storage(resolved)
         stored_product_image_path = self._optional_path_for_storage(product_image_path)
         now = utc_now_iso()
@@ -481,6 +525,7 @@ class TikTokProfileManager:
         scheduled_at = _normalize_scheduled_at(publish_mode, scheduled_at)
         cut_mode = _normalize_video_cut_mode(cut_mode if cut_mode is not None else (account.cut_mode if account else "original"))
         clean_caption, clean_hashtags = split_caption_and_hashtags(caption, hashtags)
+        clean_hashtags = _merge_hashtags(clean_hashtags, account.hashtags if account else "")
         now = utc_now_iso()
         with self._connect() as conn:
             cursor = conn.execute(
@@ -637,6 +682,10 @@ class TikTokProfileManager:
         hashtags = video.hashtags
         if source_title and not caption.strip():
             caption, hashtags = split_caption_and_hashtags(source_title, hashtags)
+        if video.account_id is not None:
+            account = self.get_account(video.account_id)
+            if account is not None:
+                hashtags = _merge_hashtags(hashtags, account.hashtags)
         now = utc_now_iso()
         with self._connect() as conn:
             conn.execute(
@@ -808,6 +857,7 @@ class TikTokProfileManager:
             status=row["status"],
             note=row["note"],
             cut_mode=row["cut_mode"],
+            hashtags=row["hashtags"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -860,10 +910,31 @@ class TikTokProfileManager:
         )
 
     @staticmethod
-    def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> None:
+    def _ensure_column(conn: sqlite3.Connection, table_name: str, column_name: str, definition: str) -> bool:
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(%s)" % table_name).fetchall()}
         if column_name not in columns:
             conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table_name, column_name, definition))
+            return True
+        return False
+
+    @staticmethod
+    def _migrate_account_hashtags(conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            """
+            SELECT id, name, hashtags
+            FROM accounts
+            WHERE hashtags = ''
+            """
+        ).fetchall()
+        now = utc_now_iso()
+        for row in rows:
+            default_hashtags = normalize_hashtags(default_hashtag_for_account_name(row["name"]))
+            if not default_hashtags:
+                continue
+            conn.execute(
+                "UPDATE accounts SET hashtags = ?, updated_at = ? WHERE id = ?",
+                (default_hashtags, now, row["id"]),
+            )
 
     @staticmethod
     def _remove_obsolete_video_columns(conn: sqlite3.Connection) -> None:
@@ -1003,6 +1074,10 @@ def normalize_hashtags(value: str) -> str:
         seen.add(normalized_key)
         tags.append(tag)
     return " ".join(tags)
+
+
+def _merge_hashtags(*values: str) -> str:
+    return normalize_hashtags(" ".join(str(value or "") for value in values))
 
 
 def split_caption_and_hashtags(caption: str, hashtags: str = "") -> tuple[str, str]:
