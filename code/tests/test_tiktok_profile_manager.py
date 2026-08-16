@@ -13,6 +13,7 @@ from unittest import mock
 from auto_tiktok_editor.tiktok_profiles import profile_browser
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager, slugify, split_caption_and_hashtags
 from auto_tiktok_editor.tiktok_profiles.ui import (
+    App,
     _compose_video_caption_with_hashtags,
     _default_hashtag_for_account_name,
     _extract_product_url_from_note,
@@ -191,6 +192,79 @@ class TikTokProfileManagerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             _telegram_product_messages_for_video(video)
 
+    def test_send_video_button_sends_phone_video_and_copies_two_clipboard_messages(self):
+        with _temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            video_path = root / "final.mp4"
+            video_path.write_bytes(b"video")
+            video = mock.Mock(
+                id=12,
+                account_id=34,
+                caption="Mo ta mon an",
+                hashtags="#linhanngon anvatcungtien",
+                product_id="1730667245645826792",
+            )
+            app = mock.Mock()
+            app._selected_video.return_value = video
+            app._phone_video_target_address.return_value = "192.168.1.20:5555"
+            app._phone_video_transfer_item.return_value = {
+                "video_id": video.id,
+                "account_id": video.account_id,
+                "file_path": video_path,
+            }
+            app.manager = mock.Mock()
+            app.status_var = mock.Mock()
+            app._refresh_logs = mock.Mock()
+            app._show_success_notification = mock.Mock()
+
+            class PhoneControllerStub(object):
+                def __init__(self):
+                    self.clipboard_calls = []
+
+                def is_connected(self):
+                    return False
+
+                def connect(self, address):
+                    self.connected_address = address
+
+                def send_file_to_gallery(self, address, file_path):
+                    self.sent_file = (address, file_path)
+                    return {"remote_path": "/sdcard/Movies/AutoTikTokEditor/final.mp4"}
+
+                def copy_text_to_clipboard(self, text, label, address, sync_to_phone, require_phone_clipboard):
+                    self.clipboard_calls.append((text, label, address, sync_to_phone, require_phone_clipboard))
+                    return {"phone_clipboard": True, "message": "%s copied." % label}
+
+            phone_controller = PhoneControllerStub()
+            app.phone_controller = phone_controller
+
+            def run_worker(_label, worker, on_success=None, error_title=None):
+                result = worker()
+                if on_success is not None:
+                    on_success(result)
+
+            app._run_worker.side_effect = run_worker
+
+            with mock.patch("auto_tiktok_editor.tiktok_profiles.ui.TelegramBotClient") as telegram_client:
+                App._send_selected_video_to_phone(app)
+
+            telegram_client.assert_not_called()
+            self.assertEqual(phone_controller.sent_file, ("192.168.1.20:5555", video_path))
+            self.assertEqual(
+                phone_controller.clipboard_calls,
+                [
+                    (
+                        "Mo ta mon an\n#linhanngon #anvatcungtien",
+                        "Description and hashtags",
+                        "192.168.1.20:5555",
+                        True,
+                        True,
+                    ),
+                    ("1730667245645826792", "Product ID", "192.168.1.20:5555", True, True),
+                ],
+            )
+            app.manager.add_log.assert_called_once()
+
     def test_youtube_tag_input_helpers_normalize_and_map_account_tags(self):
         self.assertEqual(
             _hashtag_tokens_for_ui("linhanngon, #anvatcungtien #LINHANNGON"),
@@ -208,11 +282,12 @@ class TikTokProfileManagerTests(unittest.TestCase):
                 profiles_root=root / "profiles",
                 project_root=root,
             )
-            account = manager.add_account("Linh An Ngon", "google")
+            account = manager.add_account("Linh An Ngon", "google", bot_name="linh_shop_bot")
             payload = {
                 "bots": [
+                    {"name": "linh_an_ngon_bot", "bot_token": "token-old", "chat_id": 999},
                     {"name": "other_profile", "bot_token": "token-x", "chat_id": 111},
-                    {"name": "linh_an_ngon_bot", "bot_token": "token-a", "chat_id": "6547959450"},
+                    {"name": "linh_shop_bot", "bot_token": "token-a", "chat_id": "6547959450"},
                 ]
             }
 
@@ -242,6 +317,7 @@ class TikTokProfileManagerTests(unittest.TestCase):
             self.assertEqual(account.profile_path, "profiles/nick_1")
             self.assertEqual(account.status, "paused")
             self.assertEqual(account.note, "main")
+            self.assertEqual(account.bot_name, "")
             self.assertEqual(account.cut_mode, "original")
             self.assertEqual(account.hashtags, "")
             self.assertTrue((root / "profiles" / "nick_1").is_dir())
@@ -276,6 +352,22 @@ class TikTokProfileManagerTests(unittest.TestCase):
 
             self.assertEqual(updated.status, "need_login")
             self.assertEqual(updated.note, "manual check")
+
+    def test_account_bot_name_maps_telegram_profile_slug(self):
+        with _temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            manager = TikTokProfileManager(
+                db_path=root / "accounts.sqlite3",
+                profiles_root=root / "profiles",
+                project_root=root,
+            )
+            account = manager.add_account("Tep Riu", "google", bot_name="tep_an_ngon")
+
+            updated = manager.update_account_bot_name(account.id, "tep_riu_bot")
+
+            self.assertEqual(updated.bot_name, "tep_riu_bot")
+            self.assertEqual(manager.find_account_for_profile_slug("tep_riu_bot"), updated)
+            self.assertEqual(manager.find_account_for_profile_slug("tep_riu"), updated)
 
     def test_account_cut_mode_is_default_for_new_videos(self):
         with _temporary_directory() as temp_dir:

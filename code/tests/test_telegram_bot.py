@@ -231,6 +231,19 @@ class TelegramBotServiceTests(unittest.TestCase):
             ),
             "1734622779531953483",
         )
+        self.assertEqual(
+            extract_tiktok_product_id(
+                "https://www.tiktok.com/shop/pdp/banh-trang-nuong-an-lien-1734622779531953483.html"
+            ),
+            "1734622779531953483",
+        )
+        self.assertEqual(
+            extract_tiktok_product_id("https://www.tiktok.com/shop/product?id=1734622779531953483"),
+            "1734622779531953483",
+        )
+        self.assertIsNone(
+            extract_tiktok_product_id("https://www.tiktok.com/@store/video/1734622779531953483")
+        )
 
     def test_classify_tiktok_urls_resolves_short_product_link(self):
         temp_dir = _temporary_directory()
@@ -597,6 +610,47 @@ class TelegramBotServiceTests(unittest.TestCase):
             self.assertEqual(len(client.sent_documents), 1)
             self.assertEqual(client.sent_documents[0][0], 123)
             self.assertIn((123, "1730667245645826792"), client.sent_messages)
+        finally:
+            temp_dir.cleanup()
+
+    def test_send_result_to_telegram_uses_mapped_profile_cut_mode(self):
+        temp_dir = _temporary_directory()
+        try:
+            base_dir = Path(temp_dir.name)
+            video_path = base_dir / "final_video.mp4"
+            video_path.write_text("video", encoding="utf-8")
+            client = FakeTelegramClient(base_dir)
+            job_runner = FakeTelegramJobRunner(video_path)
+            config = PipelineConfig(
+                allow_local_telegram=True,
+                telegram_bot_token="token",
+                telegram_input_root=base_dir / "telegram_inputs",
+                default_output_root=base_dir / "output",
+                tiktok_profile_slug="tep_riu",
+                video_cut_mode="original",
+                telegram_send_result_to_telegram=True,
+                telegram_save_received_video_to_profile=False,
+            )
+            service = TelegramBotService(
+                config=config,
+                client=client,
+                job_runner=job_runner,
+                executor=InlineExecutor(),
+            )
+            manager = mock.Mock()
+            manager.find_account_for_profile_slug.return_value = SimpleNamespace(name="Tep Riu", cut_mode="scene")
+
+            with mock.patch("auto_tiktok_editor.app.telegram_bot.TikTokProfileManager", return_value=manager):
+                service._run_job_and_reply(
+                    123,
+                    "https://www.tiktok.com/@store/video/1234567890",
+                    "https://www.tiktok.com/view/product/1730667245645826792",
+                    "1730667245645826792",
+                    base_dir / "product.jpg",
+                )
+
+            self.assertEqual(job_runner.calls[0][3], "scene")
+            self.assertEqual(len(client.sent_documents), 1)
         finally:
             temp_dir.cleanup()
 

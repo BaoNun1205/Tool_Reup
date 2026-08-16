@@ -1,0 +1,29 @@
+{
+  "bots": [
+    {
+      "name": "linh_an_ngon",
+      "bot_token": "8738767457:AAEvTix0euHVfoPeS6-zQput9odkA08XTMY",
+      "chat_id": 6547959450
+    },
+    {
+      "name": "an_vat_cung_tien",
+      "bot_token": "8708744319:AAEJEr4kY7mxv_wpmZSEKqgJKkilzbmLm5I",
+      "chat_id": 6547959450
+    },
+    {
+      "name": "my_me_an_vat",
+      "bot_token": "8671720513:AAFdhb9q6P0saKJqly9YOJWvxVySf-Jkz3Y",
+      "chat_id": 6547959450
+    },
+    {
+      "name": "tep_riu",
+      "bot_token": "7768491864:AAEsemtd6icWutP0l23gW3xLk7VrBXi_XXw",
+      "chat_id": 6547959450
+    },
+    {
+      "name": "an_nhan_nhan",
+      "bot_token": "8609269989:AAFLZF9lEFxSRu7o-ab_mhZrGEhkx1Rt8p0",
+      "chat_id": 6547959450
+    }
+  ]
+}

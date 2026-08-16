@@ -9,6 +9,7 @@ import shutil
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import EditPlan, FinalAudioAsset, OverlaySpec, ProcessedMaster, RoughCutAsset, SceneRange
 from auto_tiktok_editor.exceptions import ExternalToolError
+from auto_tiktok_editor.media.ffmpeg import video_encoder_args
 from auto_tiktok_editor.media.probe import MediaProbe
 from auto_tiktok_editor.utils.command import CommandRunner
 from auto_tiktok_editor.utils.timecode import format_seconds
@@ -48,12 +49,7 @@ class RoughCutRenderer(object):
             "0",
             "-i",
             str(concat_list),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            str(self.config.video_crf),
+            *video_encoder_args(self.config, crf=self.config.video_crf),
             "-pix_fmt",
             "yuv420p",
             "-r",
@@ -79,12 +75,7 @@ class RoughCutRenderer(object):
             format_seconds(scene.duration_seconds),
             "-i",
             str(processed_master.path),
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            str(self.config.video_crf),
+            *video_encoder_args(self.config, crf=self.config.video_crf),
             "-pix_fmt",
             "yuv420p",
         ]
@@ -134,10 +125,7 @@ class FinalCompositor(object):
             "[vout]",
             "-map",
             "1:a:0",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
+            *video_encoder_args(self.config, final=True),
             "-profile:v",
             "high",
             "-level",
@@ -617,10 +605,7 @@ class BackgroundRemovalCompositor(object):
             "[vout]",
             "-map",
             "2:a:0",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
+            *video_encoder_args(self.config, final=True),
             "-profile:v",
             "high",
             "-level",
@@ -699,10 +684,7 @@ class BackgroundRemovalCompositor(object):
             "[vout]",
             "-map",
             "2:a:0",
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
+            *video_encoder_args(self.config, final=True),
             "-profile:v",
             "high",
             "-level",

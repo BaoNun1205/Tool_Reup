@@ -14,6 +14,7 @@ from typing import Iterable, List, Optional, Tuple
 
 from auto_tiktok_editor.app.telegram_bot import TelegramBotService
 from auto_tiktok_editor.config import PipelineConfig
+from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
 
 
 @dataclass
@@ -69,17 +70,23 @@ def run_multi_telegram_bots(
     specs = list(specs)
     max_workers = max(1, int(config.max_parallel_session_items))
     executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="telegram-job")
+    profile_manager = _load_profile_manager(logger)
     services = []
     threads = []
     try:
         for index, spec in enumerate(specs, start=1):
-            bot_config = _config_for_bot(config, spec, index)
+            bot_config = _config_for_bot(config, spec, index, profile_manager=profile_manager)
             service = TelegramBotService(config=bot_config, logger=logger, executor=executor)
             thread = _BotThread(service=service, name="telegram-bot-%s" % _safe_name(spec.name))
             services.append(service)
             threads.append(thread)
             thread.start()
-            logger.info("Started Telegram bot '%s'.", spec.name)
+            logger.info(
+                "Started Telegram bot '%s' mapped to profile '%s' with cut mode '%s'.",
+                spec.name,
+                bot_config.tiktok_profile_slug,
+                bot_config.video_cut_mode,
+            )
         print("Dang chay %s Telegram bot. Tong so job xu ly cung luc toi da: %s." % (len(threads), max_workers))
         while all(thread.is_alive() for thread in threads):
             time.sleep(1.0)
@@ -98,9 +105,16 @@ def run_multi_telegram_bots(
         executor.shutdown(wait=False)
 
 
-def _config_for_bot(base_config: PipelineConfig, spec: TelegramBotRuntimeSpec, index: int) -> PipelineConfig:
+def _config_for_bot(
+    base_config: PipelineConfig,
+    spec: TelegramBotRuntimeSpec,
+    index: int,
+    profile_manager: TikTokProfileManager | None = None,
+) -> PipelineConfig:
     allowed_chat_ids = tuple(spec.chat_ids or ())
-    input_root = Path(base_config.telegram_input_root) / _safe_name(spec.name or ("bot_%03d" % index))
+    profile_slug = _safe_name(spec.name or ("bot_%03d" % index))
+    input_root = Path(base_config.telegram_input_root) / profile_slug
+    profile_cut_mode = _profile_cut_mode_for_bot_name(profile_slug, profile_manager)
     return replace(
         base_config,
         allow_local_telegram=True,
@@ -108,8 +122,26 @@ def _config_for_bot(base_config: PipelineConfig, spec: TelegramBotRuntimeSpec, i
         telegram_delivery_chat_id=str(spec.chat_id or ""),
         telegram_allowed_chat_ids=allowed_chat_ids,
         telegram_input_root=input_root,
-        tiktok_profile_slug=_safe_name(spec.name or ("bot_%03d" % index)),
+        tiktok_profile_slug=profile_slug,
+        video_cut_mode=profile_cut_mode or base_config.video_cut_mode,
     )
+
+
+def _load_profile_manager(logger: logging.Logger) -> TikTokProfileManager | None:
+    try:
+        return TikTokProfileManager()
+    except Exception as exc:
+        logger.warning("Could not load TikTok Profile Manager for Telegram bot mapping: %s", exc)
+        return None
+
+
+def _profile_cut_mode_for_bot_name(profile_slug: str, profile_manager: TikTokProfileManager | None) -> str:
+    if profile_manager is None:
+        return ""
+    account = profile_manager.find_account_for_profile_slug(profile_slug)
+    if account is None:
+        return ""
+    return str(getattr(account, "cut_mode", "") or "").strip().lower()
 
 
 def _normalize_chat_id(value) -> Optional[int]:

@@ -81,6 +81,7 @@ class TikTokProfileManager:
                     profile_path TEXT NOT NULL UNIQUE,
                     status TEXT NOT NULL,
                     note TEXT NOT NULL DEFAULT '',
+                    bot_name TEXT NOT NULL DEFAULT '',
                     cut_mode TEXT NOT NULL DEFAULT 'original',
                     hashtags TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
@@ -88,6 +89,7 @@ class TikTokProfileManager:
                 )
                 """
             )
+            self._ensure_column(conn, "accounts", "bot_name", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "accounts", "cut_mode", "TEXT NOT NULL DEFAULT 'original'")
             account_hashtags_added = self._ensure_column(conn, "accounts", "hashtags", "TEXT NOT NULL DEFAULT ''")
             if account_hashtags_added:
@@ -167,7 +169,7 @@ class TikTokProfileManager:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, name, login_type, profile_path, status, note, cut_mode, hashtags, created_at, updated_at
+                SELECT id, name, login_type, profile_path, status, note, bot_name, cut_mode, hashtags, created_at, updated_at
                 FROM accounts
                 ORDER BY id ASC
                 """
@@ -178,7 +180,7 @@ class TikTokProfileManager:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, name, login_type, profile_path, status, note, cut_mode, hashtags, created_at, updated_at
+                SELECT id, name, login_type, profile_path, status, note, bot_name, cut_mode, hashtags, created_at, updated_at
                 FROM accounts
                 WHERE id = ?
                 """,
@@ -193,6 +195,9 @@ class TikTokProfileManager:
             candidates.append(normalized[:-4])
         accounts = self.list_accounts()
         for candidate in candidates:
+            for account in accounts:
+                if slugify(account.bot_name) == candidate:
+                    return account
             expected_path = "profiles/%s" % candidate
             for account in accounts:
                 profile_path = account.profile_path.replace("\\", "/").rstrip("/")
@@ -208,6 +213,7 @@ class TikTokProfileManager:
         name: str,
         login_type: str,
         note: str = "",
+        bot_name: str = "",
         cut_mode: str = "original",
         hashtags: str | None = None,
     ) -> TikTokAccount:
@@ -227,15 +233,30 @@ class TikTokProfileManager:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO accounts (name, login_type, profile_path, status, note, cut_mode, hashtags, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO accounts (name, login_type, profile_path, status, note, bot_name, cut_mode, hashtags, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (clean_name, login_type, stored_profile_path, "paused", note.strip(), cut_mode, clean_hashtags, now, now),
+                (clean_name, login_type, stored_profile_path, "paused", note.strip(), _normalize_bot_name(bot_name), cut_mode, clean_hashtags, now, now),
             )
             account_id = int(cursor.lastrowid)
         account = self.get_account(account_id)
         if account is None:
             raise RuntimeError("Created account could not be loaded.")
+        return account
+
+    def update_account_bot_name(self, account_id: int, bot_name: str) -> TikTokAccount:
+        clean_bot_name = _normalize_bot_name(bot_name)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE accounts SET bot_name = ?, updated_at = ? WHERE id = ?",
+                (clean_bot_name, now, int(account_id)),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Account not found: %s" % account_id)
+        account = self.get_account(account_id)
+        if account is None:
+            raise ValueError("Account not found: %s" % account_id)
         return account
 
     def update_account_hashtags(self, account_id: int, hashtags: str) -> TikTokAccount:
@@ -856,6 +877,7 @@ class TikTokProfileManager:
             profile_path=row["profile_path"],
             status=row["status"],
             note=row["note"],
+            bot_name=row["bot_name"],
             cut_mode=row["cut_mode"],
             hashtags=row["hashtags"],
             created_at=row["created_at"],
@@ -1032,6 +1054,10 @@ def _normalize_video_cut_mode(value: str) -> str:
     if normalized not in VIDEO_CUT_MODES:
         raise ValueError("Unsupported video cut mode: %s" % value)
     return normalized
+
+
+def _normalize_bot_name(value: str) -> str:
+    return str(value or "").strip()
 
 
 def _normalize_source_channel_url(value: str) -> str:

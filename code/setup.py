@@ -2,7 +2,7 @@
 
 setup(
     name="auto-tiktok-editor",
-    version="4.0.0",
+    version="4.1.0",
     description="TikTok Profile Manager",
     package_dir={"": "src"},
     packages=find_packages(where="src"),

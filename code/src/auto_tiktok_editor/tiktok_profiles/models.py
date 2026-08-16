@@ -33,6 +33,7 @@ class TikTokAccount:
     profile_path: str
     status: str
     note: str
+    bot_name: str
     cut_mode: str
     hashtags: str
     created_at: str

@@ -274,20 +274,35 @@ def extract_tiktok_product_id(url: str) -> Optional[str]:
     if not hostname.endswith("tiktok.com"):
         return None
 
+    product_path = parsed.path.rstrip("/")
+    product_path_lower = product_path.casefold()
+    has_product_path = any(
+        marker in product_path_lower
+        for marker in (
+            "/view/product",
+            "/pdp",
+            "/product",
+            "/shop/",
+        )
+    )
     query = parse_qs(parsed.query or "")
-    for key in ("product_id", "productId", "product"):
+    query_keys = ["product_id", "productId", "product", "item_id", "itemId", "goods_id", "goodsId"]
+    if has_product_path:
+        query_keys.append("id")
+    for key in query_keys:
         for value in query.get(key, []):
             match = re.search(r"\d{10,}", value or "")
             if match:
                 return match.group(0)
 
-    path = parsed.path.rstrip("/")
     for pattern in (
         r"/view/product/(\d{10,})$",
-        r"/pdp/[^/?#]+/(\d{10,})$",
-        r"/product/[^/?#]+/(\d{10,})$",
+        r"/(?:[^/?#]+/)?pdp(?:/[^/?#]*)*/(\d{10,})(?:\.html)?$",
+        r"/(?:[^/?#]+/)?product(?:/[^/?#]*)*/(\d{10,})(?:\.html)?$",
+        r"/(?:[^/?#]+/)?pdp/[^/?#]*?(\d{10,})(?:\.html)?$",
+        r"/(?:[^/?#]+/)?product/[^/?#]*?(\d{10,})(?:\.html)?$",
     ):
-        match = re.search(pattern, path)
+        match = re.search(pattern, product_path)
         if match:
             return match.group(1)
     return None
@@ -1383,7 +1398,13 @@ class TelegramBotService(object):
                 )
                 self.client.send_message(chat_id, "Da tao xong video va luu vao profile.")
                 return
-            result = self._run_job_with_processing_retries(chat_id, source_video_url, product_image_path)
+            render_cut_mode = self._profile_cut_mode_for_current_bot()
+            result = self._run_job_with_processing_retries(
+                chat_id,
+                source_video_url,
+                product_image_path,
+                video_cut_mode=render_cut_mode,
+            )
             if not result.ok or result.final_video_path is None or not result.final_video_path.exists():
                 self.client.send_message(
                     chat_id,
@@ -1541,6 +1562,37 @@ class TelegramBotService(object):
 
     def _effective_send_result_to_telegram(self) -> bool:
         return bool(getattr(self.config, "telegram_send_result_to_telegram", False))
+
+    def _profile_cut_mode_for_current_bot(self) -> str:
+        profile_slug = str(getattr(self.config, "tiktok_profile_slug", "") or "").strip()
+        if not profile_slug:
+            return ""
+        try:
+            account = TikTokProfileManager().find_account_for_profile_slug(profile_slug)
+        except Exception as exc:
+            self.logger.warning("Could not load profile cut mode for bot/profile %s: %s", profile_slug, exc)
+            return ""
+        if account is None:
+            self.logger.warning("No profile account found for bot/profile slug %s while resolving cut mode.", profile_slug)
+            return ""
+        cut_mode = str(getattr(account, "cut_mode", "") or "").strip().lower()
+        if cut_mode:
+            try:
+                TikTokProfileManager().add_log(
+                    "info",
+                    "telegram_profile_cut_mode",
+                    "Telegram job mapped to profile %s with cut mode %s." % (account.name, cut_mode),
+                    account_id=account.id,
+                )
+            except Exception as exc:
+                self.logger.debug("Could not write Telegram profile cut mode log: %s", exc)
+            self.logger.info(
+                "Telegram job for bot/profile %s will use profile %s cut mode: %s.",
+                profile_slug,
+                account.name,
+                cut_mode,
+            )
+        return cut_mode
 
     def _run_job_with_processing_retries(
         self,

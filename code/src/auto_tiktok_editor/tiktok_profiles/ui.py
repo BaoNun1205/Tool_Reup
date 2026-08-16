@@ -137,6 +137,22 @@ def _telegram_bot_config_for_account(payload: dict, account) -> tuple[str, int]:
     bots = payload.get("bots") if isinstance(payload, dict) else None
     if not isinstance(bots, list):
         raise ValueError("telegram_bots.json must contain a 'bots' list.")
+    explicit_bot_name = slugify(getattr(account, "bot_name", "") or "")
+    if explicit_bot_name:
+        for item in bots:
+            if not isinstance(item, dict):
+                continue
+            bot_name = str(item.get("name") or "").strip()
+            if slugify(bot_name) != explicit_bot_name:
+                continue
+            token = str(item.get("bot_token") or item.get("token") or "").strip()
+            chat_id = _telegram_bot_chat_id(item)
+            if not token:
+                raise ValueError("Bot %s is missing bot_token." % bot_name)
+            if chat_id is None:
+                raise ValueError("Bot %s is missing chat_id." % bot_name)
+            return token, chat_id
+        raise ValueError("No Telegram bot config matches bot_name %s." % getattr(account, "bot_name", ""))
     candidates = _account_profile_slugs(account)
     for item in bots:
         if not isinstance(item, dict):
@@ -156,6 +172,7 @@ def _telegram_bot_config_for_account(payload: dict, account) -> tuple[str, int]:
 
 def _account_profile_slugs(account) -> set[str]:
     values = {
+        slugify(getattr(account, "bot_name", "") or ""),
         slugify(getattr(account, "name", "") or ""),
         slugify(Path(getattr(account, "profile_path", "") or "").name),
     }
@@ -1097,10 +1114,11 @@ class App(ctk.CTk):
             self._add_action_button(actions, text, command, kind)
         self.account_table = CTkDataTable(
             body,
-            ("id", "name", "login_type", "status", "cut_mode", "hashtags", "profile_path", "note", "updated_at"),
+            ("id", "name", "bot_name", "login_type", "status", "cut_mode", "hashtags", "profile_path", "note", "updated_at"),
             (
                 ("id", "ID", 60),
                 ("name", "Name", 170),
+                ("bot_name", "Bot Name", 170),
                 ("login_type", "Login", 90),
                 ("status", "Status", 110),
                 ("cut_mode", "Cut Mode", 170),
@@ -1112,7 +1130,7 @@ class App(ctk.CTk):
             on_select=self._on_account_selected,
             on_cell_click=self._on_account_cell_clicked,
         )
-        self.account_table.configure(displaycolumns=("id", "name", "login_type", "status", "cut_mode", "hashtags", "profile_path", "updated_at"))
+        self.account_table.configure(displaycolumns=("id", "name", "bot_name", "login_type", "status", "cut_mode", "hashtags", "profile_path", "updated_at"))
         self.account_table.set_column_alignment("cut_mode", tk.CENTER)
         self.account_table.bind("<Double-1>", self._on_account_cell_double_clicked, add="+")
         self.account_table.pack(fill="both", expand=True)
@@ -1656,6 +1674,201 @@ class App(ctk.CTk):
         )
         self.video_send_button.configure(width=88)
         self.video_delete_button = self._add_action_button(
+            "Connect",
+            self._connect_phone,
+            "secondary",
+        )
+        self.phone_control_button = self._add_action_button(
+            actions,
+            "Control",
+            self._start_phone_control,
+            "primary",
+        )
+        self.phone_close_button = self._add_action_button(
+            actions,
+            "Close",
+            self._stop_phone_control,
+            "danger",
+        )
+        self.phone_connect_button.configure(width=82)
+        self.phone_control_button.configure(width=82)
+        self.phone_close_button.configure(width=58)
+
+        body.grid_columnconfigure(0, weight=1)
+
+        settings_card = ctk.CTkFrame(body, fg_color=COLORS["surface_2"], corner_radius=10)
+        settings_card.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        settings_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            settings_card,
+            text="Phone Settings",
+            font=(FONT, 14, "bold"),
+            text_color=COLORS["text"],
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 8))
+
+        phone_line = ctk.CTkFrame(settings_card, fg_color="transparent")
+        phone_line.grid(row=1, column=0, sticky="ew", padx=12)
+        phone_line.grid_columnconfigure(1, weight=1)
+        ctk.CTkLabel(
+            phone_line,
+            text="Phone IP",
+            text_color=COLORS["muted"],
+            font=(FONT, 12, "bold"),
+            anchor="w",
+        ).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.phone_address_entry = self._entry(phone_line, self.phone_ip_var, "192.168.1.20")
+        self.phone_address_entry.grid(row=0, column=1, sticky="ew")
+        self.phone_address_entry.bind("<Return>", lambda _event: self._connect_phone())
+        ctk.CTkLabel(
+            phone_line,
+            text="Port",
+            text_color=COLORS["muted"],
+            font=(FONT, 12, "bold"),
+            anchor="w",
+        ).grid(row=0, column=2, sticky="w", padx=(10, 8))
+        self.phone_port_entry = self._entry(phone_line, self.phone_port_var, str(DEFAULT_ADB_PORT))
+        self.phone_port_entry.configure(width=78)
+        self.phone_port_entry.grid(row=0, column=3, sticky="w")
+        self.phone_port_entry.bind("<Return>", lambda _event: self._connect_phone())
+        for column, (text, variable) in enumerate(
+            (
+                ("Keep screen awake", self.phone_keep_screen_awake_var),
+                ("Turn phone screen off", self.phone_turn_screen_off_var),
+                ("Always on top", self.phone_always_on_top_var),
+            ),
+            start=4,
+        ):
+            ctk.CTkSwitch(
+                phone_line,
+                text=text,
+                variable=variable,
+                command=self._on_phone_control_settings_changed,
+                progress_color=COLORS["accent"],
+                button_color=COLORS["text"],
+                text_color=COLORS["text"],
+                font=(FONT, 11),
+            ).grid(row=0, column=column, sticky="w", padx=(12, 0))
+
+        quality = ctk.CTkFrame(settings_card, fg_color="transparent")
+        quality.grid(row=2, column=0, sticky="ew", padx=12, pady=(8, 12))
+        for index in range(5):
+            quality.grid_columnconfigure(index, weight=1, uniform="phone_quality")
+        for column, (label, variable, values, width) in enumerate(
+            (
+                ("FPS", self.phone_max_fps_var, ("30", "60"), 78),
+                (
+                    "Resolution",
+                    self.phone_max_size_var,
+                    ("1024", "1280", "1600"),
+                    104,
+                ),
+                (
+                    "Bitrate",
+                    self.phone_video_bit_rate_var,
+                    ("4 Mbps", "6 Mbps", "8 Mbps"),
+                    112,
+                ),
+                (
+                    "Screen",
+                    self.phone_monitor_target_var,
+                    ("Main", "Secondary"),
+                    104,
+                ),
+                (
+                    "Dock",
+                    self.phone_dock_position_var,
+                    ("Off", "Dock left", "Dock right"),
+                    116,
+                ),
+            )
+        ):
+            item = ctk.CTkFrame(quality, fg_color="transparent")
+            item.grid(row=0, column=column, sticky="ew", padx=(0, 8 if column < 4 else 0))
+            ctk.CTkLabel(
+                item,
+                text=label,
+                text_color=COLORS["muted"],
+                font=(FONT, 10, "bold"),
+            ).pack(side="left", padx=(0, 5))
+            menu = self._option_menu(
+                item,
+                variable,
+                values,
+                command=lambda _value: self._on_phone_control_settings_changed(),
+            )
+            menu.configure(
+                width=width,
+                height=30,
+                font=(FONT, 11),
+                dropdown_font=(FONT, 11),
+            )
+            menu.pack(side="left")
+
+        self._set_phone_control_running(False)
+
+    def _build_live_console_section(self, parent, row: int, column: int) -> None:
+        card, body, _actions = self._card(
+            parent,
+            "Live Console",
+            "Real-time Telegram, phone control, and file transfer events.",
+            compact=True,
+        )
+        self.live_console_card = card
+        card.grid(row=row, column=column, columnspan=2, sticky="nsew", pady=(14, 0))
+        body.grid_columnconfigure(0, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+        self.telegram_event_log = ctk.CTkTextbox(
+            body,
+            height=80,
+            fg_color="#080D18",
+            border_color=COLORS["border"],
+            border_width=1,
+            text_color="#A7F3D0",
+            corner_radius=8,
+            font=("Consolas", 11),
+            wrap="word",
+        )
+        self.telegram_event_log.grid(row=0, column=0, sticky="nsew")
+        self.telegram_event_log.configure(state="disabled")
+        self._append_telegram_event("Console ready")
+
+    def _build_videos_tab(self) -> None:
+        self.videos_tab.grid_columnconfigure(0, weight=1)
+        self.videos_tab.grid_columnconfigure(1, weight=0, minsize=440)
+        self.videos_tab.grid_rowconfigure(0, weight=1)
+        table_card, table_body, table_actions = self._card(self.videos_tab, "Videos", "Select a row to edit publish details.")
+        table_card.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        self.video_filter_account_var = tk.StringVar(value="All accounts")
+        self.video_filter_account_ids_by_label = {"All accounts": "all"}
+        filter_frame = ctk.CTkFrame(table_actions, fg_color="transparent")
+        filter_frame.grid(row=0, column=0, sticky="e", padx=(0, 8))
+        ctk.CTkLabel(filter_frame, text="Account", text_color=COLORS["muted"], font=(FONT, 11, "bold")).pack(side="left", padx=(0, 6))
+        self.video_filter_account_menu = self._option_menu(
+            filter_frame,
+            self.video_filter_account_var,
+            ["All accounts"],
+            command=lambda _value: self._on_video_filter_changed(),
+        )
+        self.video_filter_account_menu.configure(width=210)
+        self.video_filter_account_menu.pack(side="left")
+
+        self.video_normal_actions = ctk.CTkFrame(table_actions, fg_color="transparent")
+        self.video_normal_actions.grid(row=0, column=1, sticky="e")
+        self.video_auto_post_button = self._add_action_button(
+            self.video_normal_actions,
+            "Auto Post",
+            self._auto_post_selected_video,
+            "primary",
+        )
+        self.video_auto_post_button.configure(width=112)
+        self.video_send_button = self._add_action_button(
+            self.video_normal_actions,
+            "Gửi",
+            self._send_selected_video_to_phone,
+            "secondary",
+        )
+        self.video_send_button.configure(width=88)
+        self.video_delete_button = self._add_action_button(
             self.video_normal_actions,
             "Xóa",
             self._delete_current_video,
@@ -1665,8 +1878,10 @@ class App(ctk.CTk):
 
         columns = (
             "row_no",
+            "action",
             "play",
             "account_name",
+            "cut_mode",
             "file_path",
             "caption",
             "hashtags",
@@ -1679,9 +1894,11 @@ class App(ctk.CTk):
         self.video_normal_columns = (
             "row_no",
             "account_name",
+            "cut_mode",
             "caption",
             "updated_at",
             "hashtags",
+            "action",
             "play",
         )
         self.video_table = CTkDataTable(
@@ -1689,10 +1906,12 @@ class App(ctk.CTk):
             columns,
             (
                 ("row_no", "#", 70),
-                ("play", "Action", 126),
+                ("action", "Action", 100),
+                ("play", "Play", 50),
                 ("account_name", "Profile", 200),
+                ("cut_mode", "Cut Mode", 170),
                 ("file_path", "Video File", 320),
-                ("caption", "Description", 760),
+                ("caption", "Description", 500),
                 ("hashtags", "Hashtags", 280),
                 ("product_id", "Product ID", 170),
                 ("publish_mode", "Mode", 120),
@@ -1930,6 +2149,7 @@ class App(ctk.CTk):
                 values=(
                     account.id,
                     account.name,
+                    account.bot_name,
                     account.login_type,
                     account.status,
                     self._account_cut_mode_label(account),
@@ -2293,8 +2513,11 @@ class App(ctk.CTk):
         if self._is_video_render_draft(video):
             return "↻ Tạo lại" if video.status == "error" else "＋ Tạo"
         if self._video_final_path_exists(video):
-            return "▶ Play"
+            return "↻ Tạo lại"
         return "＋ Tạo"
+
+    def _video_play_label(self, video) -> str:
+        return "▶" if self._video_final_path_exists(video) else "▷"
 
     def _is_video_render_draft(self, video) -> bool:
         if video is None:
@@ -2338,9 +2561,11 @@ class App(ctk.CTk):
                 values=(
                     row_number,
                     self._video_action_label(video),
+                    self._video_play_label(video),
                     account_names.get(video.account_id, ""),
+                    self._video_row_cut_mode_label(video),
                     video.file_path,
-                    video.caption,
+                    (video.caption.replace("\n", " ")[:70] + "...") if video.caption and len(video.caption) > 70 else (video.caption.replace("\n", " ") if video.caption else video.caption),
                     video.hashtags,
                     video.product_id,
                     video.publish_mode,
@@ -2416,8 +2641,12 @@ class App(ctk.CTk):
         self._load_video_detail(self._current_selected_video())
 
     def _on_video_cell_clicked(self, row_id: str, column: str) -> None:
-        if column == "play":
+        if column == "action":
             self._handle_video_action(row_id)
+        elif column == "play":
+            self._handle_video_play(row_id)
+        elif column == "cut_mode":
+            self._show_video_cut_mode_menu(row_id)
 
     def _handle_video_action(self, row_id: str) -> None:
         try:
@@ -2429,10 +2658,18 @@ class App(ctk.CTk):
             return
         if self._is_video_waiting_to_render(video) or self._is_video_rendering(video):
             return
+        self._queue_video_render(video)
+
+    def _handle_video_play(self, row_id: str) -> None:
+        try:
+            video_id = int(row_id)
+        except (TypeError, ValueError):
+            return
+        video = self.manager.get_video(video_id)
+        if video is None:
+            return
         if self._video_final_path_exists(video):
             self._play_video(row_id)
-            return
-        self._queue_video_render(video)
 
     def _play_video(self, row_id: str) -> None:
         try:
@@ -2465,12 +2702,22 @@ class App(ctk.CTk):
         if fresh_video.id in self.video_render_pending_ids:
             self.status_var.set("Video %s đang nằm trong hàng chờ tạo." % fresh_video.id)
             return
-        if not self._is_video_render_draft(fresh_video):
-            if self._video_final_path_exists(fresh_video):
-                self._play_video(str(fresh_video.id))
-            else:
-                messagebox.showerror("Create video", "Video %s thiếu link nguồn hoặc ảnh sản phẩm để tạo." % fresh_video.id)
+        has_inputs = bool(
+            str(getattr(fresh_video, "source_video_url", "") or "").strip()
+            and str(getattr(fresh_video, "product_image_path", "") or "").strip()
+        )
+        if not has_inputs:
+            messagebox.showerror("Create video", "Video %s thiếu link nguồn hoặc ảnh sản phẩm để tạo." % fresh_video.id)
             return
+
+        if self._video_final_path_exists(fresh_video):
+            try:
+                path = self.manager.resolve_video_path(fresh_video)
+                if path.exists():
+                    path.unlink()
+            except Exception as exc:
+                messagebox.showerror("Create video", f"Không thể xóa video cũ: {exc}")
+                return
         try:
             self.manager.update_video_status(fresh_video.id, "queued", note=fresh_video.note)
             self.manager.add_log("info", "video_render_queued", "Queued video %s for rendering." % fresh_video.id, account_id=fresh_video.account_id, video_id=fresh_video.id)
@@ -2501,11 +2748,7 @@ class App(ctk.CTk):
             raise ValueError("Video %s missing source video URL." % video_id)
         if product_image_path is None or not product_image_path.exists() or not product_image_path.is_file():
             raise ValueError("Video %s missing product image: %s" % (video_id, getattr(video, "product_image_path", "")))
-        cut_mode = "original"
-        if video.account_id is not None:
-            account = self.manager.get_account(video.account_id)
-            if account is not None:
-                cut_mode = str(getattr(account, "cut_mode", "") or "original").strip().lower()
+        cut_mode = str(getattr(video, "cut_mode", "") or "original").strip().lower()
         if cut_mode not in VIDEO_ROW_CUT_MODE_LABELS:
             cut_mode = "original"
         try:
@@ -2631,10 +2874,20 @@ class App(ctk.CTk):
             self._cancel_hide_product_link_tooltip()
             return
         row_id, column = self.video_table.identify_cell(event.x, event.y)
+        cursor_active = False
+        if column in ("action", "cut_mode") and row_id:
+            cursor_active = True
+        elif column == "play" and row_id:
+            try:
+                video = self.manager.get_video(int(row_id)) if str(row_id).isdigit() else None
+                if video and self._video_final_path_exists(video):
+                    cursor_active = True
+            except Exception:
+                pass
         self.video_table.tree.configure(
-            cursor="hand2" if column == "play" and row_id else "",
+            cursor="hand2" if cursor_active else "",
         )
-        if column == "play" and row_id:
+        if cursor_active and column in ("action", "play", "cut_mode"):
             self._set_video_play_hover(row_id)
         else:
             self._clear_video_play_hover()
@@ -2692,15 +2945,8 @@ class App(ctk.CTk):
         self.video_play_hover_row_id = ""
         if row_id and self.video_table.exists(row_id):
             video = self.manager.get_video(int(row_id)) if str(row_id).isdigit() else None
-            values = list(self.video_table.item(row_id, "values"))
-            try:
-                play_index = self.video_table.columns.index("play")
-            except ValueError:
-                play_index = -1
-            if 0 <= play_index < len(values):
-                values[play_index] = self._video_action_label(video) if video is not None else ""
             tags = (self._status_tag(video.status),) if video is not None else ()
-            self.video_table.item(row_id, values=values, tags=tags)
+            self.video_table.item(row_id, tags=tags)
         try:
             self.video_table.tree.configure(cursor="")
         except tk.TclError:
@@ -3188,6 +3434,7 @@ class App(ctk.CTk):
                 name=dialog.result["name"],
                 login_type=dialog.result["login_type"],
                 note=dialog.result["note"],
+                bot_name=dialog.result["bot_name"],
                 cut_mode=dialog.result["cut_mode"],
                 hashtags=dialog.result["hashtags"],
             )
@@ -3251,72 +3498,70 @@ class App(ctk.CTk):
         if video is None:
             return
         address = self._phone_video_target_address()
-        phone_item = None
-        if address is not None:
-            try:
-                phone_item = self._phone_video_transfer_item(video)
-            except Exception as exc:
-                messagebox.showwarning("Send to phone", str(exc))
+        if address is None:
+            return
         try:
-            telegram_payload = self._telegram_product_payload_for_video(video)
+            phone_item = self._phone_video_transfer_item(video)
         except Exception as exc:
-            messagebox.showerror("Send Telegram", str(exc))
+            messagebox.showwarning("Send to phone", str(exc))
+            return
+        caption_message = _compose_video_caption_with_hashtags(video.caption, video.hashtags)
+        if not caption_message:
+            messagebox.showinfo("Missing Description", "Video chua co mo ta/hashtag de gui sang clipboard dien thoai.")
+            return
+        product_id = str(video.product_id or "").strip()
+        if not product_id:
+            messagebox.showinfo("Missing Product ID", "Video chua co Product ID de gui sang clipboard dien thoai.")
+            return
+        if not product_id.isdigit():
+            messagebox.showerror("Invalid Product ID", "Product ID chi duoc chua chu so: %s" % product_id)
             return
 
         def worker():
-            errors = []
-            telegram_result = None
-            phone_result = None
-            try:
-                client = TelegramBotClient(telegram_payload["bot_token"], logger=self.logger)
-                self._send_telegram_product_payload(client, telegram_payload)
-                telegram_result = {
-                    "video_id": telegram_payload["video_id"],
-                    "account_id": telegram_payload["account_id"],
-                    "profile": telegram_payload["profile"],
-                    "chat_id": telegram_payload["chat_id"],
-                    "product_id": telegram_payload["product_id"],
-                }
-            except Exception as exc:
-                errors.append("Telegram: %s" % exc)
-            if address is not None and phone_item is not None:
-                try:
-                    phone_result = self.phone_controller.send_file_to_gallery(address, phone_item["file_path"])
-                except Exception as exc:
-                    errors.append("Phone: %s" % exc)
+            if not self.phone_controller.is_connected():
+                self.phone_controller.connect(address)
+            phone_result = self.phone_controller.send_file_to_gallery(address, phone_item["file_path"])
+            caption_clipboard_result = self.phone_controller.copy_text_to_clipboard(
+                caption_message,
+                label="Description and hashtags",
+                address=address,
+                sync_to_phone=True,
+                require_phone_clipboard=True,
+            )
+            product_id_clipboard_result = self.phone_controller.copy_text_to_clipboard(
+                product_id,
+                label="Product ID",
+                address=address,
+                sync_to_phone=True,
+                require_phone_clipboard=True,
+            )
             return {
                 "video_id": video.id,
                 "account_id": video.account_id,
-                "telegram": telegram_result,
                 "phone": phone_result,
-                "errors": errors,
+                "caption_clipboard_result": caption_clipboard_result,
+                "product_id_clipboard_result": product_id_clipboard_result,
             }
 
         def on_success(payload):
-            if payload["telegram"] is not None:
-                self._log_telegram_product_send(payload["telegram"])
-            if payload["phone"] is not None:
-                result = payload["phone"]
-                self.manager.add_log(
-                    "info",
-                    "phone_video_send",
-                    "Sent video to phone: %s" % result["remote_path"],
-                    account_id=payload["account_id"],
-                    video_id=payload["video_id"],
-                )
+            result = payload["phone"]
+            self.manager.add_log(
+                "info",
+                "phone_video_send",
+                "Sent video to phone and copied description/hashtags plus Product ID to phone clipboard: %s"
+                % result["remote_path"],
+                account_id=payload["account_id"],
+                video_id=payload["video_id"],
+            )
             self._refresh_logs()
-            if payload["errors"]:
-                messagebox.showwarning("Send", "\n".join(payload["errors"]))
-            if payload["phone"] is not None:
-                self.status_var.set("Sent video %s to phone and Telegram." % payload["video_id"])
-            elif payload["telegram"] is not None:
-                self.status_var.set("Sent video %s details to Telegram." % payload["video_id"])
-            else:
-                self.status_var.set("Send failed for video %s." % payload["video_id"])
+            self.status_var.set(
+                "Sent video %s to phone. Copied description/hashtags and Product ID as 2 separate clipboard items. Current clipboard item: Product ID."
+                % payload["video_id"]
+            )
+            self._show_success_notification("Đã gửi video và copy mô tả/hashtag + Product ID vào clipboard điện thoại.")
 
-        action_text = "Sending video %s to phone and Telegram..." if address is not None else "Sending video %s details to Telegram..."
         self._run_worker(
-            action_text % video.id,
+            "Sending video %s to phone and copying product messages..." % video.id,
             worker,
             on_success=on_success,
             error_title="Send",
@@ -3401,10 +3646,15 @@ class App(ctk.CTk):
 
     def _on_account_cell_double_clicked(self, event) -> str | None:
         row_id, column = self.account_table.identify_cell(event.x, event.y)
-        if column != "hashtags" or not row_id:
+        if not row_id:
             return None
-        self._begin_account_hashtags_edit(row_id)
-        return "break"
+        if column == "hashtags":
+            self._begin_account_hashtags_edit(row_id)
+            return "break"
+        if column == "bot_name":
+            self._begin_account_bot_name_edit(row_id)
+            return "break"
+        return None
 
     def _account_cut_mode_label(self, account, include_arrow: bool = True) -> str:
         cut_mode = str(getattr(account, "cut_mode", "") or "original").strip().lower()
@@ -3458,6 +3708,58 @@ class App(ctk.CTk):
             self.account_table.selection_set(str(account_id))
         self.status_var.set("Account %s Cut Mode: %s." % (updated.name, self._account_cut_mode_label(updated, include_arrow=False)))
 
+    def _video_row_cut_mode_label(self, video, include_arrow: bool = True) -> str:
+        cut_mode = str(getattr(video, "cut_mode", "") or "original").strip().lower()
+        label = VIDEO_ROW_CUT_MODE_LABELS.get(cut_mode, VIDEO_ROW_CUT_MODE_LABELS["original"])
+        return "%s ▾" % label if include_arrow else label
+
+    def _show_video_cut_mode_menu(self, row_id: str) -> None:
+        try:
+            video_id = int(row_id)
+        except (TypeError, ValueError):
+            return
+        video = self.manager.get_video(video_id)
+        if video is None:
+            return
+        menu = tk.Menu(
+            self,
+            tearoff=False,
+            bg=COLORS["surface_2"],
+            fg=COLORS["text"],
+            activebackground=COLORS["surface_3"],
+            activeforeground=COLORS["text"],
+            borderwidth=2,
+            activeborderwidth=2,
+            font=(FONT, 13),
+        )
+        current = str(getattr(video, "cut_mode", "") or "original").strip().lower()
+        for label, value in VIDEO_ROW_CUT_MODE_VALUES.items():
+            prefix = "✓  " if value == current else "   "
+            menu.add_command(
+                label="  %s%s        " % (prefix, label),
+                command=lambda mode=value: self._set_video_cut_mode(video_id, mode),
+            )
+        try:
+            box = self.video_table.tree.bbox(str(row_id), "cut_mode")
+            x = self.video_table.tree.winfo_rootx() + (box[0] if box else 0)
+            y = self.video_table.tree.winfo_rooty() + (box[1] if box else 0) + (box[3] if box else 0)
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def _set_video_cut_mode(self, video_id: int, cut_mode: str) -> None:
+        try:
+            updated = self.manager.update_video_cut_mode(video_id, cut_mode)
+            self.manager.add_log("info", "video_cut_mode", "Video %s cut mode set to %s." % (video_id, updated.cut_mode), video_id=video_id)
+        except Exception as exc:
+            messagebox.showerror("Video Cut Mode", str(exc))
+            return
+        self._refresh_videos()
+        self._refresh_logs()
+        if self.video_table.exists(str(video_id)):
+            self.video_table.selection_set(str(video_id))
+        self.status_var.set("Video %s Cut Mode: %s." % (updated.id, self._video_row_cut_mode_label(updated, include_arrow=False)))
+
     def _begin_account_hashtags_edit(self, row_id: str) -> None:
         try:
             account_id = int(row_id)
@@ -3488,6 +3790,44 @@ class App(ctk.CTk):
         self.account_hashtags_editor = editor
         self.account_hashtags_editor_info = {
             "account_id": account_id,
+            "field": "hashtags",
+            "variable": variable,
+        }
+        editor.bind("<Return>", lambda _event: self._commit_account_hashtags_edit())
+        editor.bind("<FocusOut>", lambda _event: self._commit_account_hashtags_edit())
+        editor.bind("<Escape>", lambda _event: self._cancel_account_hashtags_edit())
+
+    def _begin_account_bot_name_edit(self, row_id: str) -> None:
+        try:
+            account_id = int(row_id)
+        except (TypeError, ValueError):
+            return
+        account = self.manager.get_account(account_id)
+        if account is None:
+            return
+        self._cancel_account_hashtags_edit()
+        box = self.account_table.tree.bbox(str(row_id), "bot_name")
+        if not box:
+            return
+        x, y, width, height = box
+        variable = tk.StringVar(value=getattr(account, "bot_name", "") or "")
+        editor = tk.Entry(
+            self.account_table.tree,
+            textvariable=variable,
+            bg=COLORS["input"],
+            fg=COLORS["text"],
+            insertbackground=COLORS["text"],
+            relief="solid",
+            bd=1,
+            font=(FONT, 14),
+        )
+        editor.place(x=x, y=y, width=width, height=height)
+        editor.select_range(0, tk.END)
+        editor.focus_set()
+        self.account_hashtags_editor = editor
+        self.account_hashtags_editor_info = {
+            "account_id": account_id,
+            "field": "bot_name",
             "variable": variable,
         }
         editor.bind("<Return>", lambda _event: self._commit_account_hashtags_edit())
@@ -3511,28 +3851,44 @@ class App(ctk.CTk):
             pass
         try:
             account_id = int(info["account_id"])
-            normalized = normalize_hashtags(value)
+            field = str(info.get("field") or "hashtags")
             account = self.manager.get_account(account_id)
-            if account is not None and (account.hashtags or "").strip() == normalized:
-                return "break"
-            updated = self.manager.update_account_hashtags(account_id, normalized)
-            self.manager.add_log(
-                "info",
-                "account_hashtags",
-                "Account %s hashtags set to %s." % (updated.id, updated.hashtags or "(none)"),
-                account_id=updated.id,
-            )
+            if field == "bot_name":
+                normalized = str(value or "").strip()
+                if account is not None and (account.bot_name or "").strip() == normalized:
+                    return "break"
+                updated = self.manager.update_account_bot_name(account_id, normalized)
+                self.manager.add_log(
+                    "info",
+                    "account_bot_name",
+                    "Account %s bot_name set to %s." % (updated.id, updated.bot_name or "(none)"),
+                    account_id=updated.id,
+                )
+            else:
+                normalized = normalize_hashtags(value)
+                if account is not None and (account.hashtags or "").strip() == normalized:
+                    return "break"
+                updated = self.manager.update_account_hashtags(account_id, normalized)
+                self.manager.add_log(
+                    "info",
+                    "account_hashtags",
+                    "Account %s hashtags set to %s." % (updated.id, updated.hashtags or "(none)"),
+                    account_id=updated.id,
+                )
         except Exception as exc:
             if show_errors:
-                messagebox.showerror("Account Hashtags", str(exc))
+                messagebox.showerror("Account", str(exc))
             else:
-                self.status_var.set("Account hashtags save failed: %s" % exc)
+                self.status_var.set("Account save failed: %s" % exc)
             return "break"
         self._refresh_accounts()
         self._refresh_logs()
         if self.account_table.exists(str(updated.id)):
             self.account_table.selection_set(str(updated.id))
-        self.status_var.set("Account %s hashtags: %s." % (updated.name, updated.hashtags or "(none)"))
+        if str(info.get("field") or "hashtags") == "bot_name":
+            self.status_var.set("Account %s bot_name: %s." % (updated.name, updated.bot_name or "(none)"))
+        else:
+            self.status_var.set("Account %s hashtags: %s." % (updated.name, updated.hashtags or "(none)"))
         return "break"
 
     def _cancel_account_hashtags_edit(self) -> str:
@@ -3874,7 +4230,7 @@ class App(ctk.CTk):
         return max(minimum, min(maximum, value))
 
     def _current_video_edit_settings(self) -> tuple[str, float, float, str, str]:
-        video_cut_mode = "original"
+        video_cut_mode = self._video_cut_mode_value()
         fixed_chunk_duration = self._read_float_setting(self.fixed_chunk_duration_var, "Fixed chunk seconds", 0.5, 30.0)
         scene_threshold = self._read_float_setting(self.scene_threshold_var, "Scene threshold", 0.01, 0.95)
         product_image_crop_ratio = self._product_image_crop_ratio_value()
@@ -4073,6 +4429,12 @@ class App(ctk.CTk):
         if self.telegram_bot_process is not None and self.telegram_bot_process.poll() is None:
             self._resume_telegram_bot()
             return
+        if self._is_external_telegram_bot_running():
+            self.telegram_bot_process = None
+            self._set_telegram_bot_button_running(True)
+            self.telegram_bot_status_var.set("Bot running")
+            self.status_var.set("Telegram bot is already running in another process.")
+            return
         project_root = Path(self.manager.project_root).resolve()
         script_path = project_root / "start_telegram_bot.ps1"
         if not script_path.exists():
@@ -4210,6 +4572,14 @@ class App(ctk.CTk):
     def _stop_telegram_bot(self, show_status: bool = True, hard: bool = False) -> None:
         process = self.telegram_bot_process
         if process is None:
+            if hard:
+                stopped = self._stop_external_telegram_bot_processes()
+                self._remove_telegram_bot_pause_file()
+                self._set_telegram_bot_button_running(False)
+                self.telegram_bot_status_var.set("Bot stopped")
+                if show_status:
+                    self.status_var.set("Telegram bot stopped%s." % (" (%s external process tree)." % stopped if stopped else ""))
+                return
             self._set_telegram_bot_button_running(False)
             return
         if not hard:
@@ -4229,6 +4599,7 @@ class App(ctk.CTk):
                     process.terminate()
                 except Exception:
                     pass
+        self._stop_external_telegram_bot_processes()
         self.telegram_bot_process = None
         self.telegram_active_profile_slug = None
         self._remove_telegram_bot_pause_file()
@@ -4246,17 +4617,80 @@ class App(ctk.CTk):
             return_code = process.poll() if process is not None else None
             self.telegram_bot_process = None
             self.telegram_active_profile_slug = None
-            self._remove_telegram_bot_pause_file()
+            running = self._is_external_telegram_bot_running()
+            if not running:
+                self._remove_telegram_bot_pause_file()
             if hasattr(self, "telegram_bot_status_var"):
                 self._set_var_if_changed(
                     self.telegram_bot_status_var,
-                    "Bot error" if return_code not in (None, 0) else "Bot stopped",
+                    "Bot running" if running else ("Bot error" if return_code not in (None, 0) else "Bot stopped"),
                 )
         elif self._telegram_bot_is_paused():
             self._set_var_if_changed(self.telegram_bot_status_var, "Bot paused")
         self._set_telegram_bot_button_running(running)
         if not self.closing:
             self.after(3000, self._sync_telegram_bot_button)
+
+    def _is_external_telegram_bot_running(self) -> bool:
+        return bool(self._external_telegram_bot_process_ids())
+
+    def _external_telegram_bot_process_ids(self) -> list[int]:
+        try:
+            completed = subprocess.run(
+                [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-Command",
+                    (
+                        "$selfPid=$PID; "
+                        "$needleBot='auto_tiktok_editor.cli ' + 'telegram-bots'; "
+                        "$needleBuiltBot='TikTokProfileManager.exe'; "
+                        "$needleLauncher='start_' + 'telegram_bot.ps1'; "
+                        "Get-CimInstance Win32_Process | "
+                        "Where-Object { $_.ProcessId -ne $selfPid -and ("
+                        "($_.Name -eq 'python.exe' -and $_.CommandLine -like \"*$needleBot*\") "
+                        "-or ($_.Name -eq $needleBuiltBot -and ($_.CommandLine -like \"* telegram-bots*\" -or $_.CommandLine -like \"* telegram-bot*\")) "
+                        "-or ($_.Name -eq 'powershell.exe' -and $_.CommandLine -like \"*-File*$needleLauncher*\")"
+                        ") } | "
+                        "Select-Object -ExpandProperty ProcessId"
+                    ),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=3,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            return []
+        process_ids = []
+        for line in str(completed.stdout or "").splitlines():
+            try:
+                process_ids.append(int(line.strip()))
+            except (TypeError, ValueError):
+                continue
+        own_pid = os.getpid()
+        return [process_id for process_id in process_ids if process_id != own_pid]
+
+    def _stop_external_telegram_bot_processes(self) -> int:
+        process_ids = self._external_telegram_bot_process_ids()
+        stopped = 0
+        for process_id in sorted(set(process_ids), reverse=True):
+            try:
+                subprocess.run(
+                    ["taskkill", "/PID", str(process_id), "/T", "/F"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                stopped += 1
+            except Exception:
+                continue
+        if stopped:
+            self._append_telegram_event("Stopped %s Telegram bot process tree(s)." % stopped)
+            self.manager.add_log("info", "telegram_bot_stopped", "Stopped %s Telegram bot process tree(s)." % stopped)
+        return stopped
 
     def _set_telegram_bot_button_running(self, running: bool) -> None:
         if not hasattr(self, "telegram_bot_button"):
@@ -4517,7 +4951,10 @@ class App(ctk.CTk):
                     label="Product ID",
                     address=address,
                     sync_to_phone=True,
-                    require_phone_clipboard=False,
+                    # Product ID is the final required step.  Do not mark the
+                    # video as prepared when it only reached the Windows
+                    # clipboard; the phone must confirm it received the ID.
+                    require_phone_clipboard=True,
                 )
                 return {
                     "video_id": fresh_video.id,
@@ -4912,6 +5349,7 @@ class AccountDialog(BaseDialog):
         self.window.resizable(False, False)
 
         self.name_var = tk.StringVar()
+        self.bot_name_var = tk.StringVar()
         self.login_type_var = tk.StringVar(value=LOGIN_TYPES[0])
         self.cut_mode_var = tk.StringVar(value=VIDEO_ROW_CUT_MODE_LABELS["original"])
         self.hashtags_var = tk.StringVar()
@@ -4923,9 +5361,11 @@ class AccountDialog(BaseDialog):
 
         self._label(frame, "Name", 0)
         self._entry(frame, self.name_var, 0, placeholder="Account name")
-        self._label(frame, "Login type", 1)
-        ctk.CTkOptionMenu(frame, variable=self.login_type_var, values=list(LOGIN_TYPES), fg_color=COLORS["input"], button_color=COLORS["surface_2"]).grid(row=1, column=1, sticky="ew", pady=(0, 9))
-        self._label(frame, "Cut Mode", 2)
+        self._label(frame, "Bot name", 1)
+        self._entry(frame, self.bot_name_var, 1, placeholder="name in telegram_bots.json")
+        self._label(frame, "Login type", 2)
+        ctk.CTkOptionMenu(frame, variable=self.login_type_var, values=list(LOGIN_TYPES), fg_color=COLORS["input"], button_color=COLORS["surface_2"]).grid(row=2, column=1, sticky="ew", pady=(0, 9))
+        self._label(frame, "Cut Mode", 3)
         ctk.CTkOptionMenu(
             frame,
             variable=self.cut_mode_var,
@@ -4940,14 +5380,14 @@ class AccountDialog(BaseDialog):
             dropdown_font=(FONT, 14),
             dynamic_resizing=False,
             anchor="w",
-        ).grid(row=2, column=1, sticky="ew", pady=(0, 9))
-        self._label(frame, "Hashtags", 3)
-        self._entry(frame, self.hashtags_var, 3, placeholder="#tag1 #tag2")
-        self._label(frame, "Note", 4)
-        self._entry(frame, self.note_var, 4, placeholder="Optional note")
+        ).grid(row=3, column=1, sticky="ew", pady=(0, 9))
+        self._label(frame, "Hashtags", 4)
+        self._entry(frame, self.hashtags_var, 4, placeholder="#tag1 #tag2")
+        self._label(frame, "Note", 5)
+        self._entry(frame, self.note_var, 5, placeholder="Optional note")
 
         button_bar = ctk.CTkFrame(frame, fg_color="transparent")
-        button_bar.grid(row=5, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        button_bar.grid(row=6, column=0, columnspan=2, sticky="e", pady=(8, 0))
         ctk.CTkButton(button_bar, text="Cancel", command=self.window.destroy, **_button_kwargs("secondary")).pack(side="right")
         ctk.CTkButton(button_bar, text="Add", command=self._submit, **_button_kwargs("primary")).pack(side="right", padx=(0, 8))
 
@@ -4963,6 +5403,7 @@ class AccountDialog(BaseDialog):
             return
         self.result = {
             "name": name,
+            "bot_name": self.bot_name_var.get().strip(),
             "login_type": self.login_type_var.get(),
             "cut_mode": VIDEO_ROW_CUT_MODE_VALUES.get(self.cut_mode_var.get().strip(), "original"),
             "hashtags": self.hashtags_var.get().strip() or _default_hashtag_for_account_name(name),

@@ -7,6 +7,7 @@ from typing import List
 
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import MediaInfo, SourceAsset, WorkingMedia
+from auto_tiktok_editor.media.ffmpeg import video_encoder_args
 from auto_tiktok_editor.utils.command import CommandRunner
 from auto_tiktok_editor.media.probe import MediaProbe
 
@@ -56,12 +57,7 @@ class MediaNormalizer(object):
             "0:v:0",
             "-vf",
             vf,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "medium",
-            "-crf",
-            "20",
+            *video_encoder_args(self.config, crf=20),
             "-pix_fmt",
             "yuv420p",
             "-movflags",

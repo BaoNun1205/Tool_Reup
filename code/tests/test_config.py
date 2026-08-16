@@ -33,6 +33,10 @@ class PipelineConfigTests(unittest.TestCase):
             "AUTO_EDITOR_REMBG_PROVIDERS",
             "AUTO_EDITOR_REMBG_POST_PROCESS_MASK",
             "AUTO_EDITOR_REMBG_MASK_EXPAND_PIXELS",
+            "AUTO_EDITOR_VIDEO_ENCODER",
+            "AUTO_EDITOR_AMF_INTERMEDIATE_BITRATE",
+            "AUTO_EDITOR_AMF_INTERMEDIATE_MAXRATE",
+            "AUTO_EDITOR_AMF_INTERMEDIATE_BUFSIZE",
             "AUTO_EDITOR_ADB_BIN",
             "AUTO_EDITOR_SCRCPY_BIN",
         )}
@@ -53,6 +57,10 @@ class PipelineConfigTests(unittest.TestCase):
             os.environ["AUTO_EDITOR_REMBG_PROVIDERS"] = "directml,cpu"
             os.environ["AUTO_EDITOR_REMBG_POST_PROCESS_MASK"] = "true"
             os.environ["AUTO_EDITOR_REMBG_MASK_EXPAND_PIXELS"] = "5"
+            os.environ["AUTO_EDITOR_VIDEO_ENCODER"] = "libx264"
+            os.environ["AUTO_EDITOR_AMF_INTERMEDIATE_BITRATE"] = "34M"
+            os.environ["AUTO_EDITOR_AMF_INTERMEDIATE_MAXRATE"] = "45M"
+            os.environ["AUTO_EDITOR_AMF_INTERMEDIATE_BUFSIZE"] = "70M"
             os.environ["AUTO_EDITOR_ADB_BIN"] = "C:/custom/adb.exe"
             os.environ["AUTO_EDITOR_SCRCPY_BIN"] = "D:/custom/scrcpy.exe"
 
@@ -70,6 +78,10 @@ class PipelineConfigTests(unittest.TestCase):
             self.assertEqual(config.rembg_providers, ("DmlExecutionProvider", "CPUExecutionProvider"))
             self.assertTrue(config.rembg_post_process_mask)
             self.assertEqual(config.rembg_mask_expand_pixels, 5)
+            self.assertEqual(config.video_encoder, "libx264")
+            self.assertEqual(config.amf_intermediate_bitrate, "34M")
+            self.assertEqual(config.amf_intermediate_maxrate, "45M")
+            self.assertEqual(config.amf_intermediate_bufsize, "70M")
             self.assertEqual(config.telegram_bot_token, "bot-token")
             self.assertEqual(config.telegram_allowed_chat_ids, (123, 456))
             self.assertEqual(config.telegram_delivery_chat_id, "987654321")
@@ -119,6 +131,10 @@ class PipelineConfigTests(unittest.TestCase):
                 "AUTO_EDITOR_REMBG_PROVIDERS": "",
                 "AUTO_EDITOR_REMBG_POST_PROCESS_MASK": "",
                 "AUTO_EDITOR_REMBG_MASK_EXPAND_PIXELS": "",
+                "AUTO_EDITOR_VIDEO_ENCODER": "",
+                "AUTO_EDITOR_AMF_INTERMEDIATE_BITRATE": "",
+                "AUTO_EDITOR_AMF_INTERMEDIATE_MAXRATE": "",
+                "AUTO_EDITOR_AMF_INTERMEDIATE_BUFSIZE": "",
             },
             clear=False,
         ):
@@ -130,6 +146,10 @@ class PipelineConfigTests(unittest.TestCase):
         self.assertFalse(config.rembg_post_process_mask)
         self.assertEqual(config.rembg_mask_expand_pixels, 3)
         self.assertEqual(config.backgroundremover_model, "u2netp")
+        self.assertEqual(config.video_encoder, "h264_amf")
+        self.assertEqual(config.amf_intermediate_bitrate, "30M")
+        self.assertEqual(config.amf_intermediate_maxrate, "40M")
+        self.assertEqual(config.amf_intermediate_bufsize, "60M")
 
     def test_build_ids_have_expected_prefixes(self):
         config = PipelineConfig()

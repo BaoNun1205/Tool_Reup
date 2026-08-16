@@ -7,6 +7,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 import json
+from types import SimpleNamespace
 import tempfile
 import unittest
 
@@ -61,6 +62,23 @@ class TelegramMultiBotTests(unittest.TestCase):
         self.assertEqual(config.telegram_input_root, Path("d:/telegram_inputs/channel_1"))
         self.assertEqual(config.tiktok_profile_slug, "channel_1")
 
+    def test_config_for_bot_uses_profile_cut_mode_for_bot_name(self):
+        base = PipelineConfig(
+            telegram_input_root=Path("d:/telegram_inputs"),
+            default_output_root=Path("d:/output"),
+            video_cut_mode="original",
+        )
+        spec = load_telegram_bot_specs_from_payload(
+            {"bots": [{"name": "tep_riu", "bot_token": "token-a", "chat_id": "111"}]}
+        )[0]
+        manager = FakeProfileManager({"tep_riu": SimpleNamespace(cut_mode="scene")})
+
+        config = _config_for_bot(base, spec, 1, profile_manager=manager)
+
+        self.assertEqual(manager.calls, ["tep_riu"])
+        self.assertEqual(config.tiktok_profile_slug, "tep_riu")
+        self.assertEqual(config.video_cut_mode, "scene")
+
     def test_load_telegram_bot_specs_merges_duplicate_tokens(self):
         specs = load_telegram_bot_specs_from_payload(
             {
@@ -74,6 +92,16 @@ class TelegramMultiBotTests(unittest.TestCase):
         self.assertEqual(len(specs), 1)
         self.assertEqual(specs[0].bot_token, "token-a")
         self.assertEqual(specs[0].chat_ids, (111, 222))
+
+
+class FakeProfileManager:
+    def __init__(self, accounts):
+        self.accounts = accounts
+        self.calls = []
+
+    def find_account_for_profile_slug(self, profile_slug):
+        self.calls.append(profile_slug)
+        return self.accounts.get(profile_slug)
 
 
 def load_telegram_bot_specs_from_payload(payload):

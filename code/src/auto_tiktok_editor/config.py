@@ -174,6 +174,11 @@ def _normalize_video_cut_mode(value: str) -> str:
     return normalized if normalized in {"fixed", "scene", "original", "remove_background"} else "fixed"
 
 
+def _normalize_video_encoder(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in {"h264_amf", "libx264"} else "h264_amf"
+
+
 def _normalize_product_image_crop_ratio(value: str) -> str:
     normalized = str(value or "").strip().lower().replace("x", ":")
     return normalized if normalized in {"1:1", "4:3"} else "1:1"
@@ -327,6 +332,12 @@ class PipelineConfig:
     target_sample_rate: int = 48000
     # Chat luong H.264. CRF cang thap thi cang net nhung file cang nang.
     video_crf: int = 18
+    # Mac dinh dung AMD AMF de tang toc encode. Doi ve libx264 neu can so sanh
+    # voi output CPU cu.
+    video_encoder: str = "h264_amf"
+    amf_intermediate_bitrate: str = "30M"
+    amf_intermediate_maxrate: str = "40M"
+    amf_intermediate_bufsize: str = "60M"
     # Thong so encode cuoi cung toi uu cho upload TikTok.
     final_video_bitrate: str = "16M"
     final_video_maxrate: str = "20M"
@@ -577,6 +588,10 @@ class PipelineConfig:
             ),
             rembg_post_process_mask=_env_flag("AUTO_EDITOR_REMBG_POST_PROCESS_MASK", False),
             rembg_mask_expand_pixels=max(0, _env_int("AUTO_EDITOR_REMBG_MASK_EXPAND_PIXELS", 3)),
+            video_encoder=_normalize_video_encoder(os.getenv("AUTO_EDITOR_VIDEO_ENCODER", "h264_amf")),
+            amf_intermediate_bitrate=os.getenv("AUTO_EDITOR_AMF_INTERMEDIATE_BITRATE", "30M").strip() or "30M",
+            amf_intermediate_maxrate=os.getenv("AUTO_EDITOR_AMF_INTERMEDIATE_MAXRATE", "40M").strip() or "40M",
+            amf_intermediate_bufsize=os.getenv("AUTO_EDITOR_AMF_INTERMEDIATE_BUFSIZE", "60M").strip() or "60M",
             adb_bin=(
                 os.getenv("AUTO_EDITOR_ADB_BIN")
                 or _find_runtime_binary("tools/adb.exe")

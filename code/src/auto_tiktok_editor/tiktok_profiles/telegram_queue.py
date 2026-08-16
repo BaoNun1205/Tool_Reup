@@ -117,7 +117,7 @@ def enqueue_telegram_video_draft(
     manager.add_log(
         "info",
         "telegram_queue",
-        "Saved Telegram draft video %s for profile %s." % (video.id, profile_slug),
+        "Saved Telegram draft video %s for profile %s with cut mode %s." % (video.id, profile_slug, video.cut_mode),
         account_id=account.id,
         video_id=video.id,
     )

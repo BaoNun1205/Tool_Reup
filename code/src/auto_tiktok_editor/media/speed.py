@@ -6,6 +6,7 @@ from pathlib import Path
 
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import ProcessedMaster, WorkingMedia
+from auto_tiktok_editor.media.ffmpeg import video_encoder_args
 from auto_tiktok_editor.utils.command import CommandRunner
 from auto_tiktok_editor.media.probe import MediaProbe
 
@@ -35,12 +36,7 @@ class SpeedProcessor(object):
                 "[v]",
                 "-map",
                 "[a]",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "medium",
-                "-crf",
-                "20",
+                *video_encoder_args(self.config, crf=20),
                 "-pix_fmt",
                 "yuv420p",
                 "-c:a",
@@ -58,12 +54,7 @@ class SpeedProcessor(object):
                 "-vf",
                 "setpts=PTS/%s" % self.config.speed_factor,
                 "-an",
-                "-c:v",
-                "libx264",
-                "-preset",
-                "medium",
-                "-crf",
-                "20",
+                *video_encoder_args(self.config, crf=20),
                 "-pix_fmt",
                 "yuv420p",
                 str(output_path),

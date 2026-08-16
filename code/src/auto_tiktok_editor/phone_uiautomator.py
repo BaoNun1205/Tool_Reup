@@ -5,6 +5,13 @@ from __future__ import annotations
 import time
 from typing import Any, Iterable
 
+try:
+    import uiautomator2 as u2
+except Exception as _uiautomator_import_error:
+    u2 = None
+else:
+    _uiautomator_import_error = None
+
 
 class UiAutomatorUnavailable(RuntimeError):
     """Raised when uiautomator2 cannot be used for the current device."""
@@ -13,10 +20,8 @@ class UiAutomatorUnavailable(RuntimeError):
 class UiAutomatorClient:
     def __init__(self, serial: str) -> None:
         self.serial = serial
-        try:
-            import uiautomator2 as u2
-        except Exception as exc:
-            raise UiAutomatorUnavailable("uiautomator2 is not installed.") from exc
+        if u2 is None:
+            raise UiAutomatorUnavailable("uiautomator2 is not installed.") from _uiautomator_import_error
         try:
             self.device = u2.connect(serial)
         except Exception as exc:

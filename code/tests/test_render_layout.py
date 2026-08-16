@@ -79,6 +79,11 @@ class RenderLayoutTests(unittest.TestCase):
         self.assertIn('crop=1080:1482:(iw-1080)/2:0', vf)
         self.assertIn('eq=brightness=0.0200:contrast=0.9900:saturation=1.0300', vf)
         self.assertIn('cas=strength=0.1200', vf)
+        self.assertIn('-c:v', command)
+        self.assertEqual(command[command.index('-c:v') + 1], 'h264_amf')
+        self.assertIn('30M', command)
+        self.assertIn('40M', command)
+        self.assertIn('60M', command)
 
     def test_split_layout_filter_matches_requested_crop_and_blend(self):
         config = PipelineConfig()
@@ -213,6 +218,8 @@ class RenderLayoutTests(unittest.TestCase):
         self.assertNotIn('-shortest', command)
         self.assertIn('-profile:v', command)
         self.assertIn('high', command)
+        self.assertIn('-c:v', command)
+        self.assertEqual(command[command.index('-c:v') + 1], 'h264_amf')
         self.assertIn('-b:v', command)
         self.assertIn('16M', command)
         self.assertIn('-maxrate', command)
@@ -282,6 +289,8 @@ class RenderLayoutTests(unittest.TestCase):
         self.assertIn('[bg][fg]overlay=0:0:shortest=1:format=auto,format=yuv420p[vout]', filter_complex)
         self.assertIn('-t', ffmpeg_command)
         self.assertIn('8.250', ffmpeg_command)
+        self.assertIn('-c:v', ffmpeg_command)
+        self.assertEqual(ffmpeg_command[ffmpeg_command.index('-c:v') + 1], 'h264_amf')
 
 
 if __name__ == '__main__':
