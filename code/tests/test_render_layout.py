@@ -151,6 +151,49 @@ class RenderLayoutTests(unittest.TestCase):
 
         filter_complex = compositor._build_filter_complex(spec)
 
+        self.assertIn('overlay=0:H-h:shortest=1:eof_action=pass,format=rgba[bottomsrc]', filter_complex)
+        self.assertIn('[maskraw]boxblur=28:1[bottommask]', filter_complex)
+        self.assertIn('[bottomsrc][bottommask]alphamerge[bottom]', filter_complex)
+        self.assertIn('[basev][bottom]overlay=0:683:shortest=1:eof_action=pass[vraw]', filter_complex)
+        self.assertIn('[vraw]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,setsar=1[vout]', filter_complex)
+
+    def test_split_layout_keeps_existing_zoom_motion_when_configured(self):
+        config = PipelineConfig(product_image_motion="zoom")
+        planner = OverlayPlanner(config)
+        spec = planner.plan(
+            ImageInfo(
+                path=Path('product.png'),
+                width=1600,
+                height=1200,
+                mime_type='image/jpeg',
+                image_type='jpg',
+                has_alpha=False,
+            )
+        )
+        compositor = FinalCompositor(config, CommandRunner())
+
+        filter_complex = compositor._build_filter_complex(spec)
+
+        self.assertIn("scale=w='1080.0000+152.0000*(0.5-0.5*cos(2*PI*n/180.0000))':h=-2:flags=lanczos:eval=frame", filter_complex)
+        self.assertIn("crop=1080:1080:'min(max(0\\,(iw-1080)/2+56*sin(2*PI*n/150.0000))\\,iw-1080)':'min(max(0\\,ih-1080-41*(0.5-0.5*cos(2*PI*n/150.0000)))\\,ih-1080)'[imgcrop]", filter_complex)
+
+    def test_split_layout_uses_4_3_image_crop_frame_when_configured(self):
+        config = PipelineConfig(product_image_crop_ratio="4:3")
+        planner = OverlayPlanner(config)
+        spec = planner.plan(
+            ImageInfo(
+                path=Path('product.png'),
+                width=1600,
+                height=1200,
+                mime_type='image/jpeg',
+                image_type='jpg',
+                has_alpha=False,
+            )
+        )
+        compositor = FinalCompositor(config, CommandRunner())
+
+        filter_complex = compositor._build_filter_complex(spec)
+
         self.assertIn("crop='if(gte(iw/ih\\,1.3333)\\,ih*1.3333\\,iw)':'if(gte(iw/ih\\,1.3333)\\,ih\\,iw/1.3333)'", filter_complex)
         self.assertIn("crop=1080:810:'(iw-1080)/2':'ih-810'[imgcrop]", filter_complex)
 
@@ -221,9 +264,9 @@ class RenderLayoutTests(unittest.TestCase):
         self.assertIn('-c:v', command)
         self.assertEqual(command[command.index('-c:v') + 1], 'h264_amf')
         self.assertIn('-b:v', command)
-        self.assertIn('16M', command)
+        self.assertIn('6M', command)
         self.assertIn('-maxrate', command)
-        self.assertIn('20M', command)
+        self.assertIn('8M', command)
         self.assertIn('-b:a', command)
         self.assertIn('192k', command)
         self.assertIn('-colorspace', command)

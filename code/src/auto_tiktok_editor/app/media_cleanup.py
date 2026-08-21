@@ -1,4 +1,4 @@
-"""Helpers for deleting generated media files from configured storage roots."""
+"""Helpers for deleting generated media files, temporary caches, and system storage."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import shutil
 import time
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 from auto_tiktok_editor.config import PipelineConfig
 
@@ -34,6 +34,33 @@ MEDIA_SUFFIXES = {
     ".heic",
 }
 
+BROWSER_CACHE_DIR_NAMES = {
+    "Cache",
+    "Code Cache",
+    "GPUCache",
+    "CacheStorage",
+    "ScriptCache",
+    "ShaderCache",
+    "GrShaderCache",
+    "Crashpad",
+    "blob_storage",
+}
+
+PROTECTED_PROFILE_NAMES = {
+    "Cookies",
+    "Cookies-journal",
+    "Local Storage",
+    "IndexedDB",
+    "Preferences",
+    "Login Data",
+    "Login Data-journal",
+    "Web Data",
+    "Web Data-journal",
+    "History",
+    "History-journal",
+    "Network",
+}
+
 
 @dataclass
 class MediaCleanupReport:
@@ -41,6 +68,29 @@ class MediaCleanupReport:
     deleted_files: int = 0
     deleted_directories: int = 0
     freed_bytes: int = 0
+    errors: List[str] = field(default_factory=list)
+
+
+@dataclass
+class CleanupItemInfo:
+    key: str
+    group: str  # "safe", "media", "dev", "device"
+    title: str
+    description: str
+    file_count: int = 0
+    size_bytes: int = 0
+    default_checked: bool = False
+    warning_note: str = ""
+
+
+@dataclass
+class GranularCleanupReport:
+    deleted_files: int = 0
+    deleted_directories: int = 0
+    freed_bytes: int = 0
+    deleted_items: List[str] = field(default_factory=list)
+    stale_videos_removed: int = 0
+    logs_cleared: int = 0
     errors: List[str] = field(default_factory=list)
 
 
@@ -106,31 +156,399 @@ def cleanup_tool_storage(
     return report
 
 
+def _calc_dir_stats(path: Path) -> Tuple[int, int]:
+    if not path.exists():
+        return 0, 0
+    count = 0
+    size = 0
+    for f in path.rglob("*"):
+        try:
+            if f.is_file() or f.is_symlink():
+                count += 1
+                size += f.stat().st_size
+        except OSError:
+            pass
+    return count, size
+
+
+def scan_cleanup_items(
+    config: PipelineConfig,
+    project_root: Path | str,
+    phone_controller: Optional[object] = None,
+) -> List[CleanupItemInfo]:
+    """Scan storage and return detailed item info with real-time sizes and file counts."""
+    root = Path(project_root).expanduser().resolve()
+    items: List[CleanupItemInfo] = []
+
+    # 1. Tmp & Render Cache
+    tmp_dirs = [root / "tmp", root / "_tmp_tests", root / "clips"]
+    tmp_files, tmp_size = 0, 0
+    for td in tmp_dirs:
+        c, s = _calc_dir_stats(td)
+        tmp_files += c
+        tmp_size += s
+    items.append(
+        CleanupItemInfo(
+            key="tmp",
+            group="safe",
+            title="Tệp tạm & Cache render",
+            description="Tệp tạm FFmpeg, audio và phân đoạn clip trong quá trình render.",
+            file_count=tmp_files,
+            size_bytes=tmp_size,
+            default_checked=True,
+        )
+    )
+
+    # 2. Phone Screenshots
+    sc_files, sc_size = _calc_dir_stats(root / "phone_screenshots")
+    items.append(
+        CleanupItemInfo(
+            key="phone_screenshots",
+            group="safe",
+            title="Ảnh chụp màn hình Phone",
+            description="Ảnh chụp màn hình từ điện thoại Android thông qua kết nối ADB.",
+            file_count=sc_files,
+            size_bytes=sc_size,
+            default_checked=True,
+        )
+    )
+
+    # 3. System & Database Logs
+    log_files, log_size = _calc_dir_stats(root / "logs")
+    items.append(
+        CleanupItemInfo(
+            key="logs",
+            group="safe",
+            title="Nhật ký hệ thống (Logs)",
+            description="Các file log trên ổ đĩa (.log) và lịch sử nhật ký trong cơ sở dữ liệu.",
+            file_count=log_files,
+            size_bytes=log_size,
+            default_checked=True,
+        )
+    )
+
+    # 4. Telegram Inputs
+    try:
+        tg_in = Path(config.telegram_input_root).expanduser().resolve()
+        if not tg_in.exists():
+            tg_in = root / "output" / "_telegram_inputs"
+    except Exception:
+        tg_in = root / "output" / "_telegram_inputs"
+    tg_files, tg_size = _calc_dir_stats(tg_in)
+    items.append(
+        CleanupItemInfo(
+            key="telegram_inputs",
+            group="safe",
+            title="File Input thô Telegram",
+            description="Ảnh sản phẩm và video thô tải về từ bot Telegram.",
+            file_count=tg_files,
+            size_bytes=tg_size,
+            default_checked=True,
+        )
+    )
+
+    # 5. Browser Profiles Cache
+    prof_root = root / "profiles"
+    bc_files, bc_size = 0, 0
+    if prof_root.exists():
+        for f in prof_root.rglob("*"):
+            try:
+                if f.is_file():
+                    parts = set(f.parts)
+                    if parts & BROWSER_CACHE_DIR_NAMES and not (parts & PROTECTED_PROFILE_NAMES):
+                        bc_files += 1
+                        bc_size += f.stat().st_size
+            except OSError:
+                pass
+    items.append(
+        CleanupItemInfo(
+            key="browser_cache",
+            group="safe",
+            title="Cache rác trình duyệt Profiles",
+            description="Bộ nhớ đệm Chrome/Playwright (Giữ nguyên Cookie & Đăng nhập TikTok).",
+            file_count=bc_files,
+            size_bytes=bc_size,
+            default_checked=True,
+        )
+    )
+
+    # 6. Video Queue
+    vq_files, vq_size = _calc_dir_stats(root / "profile_video_queue")
+    items.append(
+        CleanupItemInfo(
+            key="video_queue",
+            group="media",
+            title="Hàng đợi Video Profile",
+            description="Các video đang chờ xuất bản hoặc theo lịch đăng của từng Profile.",
+            file_count=vq_files,
+            size_bytes=vq_size,
+            default_checked=False,
+            warning_note="Xóa các video chờ đăng trong hàng đợi",
+        )
+    )
+
+    # 7. Output Videos (Thành phẩm)
+    out_root = Path(config.default_output_root).expanduser().resolve()
+    out_files, out_size = 0, 0
+    if out_root.exists():
+        for session_dir in out_root.iterdir():
+            if session_dir.is_dir() and session_dir.name != "_telegram_inputs":
+                c, s = _calc_dir_stats(session_dir)
+                out_files += c
+                out_size += s
+            elif session_dir.is_file():
+                try:
+                    out_files += 1
+                    out_size += session_dir.stat().st_size
+                except OSError:
+                    pass
+    items.append(
+        CleanupItemInfo(
+            key="output_videos",
+            group="media",
+            title="Toàn bộ Video thành phẩm Output",
+            description="Tất cả các video đã render thành phẩm hoàn chỉnh trong thư mục output.",
+            file_count=out_files,
+            size_bytes=out_size,
+            default_checked=False,
+            warning_note="Xóa các video thành phẩm đã render",
+        )
+    )
+
+    # 8. Build Dir
+    build_dir = root / "build"
+    b_files, b_size = _calc_dir_stats(build_dir)
+    if build_dir.exists() and b_files > 0:
+        items.append(
+            CleanupItemInfo(
+                key="build_dir",
+                group="dev",
+                title="Thư mục Build Nuitka/PyInstaller",
+                description="Các file tạm, object và binary từ các lần đóng gói ứng dụng trước đây.",
+                file_count=b_files,
+                size_bytes=b_size,
+                default_checked=False,
+            )
+        )
+
+    # 9. Legacy Backups
+    bk_files, bk_size = 0, 0
+    for bk in root.glob("data_backup_before_rebuild_*"):
+        if bk.is_dir():
+            c, s = _calc_dir_stats(bk)
+            bk_files += c
+            bk_size += s
+    if bk_files > 0:
+        items.append(
+            CleanupItemInfo(
+                key="legacy_backups",
+                group="dev",
+                title="Các thư mục Sao lưu cũ (Backup)",
+                description="Dữ liệu sao lưu từ các đợt tái cấu trúc trước đây.",
+                file_count=bk_files,
+                size_bytes=bk_size,
+                default_checked=False,
+            )
+        )
+
+    return items
+
+
+def execute_granular_cleanup(
+    selected_keys: Sequence[str],
+    config: PipelineConfig,
+    project_root: Path | str,
+    manager: Optional[object] = None,
+    phone_controller: Optional[object] = None,
+) -> GranularCleanupReport:
+    """Execute cleanup for only the selected item keys with full protection for critical files."""
+    root = Path(project_root).expanduser().resolve()
+    report = GranularCleanupReport()
+    keys_set = set(selected_keys)
+
+    # 1. Tmp & Render Cache
+    if "tmp" in keys_set:
+        for td in (root / "tmp", root / "_tmp_tests", root / "clips"):
+            if td.exists() and td.is_dir():
+                _remove_dir_children(td, report)
+                td.mkdir(parents=True, exist_ok=True)
+        report.deleted_items.append("tmp")
+
+    # 2. Phone Screenshots
+    if "phone_screenshots" in keys_set:
+        sc_dir = root / "phone_screenshots"
+        if sc_dir.exists() and sc_dir.is_dir():
+            _remove_dir_children(sc_dir, report)
+            sc_dir.mkdir(parents=True, exist_ok=True)
+        report.deleted_items.append("phone_screenshots")
+
+    # 3. System Logs & Database Logs
+    if "logs" in keys_set:
+        log_dir = root / "logs"
+        if log_dir.exists() and log_dir.is_dir():
+            _remove_dir_children(log_dir, report)
+            log_dir.mkdir(parents=True, exist_ok=True)
+        if manager and hasattr(manager, "clear_logs"):
+            try:
+                cleared_count = manager.clear_logs()
+                report.logs_cleared += int(cleared_count or 0)
+            except Exception as exc:
+                report.errors.append("Clear DB logs: %s" % exc)
+        report.deleted_items.append("logs")
+
+    # 4. Telegram Inputs
+    if "telegram_inputs" in keys_set:
+        try:
+            tg_in = Path(config.telegram_input_root).expanduser().resolve()
+            if not tg_in.exists():
+                tg_in = root / "output" / "_telegram_inputs"
+        except Exception:
+            tg_in = root / "output" / "_telegram_inputs"
+        if tg_in.exists() and tg_in.is_dir():
+            _remove_dir_children(tg_in, report)
+            tg_in.mkdir(parents=True, exist_ok=True)
+        report.deleted_items.append("telegram_inputs")
+
+    # 5. Browser Profiles Cache (Safe Cache Only)
+    if "browser_cache" in keys_set:
+        prof_root = root / "profiles"
+        if prof_root.exists() and prof_root.is_dir():
+            for cache_dir_candidate in prof_root.rglob("*"):
+                try:
+                    if not cache_dir_candidate.is_dir():
+                        continue
+                    if cache_dir_candidate.name in BROWSER_CACHE_DIR_NAMES:
+                        # Double check that no protected folder is inside or parent of this target
+                        parts = set(cache_dir_candidate.parts)
+                        if not (parts & PROTECTED_PROFILE_NAMES):
+                            files_cnt, dirs_cnt, bytes_cnt = _tree_stats(cache_dir_candidate)
+                            shutil.rmtree(cache_dir_candidate, ignore_errors=True)
+                            report.deleted_files += files_cnt
+                            report.deleted_directories += dirs_cnt + 1
+                            report.freed_bytes += bytes_cnt
+                except OSError as exc:
+                    report.errors.append("Browser cache %s: %s" % (cache_dir_candidate, exc))
+        report.deleted_items.append("browser_cache")
+
+    # 6. Video Queue
+    if "video_queue" in keys_set:
+        vq_dir = root / "profile_video_queue"
+        if vq_dir.exists() and vq_dir.is_dir():
+            _remove_dir_children(vq_dir, report)
+            vq_dir.mkdir(parents=True, exist_ok=True)
+        report.deleted_items.append("video_queue")
+
+    # 7. Output Videos
+    if "output_videos" in keys_set:
+        out_root = Path(config.default_output_root).expanduser().resolve()
+        if out_root.exists() and out_root.is_dir():
+            for child in list(out_root.iterdir()):
+                if child.name == "_telegram_inputs":
+                    continue
+                if child.is_dir():
+                    files_cnt, dirs_cnt, bytes_cnt = _tree_stats(child)
+                    try:
+                        shutil.rmtree(child)
+                        report.deleted_files += files_cnt
+                        report.deleted_directories += dirs_cnt + 1
+                        report.freed_bytes += bytes_cnt
+                    except OSError as exc:
+                        report.errors.append("%s: %s" % (child, exc))
+                elif child.is_file() or child.is_symlink():
+                    _delete_single_file(child, report)
+        # Stale video database cleanup
+        if manager and hasattr(manager, "list_videos") and hasattr(manager, "resolve_video_path") and hasattr(manager, "delete_videos"):
+            try:
+                missing_video_ids = [
+                    video.id
+                    for video in manager.list_videos()
+                    if not manager.resolve_video_path(video).exists()
+                ]
+                if missing_video_ids:
+                    res = manager.delete_videos(missing_video_ids)
+                    report.stale_videos_removed = int((res or {}).get("deleted") or 0)
+            except Exception as exc:
+                report.errors.append("Stale video DB cleanup: %s" % exc)
+        report.deleted_items.append("output_videos")
+
+    # 8. Build Dir
+    if "build_dir" in keys_set:
+        build_dir = root / "build"
+        if build_dir.exists() and build_dir.is_dir():
+            files_cnt, dirs_cnt, bytes_cnt = _tree_stats(build_dir)
+            try:
+                shutil.rmtree(build_dir)
+                report.deleted_files += files_cnt
+                report.deleted_directories += dirs_cnt + 1
+                report.freed_bytes += bytes_cnt
+            except OSError as exc:
+                report.errors.append("Build dir: %s" % exc)
+        report.deleted_items.append("build_dir")
+
+    # 9. Legacy Backups
+    if "legacy_backups" in keys_set:
+        for bk in root.glob("data_backup_before_rebuild_*"):
+            if bk.is_dir():
+                files_cnt, dirs_cnt, bytes_cnt = _tree_stats(bk)
+                try:
+                    shutil.rmtree(bk)
+                    report.deleted_files += files_cnt
+                    report.deleted_directories += dirs_cnt + 1
+                    report.freed_bytes += bytes_cnt
+                except OSError as exc:
+                    report.errors.append("Backup %s: %s" % (bk.name, exc))
+        report.deleted_items.append("legacy_backups")
+
+    return report
+
+
+def format_granular_cleanup_report(report: GranularCleanupReport) -> str:
+    """Return user-friendly message describing granular cleanup results."""
+    if report.deleted_files == 0 and report.deleted_directories == 0 and report.logs_cleared == 0 and not report.errors:
+        return "Không có tệp hoặc dữ liệu nào cần dọn dẹp."
+    parts = []
+    if report.deleted_files > 0:
+        parts.append(f"Đã xóa {report.deleted_files} tệp")
+    if report.deleted_directories > 0:
+        parts.append(f"{report.deleted_directories} thư mục")
+    if report.freed_bytes > 0:
+        parts.append(f"giải phóng {_human_size(report.freed_bytes)}")
+    if report.logs_cleared > 0:
+        parts.append(f"xóa {report.logs_cleared} dòng log")
+    if report.stale_videos_removed > 0:
+        parts.append(f"dọn {report.stale_videos_removed} bản ghi video mồ côi")
+
+    message = ", ".join(parts) + "."
+    if report.errors:
+        message += f" (Có {len(report.errors)} mục không xóa được do đang được mở/sử dụng)."
+    return message
+
+
 def format_cleanup_report(report: MediaCleanupReport, *, include_errors: bool = True) -> str:
     if report.deleted_files == 0 and not report.errors:
-        return "Khong tim thay video hoac anh nao trong input/output de xoa."
-    parts = ["Da xoa %s file media" % report.deleted_files]
+        return "Không tìm thấy video hoặc ảnh nào trong input/output để xóa."
+    parts = ["Đã xóa %s file media" % report.deleted_files]
     if report.deleted_directories:
-        parts.append("don %s thu muc rong" % report.deleted_directories)
+        parts.append("dọn %s thư mục rỗng" % report.deleted_directories)
     if report.freed_bytes > 0:
-        parts.append("giai phong %s" % _human_size(report.freed_bytes))
+        parts.append("giải phóng %s" % _human_size(report.freed_bytes))
     message = ", ".join(parts) + "."
     if include_errors and report.errors:
-        message += " Co %s file khong xoa duoc." % len(report.errors)
+        message += " Có %s file không xóa được." % len(report.errors)
     return message
 
 
 def format_tool_cleanup_report(report: MediaCleanupReport, *, include_errors: bool = True) -> str:
     if report.deleted_files == 0 and report.deleted_directories == 0 and not report.errors:
-        return "Khong tim thay du lieu tool nao de don dep."
-    parts = ["Da xoa %s file" % report.deleted_files]
+        return "Không tìm thấy dữ liệu tool nào để dọn dẹp."
+    parts = ["Đã xóa %s file" % report.deleted_files]
     if report.deleted_directories:
-        parts.append("xoa %s thu muc" % report.deleted_directories)
+        parts.append("xóa %s thư mục" % report.deleted_directories)
     if report.freed_bytes > 0:
-        parts.append("giai phong %s" % _human_size(report.freed_bytes))
+        parts.append("giải phóng %s" % _human_size(report.freed_bytes))
     message = ", ".join(parts) + "."
     if include_errors and report.errors:
-        message += " Co %s muc khong xoa duoc." % len(report.errors)
+        message += " Có %s mục không xóa được." % len(report.errors)
     return message
 
 
@@ -195,6 +613,26 @@ def _remove_root_contents(root: Path, report: MediaCleanupReport) -> None:
                 report.errors.append("%s: %s" % (child, exc))
 
 
+def _remove_dir_children(dir_path: Path, report: GranularCleanupReport) -> None:
+    try:
+        children = list(dir_path.iterdir())
+    except OSError as exc:
+        report.errors.append("%s: %s" % (dir_path, exc))
+        return
+    for child in children:
+        if child.is_file() or child.is_symlink():
+            _delete_single_file(child, report)
+        elif child.is_dir():
+            files, directories, bytes_count = _tree_stats(child)
+            try:
+                shutil.rmtree(child)
+                report.deleted_files += files
+                report.deleted_directories += directories + 1
+                report.freed_bytes += bytes_count
+            except OSError as exc:
+                report.errors.append("%s: %s" % (child, exc))
+
+
 def _delete_file(path: Path, report: MediaCleanupReport) -> None:
     try:
         report.freed_bytes += path.stat().st_size
@@ -207,7 +645,19 @@ def _delete_file(path: Path, report: MediaCleanupReport) -> None:
         report.errors.append("%s: %s" % (path, exc))
 
 
-def _tree_stats(root: Path) -> tuple[int, int, int]:
+def _delete_single_file(path: Path, report: GranularCleanupReport) -> None:
+    try:
+        report.freed_bytes += path.stat().st_size
+    except OSError:
+        pass
+    try:
+        path.unlink()
+        report.deleted_files += 1
+    except OSError as exc:
+        report.errors.append("%s: %s" % (path, exc))
+
+
+def _tree_stats(root: Path) -> Tuple[int, int, int]:
     files = 0
     directories = 0
     bytes_count = 0
@@ -260,7 +710,7 @@ def _remove_empty_directories(root: Path, errors: List[str], cutoff_timestamp: O
 
 
 def _human_size(size_bytes: int) -> str:
-    units = ("B", "KB", "MB", "GB")
+    units = ("B", "KB", "MB", "GB", "TB")
     size = float(max(0, int(size_bytes)))
     for unit in units:
         if size < 1024.0 or unit == units[-1]:

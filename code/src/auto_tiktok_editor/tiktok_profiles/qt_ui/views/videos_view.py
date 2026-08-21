@@ -7,14 +7,15 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QPoint, Qt, Signal, Slot
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QPoint, QSettings, Qt, QTimer, Signal, Slot, QModelIndex
+from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QSplitter,
+    QStyleOptionViewItem,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -25,6 +26,7 @@ from qfluentwidgets import (
     CardWidget,
     ComboBox,
     FluentIcon as FIF,
+    IndeterminateProgressRing,
     InfoBar,
     InfoBarPosition,
     LineEdit,
@@ -37,18 +39,145 @@ from qfluentwidgets import (
     SubtitleLabel,
     TableWidget,
     ToolButton,
+    isDarkTheme,
 )
+from qfluentwidgets.common.smooth_scroll import SmoothMode
+from qfluentwidgets.components.widgets.table_view import TableItemDelegate
 
 from auto_tiktok_editor.app.orchestrator import SessionOrchestrator
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.domain.models import SessionItemSpec, SessionSpec
 from auto_tiktok_editor.tiktok_profiles.models import PUBLISH_MODES
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
+from auto_tiktok_editor.tiktok_profiles.qt_ui.components.instant_combo_box import InstantComboBox
 from auto_tiktok_editor.tiktok_profiles.qt_ui.components.tag_bar import YouTubeTagInput
 from auto_tiktok_editor.tiktok_profiles.qt_ui.dialogs.schedule_dialog import ScheduleDialog
 from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import format_video_status, format_vietnam_datetime
 from auto_tiktok_editor.tiktok_profiles.qt_ui.workers import WorkerThread
 from auto_tiktok_editor.tiktok_profiles.telegram_queue import copy_rendered_video_to_queue
+
+
+class VideosTableItemDelegate(TableItemDelegate):
+    """Custom TableItemDelegate that paints high-contrast row selections and supports hidden columns."""
+
+    def _getFirstVisibleColumn(self, index: QModelIndex) -> int:
+        col_count = index.model().columnCount(index.parent())
+        for col in range(col_count):
+            if not self.parent().isColumnHidden(col):
+                return col
+        return 0
+
+    def _getLastVisibleColumn(self, index: QModelIndex) -> int:
+        col_count = index.model().columnCount(index.parent())
+        for col in range(col_count - 1, -1, -1):
+            if not self.parent().isColumnHidden(col):
+                return col
+        return col_count - 1
+
+    def _drawBackground(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex):
+        r = 6
+        first_col = self._getFirstVisibleColumn(index)
+        last_col = self._getLastVisibleColumn(index)
+
+        if index.column() == first_col:
+            rect = option.rect.adjusted(4, 0, r + 1, 0)
+            painter.drawRoundedRect(rect, r, r)
+        elif index.column() == last_col:
+            rect = option.rect.adjusted(-r - 1, 0, -4, 0)
+            painter.drawRoundedRect(rect, r, r)
+        else:
+            rect = option.rect.adjusted(-1, 0, 1, 0)
+            painter.drawRect(rect)
+
+    def _drawIndicator(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex):
+        y, h = option.rect.y(), option.rect.height()
+        ph = round(0.22 * h if self.pressedRow == index.row() else 0.18 * h)
+        indicator_color = QColor("#8B7CFF") if isDarkTheme() else QColor("#6D5DFB")
+        painter.setBrush(indicator_color)
+        painter.drawRoundedRect(4, ph + y, 3, h - 2 * ph, 1.5, 1.5)
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        painter.setClipping(True)
+        painter.setClipRect(option.rect)
+
+        option.rect.adjust(0, self.margin, 0, -self.margin)
+
+        isHover = self.hoverRow == index.row()
+        isPressed = self.pressedRow == index.row()
+        isAlternate = index.row() % 2 == 0 and self.parent().alternatingRowColors()
+        isSelected = index.row() in self.selectedRows
+        isDark = isDarkTheme()
+
+        if isSelected:
+            if isDark:
+                # Rich dark violet accent highlight (clearly visible in dark mode)
+                bg_color = QColor(139, 124, 255, 80) if isHover else QColor(139, 124, 255, 55)
+            else:
+                # Clean light violet accent highlight (clearly visible in light mode)
+                bg_color = QColor(109, 93, 251, 65) if isHover else QColor(109, 93, 251, 42)
+        else:
+            if isDark:
+                if isPressed:
+                    bg_color = QColor(255, 255, 255, 24)
+                elif isHover:
+                    bg_color = QColor(255, 255, 255, 18)
+                elif isAlternate:
+                    bg_color = QColor(255, 255, 255, 7)
+                else:
+                    bg_color = QColor(0, 0, 0, 0)
+            else:
+                if isPressed:
+                    bg_color = QColor(0, 0, 0, 20)
+                elif isHover:
+                    bg_color = QColor(0, 0, 0, 14)
+                elif isAlternate:
+                    bg_color = QColor(0, 0, 0, 6)
+                else:
+                    bg_color = QColor(0, 0, 0, 0)
+
+        if index.data(Qt.ItemDataRole.BackgroundRole):
+            painter.setBrush(index.data(Qt.ItemDataRole.BackgroundRole))
+        else:
+            painter.setBrush(bg_color)
+
+        self._drawBackground(painter, option, index)
+
+        # Draw left indicator on the first visible column
+        first_col = self._getFirstVisibleColumn(index)
+        if isSelected and index.column() == first_col and self.parent().horizontalScrollBar().value() == 0:
+            self._drawIndicator(painter, option, index)
+
+        if index.data(Qt.ItemDataRole.CheckStateRole) is not None:
+            self._drawCheckBox(painter, option, index)
+
+        painter.restore()
+        super(TableItemDelegate, self).paint(painter, option, index)
+
+
+class VideosTableWidget(TableWidget):
+    """Custom TableWidget that ignores row selection when clicking interactive columns (Cut Mode, Action) and uses enhanced delegate."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.delegate = VideosTableItemDelegate(self)
+        self.setItemDelegate(self.delegate)
+        if hasattr(self, "scrollDelagate") and hasattr(self.scrollDelagate, "verticalSmoothScroll"):
+            self.scrollDelagate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
+            self.scrollDelagate.horizonSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem)
+
+    def mousePressEvent(self, e) -> None:
+        pos = e.position().toPoint() if hasattr(e, "position") else e.pos()
+        idx = self.indexAt(pos)
+        if idx.isValid() and idx.column() in (2, 6):
+            # Do not change selection when clicking Cut Mode (Col 2) or Actions (Col 6)
+            e.accept()
+            return
+        super().mousePressEvent(e)
 
 
 class VideosView(QWidget):
@@ -69,9 +198,19 @@ class VideosView(QWidget):
         self._select_mode = False
         self._updating_inspector = False
         self._active_workers: list[WorkerThread] = []
+        self._sending_video_ids: set[int] = set()
+        self._last_videos_signature: tuple | None = None
+        self._profile_popup_open = False
+        self._profiles_signature: tuple[tuple[int, str], ...] | None = None
 
         self._init_ui()
         self.refresh_profiles_list()
+
+        # Real-time auto-sync timer (polls SQLite changes every 1s without needing manual refresh)
+        self._sync_timer = QTimer(self)
+        self._sync_timer.setInterval(1000)
+        self._sync_timer.timeout.connect(self._sync_videos_live)
+        self._sync_timer.start()
 
     def _init_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -91,9 +230,11 @@ class VideosView(QWidget):
         toolbar.addWidget(self.add_video_btn)
 
         toolbar.addWidget(BodyLabel("Chọn Profile:", self))
-        self.profile_combo = ComboBox(self)
+        self.profile_combo = InstantComboBox(self)
         self.profile_combo.setFixedWidth(190)
         self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+        self.profile_combo.popupOpened.connect(self._on_profile_popup_opened)
+        self.profile_combo.popupClosed.connect(self._on_profile_popup_closed)
         toolbar.addWidget(self.profile_combo)
 
         self.refresh_btn = PushButton("Làm mới", self, FIF.SYNC)
@@ -104,6 +245,10 @@ class VideosView(QWidget):
         self.select_mode_btn.clicked.connect(self._toggle_select_mode)
         toolbar.addWidget(self.select_mode_btn)
 
+        self.delete_btn = PushButton("Xóa", self, FIF.DELETE)
+        self.delete_btn.clicked.connect(lambda: self._on_delete_video(None))
+        toolbar.addWidget(self.delete_btn)
+
         self.schedule_btn = PushButton("Đặt lịch đăng", self, FIF.DATE_TIME)
         self.schedule_btn.clicked.connect(self._on_schedule_video)
         toolbar.addWidget(self.schedule_btn)
@@ -113,15 +258,15 @@ class VideosView(QWidget):
         main_layout.addLayout(toolbar)
 
         # Splitter: Table (Left) + Inspector/Editor (Right)
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        splitter.setChildrenCollapsible(False)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.splitter.setChildrenCollapsible(False)
 
         # Left: Table
-        table_container = QWidget(splitter)
+        table_container = QWidget(self.splitter)
         table_layout = QVBoxLayout(table_container)
         table_layout.setContentsMargins(0, 0, 8, 0)
 
-        self.table = TableWidget(table_container)
+        self.table = VideosTableWidget(table_container)
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels([
             "☐",
@@ -149,6 +294,7 @@ class VideosView(QWidget):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         self.table.itemSelectionChanged.connect(self._on_video_selection_changed)
+        self.table.cellClicked.connect(self._on_cell_clicked)
         self.table.itemChanged.connect(self._on_table_item_changed)
         self.table.horizontalHeader().sectionClicked.connect(self._on_header_section_clicked)
 
@@ -162,10 +308,10 @@ class VideosView(QWidget):
         self.table.setColumnHidden(0, True)
 
         table_layout.addWidget(self.table)
-        splitter.addWidget(table_container)
+        self.splitter.addWidget(table_container)
 
         # Right: Inspector Card
-        inspector_card = CardWidget(splitter)
+        inspector_card = CardWidget(self.splitter)
         inspector_card.setMinimumWidth(280)
         inspector_layout = QVBoxLayout(inspector_card)
         inspector_layout.setContentsMargins(18, 16, 18, 16)
@@ -182,8 +328,9 @@ class VideosView(QWidget):
         inspector_layout.addWidget(self.edit_profile_combo)
 
         inspector_layout.addWidget(BodyLabel("Caption:", inspector_card))
-        self.edit_caption = LineEdit(inspector_card)
+        self.edit_caption = PlainTextEdit(inspector_card)
         self.edit_caption.setPlaceholderText("Mô tả video...")
+        self.edit_caption.setFixedHeight(110)
         inspector_layout.addWidget(self.edit_caption)
 
         inspector_layout.addWidget(BodyLabel("Hashtags:", inspector_card))
@@ -191,28 +338,46 @@ class VideosView(QWidget):
         inspector_layout.addWidget(self.tag_input)
 
         inspector_layout.addWidget(BodyLabel("Product ID:", inspector_card))
+        prod_row = QHBoxLayout()
+        prod_row.setSpacing(6)
         self.edit_product_id = LineEdit(inspector_card)
         self.edit_product_id.setPlaceholderText("Mã sản phẩm Affiliate...")
-        inspector_layout.addWidget(self.edit_product_id)
+        prod_row.addWidget(self.edit_product_id, 1)
+
+        send_prod_container = QWidget(inspector_card)
+        send_prod_container.setFixedSize(32, 32)
+        send_prod_layout = QHBoxLayout(send_prod_container)
+        send_prod_layout.setContentsMargins(0, 0, 0, 0)
+        send_prod_layout.setSpacing(0)
+        send_prod_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        self.send_product_id_btn = ToolButton(send_prod_container)
+        self.send_product_id_btn.setIcon(FIF.SEND)
+        self.send_product_id_btn.setFixedSize(32, 32)
+        self.send_product_id_btn.setToolTip("Gửi Product ID vào bộ nhớ tạm điện thoại (Clipboard)")
+        self.send_product_id_btn.clicked.connect(self._on_send_product_id_to_phone)
+        send_prod_layout.addWidget(self.send_product_id_btn)
+
+        self.send_product_id_spinner = IndeterminateProgressRing(send_prod_container, start=False)
+        self.send_product_id_spinner.setFixedSize(20, 20)
+        self.send_product_id_spinner.setStrokeWidth(3)
+        self.send_product_id_spinner.setToolTip("Đang gửi Product ID vào clipboard điện thoại...")
+        self.send_product_id_spinner.hide()
+        send_prod_layout.addWidget(self.send_product_id_spinner)
+
+        prod_row.addWidget(send_prod_container)
+        inspector_layout.addLayout(prod_row)
 
         inspector_layout.addWidget(BodyLabel("Thời gian hẹn đăng:", inspector_card))
         self.edit_scheduled_at = LineEdit(inspector_card)
         self.edit_scheduled_at.setPlaceholderText("VD: 2026-08-20 18:30 (để trống nếu đăng ngay)")
         inspector_layout.addWidget(self.edit_scheduled_at)
 
-        inspector_layout.addWidget(BodyLabel("Cut Mode:", inspector_card))
-        self.edit_cut_mode = ComboBox(inspector_card)
-        self.edit_cut_mode.addItem("Cắt cố định", userData="fixed")
-        self.edit_cut_mode.addItem("Cắt theo đổi cảnh", userData="scene")
-        self.edit_cut_mode.addItem("Giữ nguyên video gốc", userData="original")
-        inspector_layout.addWidget(self.edit_cut_mode)
-
         self.tag_input.tags_changed.connect(self._on_tags_auto_saved)
         self.edit_caption.textChanged.connect(self._on_caption_auto_saved)
         self.edit_product_id.textChanged.connect(self._on_product_id_auto_saved)
         self.edit_scheduled_at.textChanged.connect(self._on_scheduled_at_auto_saved)
         self.edit_profile_combo.currentIndexChanged.connect(self._on_profile_auto_saved)
-        self.edit_cut_mode.currentIndexChanged.connect(self._on_inspector_cut_mode_changed)
 
         save_row = QHBoxLayout()
         save_row.addStretch(1)
@@ -222,38 +387,68 @@ class VideosView(QWidget):
         inspector_layout.addLayout(save_row)
 
         inspector_layout.addStretch(1)
-        splitter.addWidget(inspector_card)
+        self.splitter.addWidget(inspector_card)
 
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        splitter.setSizes([650, 350])
-        main_layout.addWidget(splitter, 1)
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 2)
+
+        # Khôi phục kích thước splitter đã lưu
+        settings = QSettings("AutoTikTokEditor", "TikTokProfileManager")
+        saved_state = settings.value("videos_view_splitter_state")
+        if saved_state:
+            self.splitter.restoreState(saved_state)
+        else:
+            self.splitter.setSizes([650, 350])
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
+
+        main_layout.addWidget(self.splitter, 1)
+
+    def _on_splitter_moved(self, pos: int, index: int) -> None:
+        self._save_splitter_state()
+
+    def _save_splitter_state(self) -> None:
+        if hasattr(self, "splitter"):
+            settings = QSettings("AutoTikTokEditor", "TikTokProfileManager")
+            settings.setValue("videos_view_splitter_state", self.splitter.saveState())
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._save_splitter_state()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self.refresh_profiles_list()
+        if hasattr(self, "_sync_timer") and not self._sync_timer.isActive():
+            self._sync_timer.start()
 
     def refresh_profiles_list(self) -> None:
         """Populate profile combobox."""
         try:
             accounts = self.manager.list_accounts()
+            signature = tuple((account.id, account.name) for account in accounts)
+            if signature == self._profiles_signature:
+                return
+            self._profiles_signature = signature
             self.profile_combo.blockSignals(True)
             self.profile_combo.clear()
             self.profile_combo.addItem("Tất cả Profile")
             for a in accounts:
                 self.profile_combo.addItem(a.name)
-            self.profile_combo.blockSignals(False)
 
             self.edit_profile_combo.blockSignals(True)
             self.edit_profile_combo.clear()
             for a in accounts:
                 self.edit_profile_combo.addItem(a.name, userData=a.id)
+
+            selected_index = self.profile_combo.findText(self._current_account_name or "")
+            if selected_index >= 0:
+                self.profile_combo.setCurrentIndex(selected_index)
+            elif self._current_account_name:
+                self._current_account_name = None
+            self.profile_combo.blockSignals(False)
             self.edit_profile_combo.blockSignals(False)
 
-            if self._current_account_name:
-                self.set_active_profile(self._current_account_name)
-            else:
-                self.refresh_videos()
+            self.refresh_videos()
         except Exception as exc:
             pass
 
@@ -274,7 +469,200 @@ class VideosView(QWidget):
         clean = "dark" if str(mode).strip().lower() == "dark" else "light"
         self.tag_input.set_theme_mode(clean)
         self.edit_filename_label.setStyleSheet("color: #B5B9C7; font-weight: bold;" if clean == "dark" else "color: #5F6475; font-weight: bold;")
+        self.table.viewport().update()
         self.refresh_videos()
+
+    def _sync_videos_live(self) -> None:
+        """Poll database periodically to update video states or show new videos immediately."""
+        if self._profile_popup_open:
+            return
+        try:
+            all_videos = self.manager.list_videos()
+            if self._current_account_name and self._current_account_name != "Tất cả Profile":
+                accounts = {a.name: a.id for a in self.manager.list_accounts()}
+                target_id = accounts.get(self._current_account_name)
+                videos = [v for v in all_videos if v.account_id == target_id]
+            else:
+                videos = all_videos
+
+            sig = tuple(
+                (
+                    v.id,
+                    v.account_id,
+                    v.file_path,
+                    v.caption,
+                    v.hashtags,
+                    v.product_id,
+                    v.publish_mode,
+                    v.scheduled_at,
+                    v.status,
+                    v.cut_mode,
+                    v.updated_at,
+                )
+                for v in videos
+            )
+
+            if sig == self._last_videos_signature:
+                return
+
+            old_ids = [v.id for v in self._videos_cache]
+            new_ids = [v.id for v in videos]
+            self._videos_cache = videos
+            self._last_videos_signature = sig
+
+            if old_ids == new_ids and len(videos) == self.table.rowCount():
+                self._update_table_in_place(videos)
+            else:
+                self._populate_table_preserving_state(videos)
+        except Exception:
+            pass
+
+    def _on_profile_popup_opened(self) -> None:
+        self._profile_popup_open = True
+
+    def _on_profile_popup_closed(self) -> None:
+        self._profile_popup_open = False
+
+    def _update_table_in_place(self, videos: list[Any]) -> None:
+        """Update table cells in place without rebuilding rows or disrupting user state."""
+        self.table.blockSignals(True)
+        for row, v in enumerate(videos):
+            # Col 0: UserRole data
+            chk_item = self.table.item(row, 0)
+            if chk_item:
+                chk_item.setData(Qt.ItemDataRole.UserRole, v)
+
+            # Col 1: Product ID
+            product_val = getattr(v, "product_id", "") or ""
+            product_item = self.table.item(row, 1)
+            if product_item:
+                product_item.setData(Qt.ItemDataRole.UserRole, v)
+                if product_item.text() != product_val:
+                    product_item.setText(product_val)
+
+            # Col 2: Cut Mode ComboBox
+            cut_mode_combo = self.table.cellWidget(row, 2)
+            if isinstance(cut_mode_combo, ComboBox):
+                current_mode = str(getattr(v, "cut_mode", "") or "fixed").strip().lower()
+                expected_idx = 1 if current_mode in ("scene", "smart") else (2 if current_mode == "original" else 0)
+                if cut_mode_combo.currentIndex() != expected_idx:
+                    cut_mode_combo.blockSignals(True)
+                    cut_mode_combo.setCurrentIndex(expected_idx)
+                    cut_mode_combo.blockSignals(False)
+
+            # Col 3: Caption
+            caption_val = getattr(v, "caption", "") or ""
+            caption_item = self.table.item(row, 3)
+            if caption_item and caption_item.text() != caption_val:
+                caption_item.setText(caption_val)
+
+            # Col 4: Hashtag
+            hashtags_val = getattr(v, "hashtags", "") or ""
+            hashtags_item = self.table.item(row, 4)
+            if hashtags_item and hashtags_item.text() != hashtags_val:
+                hashtags_item.setText(hashtags_val)
+
+            # Col 5: Status
+            status_val = getattr(v, "status", "pending") or "pending"
+            status_text, status_color = format_video_status(status_val)
+            status_item = self.table.item(row, 5)
+            if status_item:
+                if status_item.text() != status_text:
+                    status_item.setText(status_text)
+                    status_item.setForeground(QColor(status_color))
+
+            # Col 6: Action buttons
+            action_widget = self.table.cellWidget(row, 6)
+            if action_widget and action_widget.layout():
+                status_lower = str(status_val).strip().lower()
+                is_ready = status_lower in ("ready", "published", "prepared")
+                is_rendering = status_lower == "rendering"
+                is_sending = getattr(v, "id", None) in self._sending_video_ids
+                layout = action_widget.layout()
+                if layout.count() >= 4:
+                    btn_render = layout.itemAt(0).widget()
+                    send_container = layout.itemAt(1).widget()
+                    btn_play = layout.itemAt(2).widget()
+                    btn_del = layout.itemAt(3).widget()
+                    if btn_render:
+                        btn_render.setEnabled(not is_rendering and not is_sending)
+                        btn_render.setToolTip("Đang tạo..." if is_rendering else ("Tạo lại video (Re-render)" if status_lower != "draft" else "Tạo video"))
+                    if send_container and send_container.layout():
+                        s_layout = send_container.layout()
+                        if s_layout.count() >= 2:
+                            btn_send = s_layout.itemAt(0).widget()
+                            spinner = s_layout.itemAt(1).widget()
+                            if btn_send and spinner:
+                                if is_sending:
+                                    btn_send.hide()
+                                    spinner.show()
+                                    if hasattr(spinner, "start"):
+                                        spinner.start()
+                                else:
+                                    if hasattr(spinner, "stop"):
+                                        spinner.stop()
+                                    spinner.hide()
+                                    btn_send.show()
+                                    btn_send.setEnabled(is_ready)
+                                    btn_send.setToolTip("Gửi video sang điện thoại & copy clipboard" if is_ready else "Video chưa tạo xong, không thể gửi")
+                    if btn_play:
+                        btn_play.setEnabled(is_ready)
+                        btn_play.setToolTip("Xem trước video" if is_ready else "Video chưa tạo xong, không thể xem")
+
+        self.table.blockSignals(False)
+
+        # Update cached selected video reference if its status/details changed
+        if self._selected_video:
+            for v in videos:
+                if v.id == self._selected_video.id:
+                    self._selected_video = v
+                    break
+
+    def _populate_table_preserving_state(self, videos: list[Any]) -> None:
+        """Re-populate table while preserving row selection, scroll position, and checked boxes."""
+        selected_id = self._selected_video.id if self._selected_video else None
+        selected_rows = [idx.row() for idx in self.table.selectionModel().selectedRows()]
+
+        checked_ids = set()
+        if self._select_mode:
+            for r in range(self.table.rowCount()):
+                item = self.table.item(r, 0)
+                if item and item.checkState() == Qt.CheckState.Checked:
+                    v = item.data(Qt.ItemDataRole.UserRole)
+                    if v:
+                        checked_ids.add(v.id)
+
+        scroll_val = self.table.verticalScrollBar().value()
+
+        self._populate_table(videos)
+
+        if self._select_mode and checked_ids:
+            self.table.blockSignals(True)
+            for r in range(self.table.rowCount()):
+                item = self.table.item(r, 0)
+                if item:
+                    v = item.data(Qt.ItemDataRole.UserRole)
+                    if v and v.id in checked_ids:
+                        item.setCheckState(Qt.CheckState.Checked)
+            self.table.blockSignals(False)
+            self._update_header_checkbox()
+
+        if selected_id is not None:
+            for r in range(self.table.rowCount()):
+                item = self.table.item(r, 0) or self.table.item(r, 1)
+                if item:
+                    v = item.data(Qt.ItemDataRole.UserRole)
+                    if v and v.id == selected_id:
+                        self._selected_video = v
+                        self.table.blockSignals(True)
+                        self.table.selectRow(r)
+                        self.table.blockSignals(False)
+                        break
+        elif selected_rows and selected_rows[0] < self.table.rowCount():
+            self.table.selectRow(selected_rows[0])
+
+        self.table.verticalScrollBar().setValue(scroll_val)
+        self._update_selection_ui()
 
     def refresh_videos(self) -> None:
         """Load videos from database and update table."""
@@ -287,7 +675,23 @@ class VideosView(QWidget):
             else:
                 self._videos_cache = all_videos
 
-            self._populate_table(self._videos_cache)
+            self._last_videos_signature = tuple(
+                (
+                    v.id,
+                    v.account_id,
+                    v.file_path,
+                    v.caption,
+                    v.hashtags,
+                    v.product_id,
+                    v.publish_mode,
+                    v.scheduled_at,
+                    v.status,
+                    v.cut_mode,
+                    v.updated_at,
+                )
+                for v in self._videos_cache
+            )
+            self._populate_table_preserving_state(self._videos_cache)
         except Exception as exc:
             InfoBar.error(
                 title="Lỗi tải danh sách video",
@@ -295,6 +699,11 @@ class VideosView(QWidget):
                 position=InfoBarPosition.TOP,
                 parent=self.window(),
             )
+
+    def _on_cell_clicked(self, row: int, col: int) -> None:
+        """Explicitly select row when clicking data columns (Product ID, Caption, Hashtag, Status)."""
+        if col in (1, 3, 4, 5):
+            self.table.selectRow(row)
 
     def _populate_table(self, videos: list[Any]) -> None:
         self.table.blockSignals(True)
@@ -312,8 +721,10 @@ class VideosView(QWidget):
             product_item.setData(Qt.ItemDataRole.UserRole, v)
 
             # Col 2: Cut Mode ComboBox
-            cut_mode_combo = ComboBox(self.table)
+            cut_mode_combo = InstantComboBox(self.table)
             cut_mode_combo.setFixedHeight(28)
+            cut_mode_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            cut_mode_combo.wheelEvent = lambda event: event.ignore()
             cut_mode_combo.addItem("Cắt cố định", userData="fixed")
             cut_mode_combo.addItem("Cắt theo đổi cảnh", userData="scene")
             cut_mode_combo.addItem("Giữ nguyên video gốc", userData="original")
@@ -362,24 +773,49 @@ class VideosView(QWidget):
             status_lower = str(status_val).strip().lower()
             is_ready = status_lower in ("ready", "published", "prepared")
             is_rendering = status_lower == "rendering"
+            is_sending = getattr(v, "id", None) in self._sending_video_ids
 
             # 1. Nút Tạo lại (Icon)
             btn_render = ToolButton(action_widget)
             btn_render.setIcon(FIF.SYNC)
             btn_render.setFixedHeight(28)
-            btn_render.setEnabled(not is_rendering)
-            btn_render.setToolTip("Đang tạo video..." if is_rendering else ("Tạo lại video (Re-render)" if status_lower != "draft" else "Tạo video"))
+            btn_render.setEnabled(not is_rendering and not is_sending)
+            btn_render.setToolTip("Đang tạo..." if is_rendering else ("Tạo lại video (Re-render)" if status_lower != "draft" else "Tạo video"))
             btn_render.clicked.connect(lambda _, vid=v: self._on_re_render_video(vid))
             action_layout.addWidget(btn_render)
 
-            # 2. Nút Gửi (Gửi sang điện thoại - Disabled khi chưa tạo xong)
-            btn_send = ToolButton(action_widget)
+            # 2. Nút Gửi / Spinner Loading (Xoay vòng khi đang gửi)
+            send_container = QWidget(action_widget)
+            send_container.setFixedSize(28, 28)
+            send_layout = QHBoxLayout(send_container)
+            send_layout.setContentsMargins(0, 0, 0, 0)
+            send_layout.setSpacing(0)
+            send_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            btn_send = ToolButton(send_container)
             btn_send.setIcon(FIF.SEND)
-            btn_send.setFixedHeight(28)
-            btn_send.setEnabled(is_ready)
+            btn_send.setFixedSize(28, 28)
+            btn_send.setEnabled(is_ready and not is_sending)
             btn_send.setToolTip("Gửi video sang điện thoại & copy clipboard" if is_ready else "Video chưa tạo xong, không thể gửi")
             btn_send.clicked.connect(lambda _, vid=v: self._on_send_video(vid))
-            action_layout.addWidget(btn_send)
+            send_layout.addWidget(btn_send)
+
+            spinner = IndeterminateProgressRing(send_container, start=False)
+            spinner.setFixedSize(20, 20)
+            spinner.setStrokeWidth(3)
+            spinner.setToolTip("Đang gửi video sang điện thoại...")
+            send_layout.addWidget(spinner)
+
+            if is_sending:
+                btn_send.hide()
+                spinner.show()
+                spinner.start()
+            else:
+                spinner.stop()
+                spinner.hide()
+                btn_send.show()
+
+            action_layout.addWidget(send_container)
 
             # 3. Nút Xem (Play - Disabled khi chưa tạo xong)
             btn_play = ToolButton(action_widget)
@@ -411,13 +847,14 @@ class VideosView(QWidget):
         seen_ids = set()
 
         # 1. Check checkboxes in column 0 if select mode active
-        for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)
-            if item and item.checkState() == Qt.CheckState.Checked:
-                v = item.data(Qt.ItemDataRole.UserRole)
-                if v and v.id not in seen_ids:
-                    videos.append(v)
-                    seen_ids.add(v.id)
+        if self._select_mode:
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0)
+                if item and item.checkState() == Qt.CheckState.Checked:
+                    v = item.data(Qt.ItemDataRole.UserRole)
+                    if v and v.id not in seen_ids:
+                        videos.append(v)
+                        seen_ids.add(v.id)
 
         # 2. Check highlighted rows
         if not videos:
@@ -495,15 +932,6 @@ class VideosView(QWidget):
                         item.setData(Qt.ItemDataRole.UserRole, updated)
             if self._selected_video and self._selected_video.id == video.id:
                 self._selected_video = updated
-                if new_mode in ("scene", "smart"):
-                    idx = 1
-                elif new_mode == "original":
-                    idx = 2
-                else:
-                    idx = 0
-                self.edit_cut_mode.blockSignals(True)
-                self.edit_cut_mode.setCurrentIndex(idx)
-                self.edit_cut_mode.blockSignals(False)
         except Exception as exc:
             InfoBar.error("Lỗi đổi Cut Mode", str(exc), parent=self.window())
 
@@ -520,6 +948,11 @@ class VideosView(QWidget):
                 self.schedule_btn.setText(f"Đặt lịch đăng ({count})")
             else:
                 self.schedule_btn.setText("Đặt lịch đăng")
+        if hasattr(self, "delete_btn"):
+            if count > 0 and self._select_mode:
+                self.delete_btn.setText(f"Xóa ({count})")
+            else:
+                self.delete_btn.setText("Xóa")
 
     def _on_video_selection_changed(self) -> None:
         self._updating_inspector = True
@@ -529,7 +962,7 @@ class VideosView(QWidget):
             if video:
                 fname = Path(getattr(video, "file_path", "") or "").name or f"Video #{video.id}"
                 self.edit_filename_label.setText(fname)
-                self.edit_caption.setText(getattr(video, "caption", "") or "")
+                self.edit_caption.setPlainText(getattr(video, "caption", "") or "")
                 self.tag_input.set_tags(getattr(video, "hashtags", "") or "")
                 self.edit_product_id.setText(getattr(video, "product_id", "") or "")
                 self.edit_scheduled_at.setText(getattr(video, "scheduled_at", "") or "")
@@ -546,24 +979,12 @@ class VideosView(QWidget):
                 elif self.edit_profile_combo.count() > 0:
                     self.edit_profile_combo.setCurrentIndex(0)
                 self.edit_profile_combo.blockSignals(False)
-
-                current_mode = str(getattr(video, "cut_mode", "") or "fixed").strip().lower()
-                if current_mode in ("scene", "smart"):
-                    idx = 1
-                elif current_mode == "original":
-                    idx = 2
-                else:
-                    idx = 0
-                self.edit_cut_mode.blockSignals(True)
-                self.edit_cut_mode.setCurrentIndex(idx)
-                self.edit_cut_mode.blockSignals(False)
             else:
                 self.edit_filename_label.setText("Chưa chọn video nào")
                 self.edit_caption.clear()
                 self.tag_input.set_tags("")
                 self.edit_product_id.clear()
                 self.edit_scheduled_at.clear()
-                self.edit_cut_mode.setCurrentIndex(0)
         finally:
             self._updating_inspector = False
         self._update_selection_ui()
@@ -576,7 +997,7 @@ class VideosView(QWidget):
             publish_mode = "scheduled" if scheduled_str else "now"
             updated = self.manager.update_video_details(
                 video_id=self._selected_video.id,
-                caption=self.edit_caption.text().strip(),
+                caption=self.edit_caption.toPlainText().strip(),
                 hashtags=tags_str,
                 product_id=self.edit_product_id.text().strip(),
                 note=getattr(self._selected_video, "note", "") or "",
@@ -597,10 +1018,11 @@ class VideosView(QWidget):
         except Exception:
             pass
 
-    def _on_caption_auto_saved(self, caption_str: str) -> None:
+    def _on_caption_auto_saved(self) -> None:
         if not self._selected_video or self._updating_inspector:
             return
         try:
+            caption_str = self.edit_caption.toPlainText().strip()
             scheduled_str = self.edit_scheduled_at.text().strip()
             publish_mode = "scheduled" if scheduled_str else "now"
             updated = self.manager.update_video_details(
@@ -634,7 +1056,7 @@ class VideosView(QWidget):
             publish_mode = "scheduled" if scheduled_str else "now"
             updated = self.manager.update_video_details(
                 video_id=self._selected_video.id,
-                caption=self.edit_caption.text().strip(),
+                caption=self.edit_caption.toPlainText().strip(),
                 hashtags=self.tag_input.get_tags_string(),
                 product_id=pid_str.strip(),
                 note=getattr(self._selected_video, "note", "") or "",
@@ -663,7 +1085,7 @@ class VideosView(QWidget):
             new_account_id = self.edit_profile_combo.currentData()
             updated = self.manager.update_video_details(
                 video_id=self._selected_video.id,
-                caption=self.edit_caption.text().strip(),
+                caption=self.edit_caption.toPlainText().strip(),
                 hashtags=self.tag_input.get_tags_string(),
                 product_id=self.edit_product_id.text().strip(),
                 note=getattr(self._selected_video, "note", "") or "",
@@ -686,7 +1108,7 @@ class VideosView(QWidget):
             publish_mode = "scheduled" if scheduled_str else "now"
             updated = self.manager.update_video_details(
                 video_id=self._selected_video.id,
-                caption=self.edit_caption.text().strip(),
+                caption=self.edit_caption.toPlainText().strip(),
                 hashtags=self.tag_input.get_tags_string(),
                 product_id=self.edit_product_id.text().strip(),
                 note=getattr(self._selected_video, "note", "") or "",
@@ -694,40 +1116,42 @@ class VideosView(QWidget):
                 scheduled_at=scheduled_str,
                 account_id=new_account_id,
             )
+            account = self.manager.get_account(new_account_id) if new_account_id is not None else None
+            if account is not None:
+                updated = self.manager.update_video_cut_mode(updated.id, account.cut_mode)
             self._selected_video = updated
+            self._updating_inspector = True
+            try:
+                self.tag_input.set_tags(updated.hashtags)
+            finally:
+                self._updating_inspector = False
+
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 0) or self.table.item(row, 1)
+                if not item:
+                    continue
+                video = item.data(Qt.ItemDataRole.UserRole)
+                if not video or video.id != updated.id:
+                    continue
+                for column in (0, 1):
+                    table_item = self.table.item(row, column)
+                    if table_item:
+                        table_item.setData(Qt.ItemDataRole.UserRole, updated)
+                hashtags_item = self.table.item(row, 4)
+                if hashtags_item:
+                    hashtags_item.setText(updated.hashtags)
+                cut_mode_combo = self.table.cellWidget(row, 2)
+                if isinstance(cut_mode_combo, ComboBox):
+                    cut_mode_combo.blockSignals(True)
+                    cut_mode_combo.setCurrentIndex(
+                        1 if updated.cut_mode == "scene" else (2 if updated.cut_mode == "original" else 0)
+                    )
+                    cut_mode_combo.blockSignals(False)
+                break
             if self._current_account_name and self._current_account_name != "Tất cả Profile":
                 self.refresh_videos()
         except Exception as exc:
             InfoBar.error("Lỗi đổi Profile", str(exc), parent=self.window())
-
-    def _on_inspector_cut_mode_changed(self, index: int) -> None:
-        if not self._selected_video or self._updating_inspector:
-            return
-        new_mode = self.edit_cut_mode.itemData(index) or "fixed"
-        if new_mode == getattr(self._selected_video, "cut_mode", None):
-            return
-        try:
-            updated = self.manager.update_video_cut_mode(self._selected_video.id, new_mode)
-            self._selected_video = updated
-            for r in range(self.table.rowCount()):
-                item = self.table.item(r, 0) or self.table.item(r, 1)
-                if item:
-                    v = item.data(Qt.ItemDataRole.UserRole)
-                    if v and v.id == updated.id:
-                        item.setData(Qt.ItemDataRole.UserRole, updated)
-                        row_combo = self.table.cellWidget(r, 2)
-                        if isinstance(row_combo, ComboBox):
-                            row_combo.blockSignals(True)
-                            if new_mode in ("scene", "smart"):
-                                row_combo.setCurrentIndex(1)
-                            elif new_mode == "original":
-                                row_combo.setCurrentIndex(2)
-                            else:
-                                row_combo.setCurrentIndex(0)
-                            row_combo.blockSignals(False)
-                        break
-        except Exception as exc:
-            InfoBar.error("Lỗi đổi Cut Mode", str(exc), parent=self.window())
 
     def _on_save_detail(self) -> None:
         if not self._selected_video:
@@ -742,11 +1166,10 @@ class VideosView(QWidget):
         try:
             scheduled_str = self.edit_scheduled_at.text().strip()
             publish_mode = "scheduled" if scheduled_str else "now"
-            cut_mode = self.edit_cut_mode.currentData() or "fixed"
             new_account_id = self.edit_profile_combo.currentData()
             self.manager.update_video_details(
                 video_id=self._selected_video.id,
-                caption=self.edit_caption.text().strip(),
+                caption=self.edit_caption.toPlainText().strip(),
                 hashtags=self.tag_input.get_tags_string(),
                 product_id=self.edit_product_id.text().strip(),
                 note=getattr(self._selected_video, "note", "") or "",
@@ -754,8 +1177,6 @@ class VideosView(QWidget):
                 scheduled_at=scheduled_str,
                 account_id=new_account_id if new_account_id is not None else self._selected_video.account_id,
             )
-            updated_cut = self.manager.update_video_cut_mode(self._selected_video.id, cut_mode)
-            self._selected_video = updated_cut
             InfoBar.success(
                 title="Đã lưu",
                 content="Cập nhật thông tin video thành công!",
@@ -853,7 +1274,7 @@ class VideosView(QWidget):
             )
 
         InfoBar.info(
-            title="Đang tạo video",
+            title="Đang tạo",
             content=f"Bắt đầu render lại video ID {video.id}...",
             position=InfoBarPosition.TOP,
             parent=self.window(),
@@ -873,6 +1294,56 @@ class VideosView(QWidget):
         thread.error_task.connect(_on_err)
         thread.error_task.connect(_cleanup)
         thread.start()
+
+    def _update_video_action_state(self, video_id: int | None = None) -> None:
+        """Instantly update action buttons (send spinner / send button) for a specific video or all rows."""
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0) or self.table.item(row, 1)
+            if not item:
+                continue
+            v = item.data(Qt.ItemDataRole.UserRole)
+            if not v:
+                continue
+            if video_id is not None and getattr(v, "id", None) != video_id:
+                continue
+
+            status_val = getattr(v, "status", "pending") or "pending"
+            status_lower = str(status_val).strip().lower()
+            is_ready = status_lower in ("ready", "published", "prepared")
+            is_rendering = status_lower == "rendering"
+            is_sending = getattr(v, "id", None) in self._sending_video_ids
+
+            action_widget = self.table.cellWidget(row, 6)
+            if action_widget and action_widget.layout():
+                layout = action_widget.layout()
+                if layout.count() >= 4:
+                    btn_render = layout.itemAt(0).widget()
+                    send_container = layout.itemAt(1).widget()
+                    btn_play = layout.itemAt(2).widget()
+                    if btn_render:
+                        btn_render.setEnabled(not is_rendering and not is_sending)
+                    if send_container and send_container.layout():
+                        s_layout = send_container.layout()
+                        if s_layout.count() >= 2:
+                            btn_send = s_layout.itemAt(0).widget()
+                            spinner = s_layout.itemAt(1).widget()
+                            if btn_send and spinner:
+                                if is_sending:
+                                    btn_send.hide()
+                                    spinner.show()
+                                    if hasattr(spinner, "start"):
+                                        spinner.start()
+                                else:
+                                    if hasattr(spinner, "stop"):
+                                        spinner.stop()
+                                    spinner.hide()
+                                    btn_send.show()
+                                    btn_send.setEnabled(is_ready)
+                                    btn_send.setToolTip("Gửi video sang điện thoại & copy clipboard" if is_ready else "Video chưa tạo xong, không thể gửi")
+                    elif isinstance(send_container, ToolButton):
+                        send_container.setEnabled(is_ready and not is_sending)
+                    if btn_play:
+                        btn_play.setEnabled(is_ready)
 
     def _on_send_video(self, single_video: Any | None = None) -> None:
         targets = [single_video] if single_video else self.get_selected_videos()
@@ -913,6 +1384,15 @@ class VideosView(QWidget):
                 target_address = device_serials[0]
 
         video = targets[0]
+        if getattr(video, "id", None) in self._sending_video_ids:
+            InfoBar.warning(
+                title="Đang gửi",
+                content=f"Video #{video.id} đang được gửi sang điện thoại, vui lòng chờ hoàn thành!",
+                position=InfoBarPosition.TOP,
+                parent=self.window(),
+            )
+            return
+
         status_lower = str(getattr(video, "status", "") or "").strip().lower()
         if status_lower not in ("ready", "published", "prepared"):
             InfoBar.warning(
@@ -923,6 +1403,10 @@ class VideosView(QWidget):
             )
             return
 
+        # Kích hoạt trạng thái đang gửi và chuyển nút sang hiệu ứng xoay loading vòng tròn ngay lập tức
+        self._sending_video_ids.add(video.id)
+        self._update_video_action_state(video.id)
+
         def _send_worker() -> dict:
             video_path = self.manager.resolve_video_path(video)
             if not video_path.exists():
@@ -930,7 +1414,7 @@ class VideosView(QWidget):
 
             fresh_video = self.manager.get_video(video.id) or video
             if self._selected_video and self._selected_video.id == video.id:
-                caption_val = self.edit_caption.text().strip()
+                caption_val = self.edit_caption.toPlainText().strip()
                 hashtags_val = self.tag_input.get_tags_string().strip()
                 product_id_val = self.edit_product_id.text().strip()
             else:
@@ -973,8 +1457,14 @@ class VideosView(QWidget):
             )
             return {"video_id": video.id, "phone_result": phone_result}
 
+        def _cleanup():
+            self._sending_video_ids.discard(video.id)
+            self._update_video_action_state(video.id)
+            if thread in self._active_workers:
+                self._active_workers.remove(thread)
+
         def _on_done(result: Any) -> None:
-            self.refresh_videos()
+            _cleanup()
             InfoBar.success(
                 title="Gửi thành công",
                 content=f"Đã gửi video ID {video.id} và copy mô tả/hashtag + Product ID vào clipboard điện thoại.",
@@ -984,6 +1474,7 @@ class VideosView(QWidget):
             )
 
         def _on_err(exc: Exception, tb: str) -> None:
+            _cleanup()
             InfoBar.error(
                 title="Lỗi gửi video",
                 content=str(exc),
@@ -1000,7 +1491,95 @@ class VideosView(QWidget):
         thread = WorkerThread(_send_worker, parent=self)
         self._active_workers.append(thread)
 
+        thread.finished_task.connect(_on_done)
+        thread.error_task.connect(_on_err)
+        thread.start()
+
+    def _on_send_product_id_to_phone(self) -> None:
+        """Send only the Product ID into the connected Android phone clipboard."""
+        product_id = self.edit_product_id.text().strip()
+        if not product_id:
+            InfoBar.warning(
+                title="Chưa có Product ID",
+                content="Vui lòng nhập Product ID trước khi gửi vào điện thoại!",
+                position=InfoBarPosition.TOP,
+                parent=self.window(),
+            )
+            return
+
+        from auto_tiktok_editor.phone_control import PhoneController, load_phone_control_settings
+        phone_settings = load_phone_control_settings()
+        address = str(getattr(phone_settings, "address", "") or "").strip()
+        controller = PhoneController(self.config)
+        controller.runner.ensure_tool(self.config.adb_bin)
+        completed = controller.runner.run([self.config.adb_bin, "devices"], check=False)
+        device_serials = [
+            line.split("\t", 1)[0].strip()
+            for line in completed.stdout.splitlines()
+            if line.strip() and not line.startswith("List of") and "\tdevice" in line
+        ]
+
+        target_address = address
+        if not target_address:
+            if len(device_serials) == 1:
+                target_address = device_serials[0]
+            elif not device_serials:
+                InfoBar.warning(
+                    title="Chưa kết nối ADB",
+                    content="Vui lòng vào tab 'Điện thoại (ADB)' và kết nối điện thoại trước khi gửi!",
+                    position=InfoBarPosition.TOP,
+                    parent=self.window(),
+                )
+                return
+            else:
+                target_address = device_serials[0]
+
+        self.send_product_id_btn.hide()
+        self.send_product_id_spinner.show()
+        self.send_product_id_spinner.start()
+
+        def _copy_worker() -> dict:
+            controller.copy_text_to_clipboard(
+                product_id,
+                label="Product ID",
+                address=target_address,
+                sync_to_phone=True,
+                require_phone_clipboard=False,
+            )
+            if self._selected_video:
+                self.manager.add_log(
+                    "info",
+                    "phone_product_id_clipboard",
+                    f"Đã copy Product ID '{product_id}' vào clipboard điện thoại.",
+                    account_id=getattr(self._selected_video, "account_id", None),
+                    video_id=getattr(self._selected_video, "id", None),
+                )
+            return {"product_id": product_id}
+
+        def _on_done(result: Any) -> None:
+            InfoBar.success(
+                title="Đã gửi Product ID",
+                content=f"Đã copy Product ID '{product_id}' vào bộ nhớ tạm điện thoại.",
+                position=InfoBarPosition.TOP,
+                duration=3000,
+                parent=self.window(),
+            )
+
+        def _on_err(exc: Exception, tb: str) -> None:
+            InfoBar.error(
+                title="Lỗi gửi Product ID",
+                content=str(exc),
+                position=InfoBarPosition.TOP,
+                parent=self.window(),
+            )
+
+        thread = WorkerThread(_copy_worker, parent=self)
+        self._active_workers.append(thread)
+
         def _cleanup():
+            self.send_product_id_spinner.stop()
+            self.send_product_id_spinner.hide()
+            self.send_product_id_btn.show()
             if thread in self._active_workers:
                 self._active_workers.remove(thread)
 
@@ -1142,6 +1721,10 @@ class VideosView(QWidget):
         if box.exec():
             try:
                 ids = [v.id for v in videos_to_delete]
+                deleted_ids_set = set(ids)
+                if self._selected_video and self._selected_video.id in deleted_ids_set:
+                    self._selected_video = None
+                self.manager.delete_videos(ids)
                 with self.manager._connect() as conn:
                     conn.executemany("DELETE FROM videos WHERE id = ?", [(vid,) for vid in ids])
                 InfoBar.success(
@@ -1187,8 +1770,13 @@ class VideosView(QWidget):
         act_render.triggered.connect(lambda: self._on_re_render_video(video))
         menu.addAction(act_render)
 
-        act_send = Action(FIF.SEND, "Gửi sang điện thoại (Video + Clipboard)", self)
-        act_send.setEnabled(is_ready)
+        is_sending = getattr(video, "id", None) in self._sending_video_ids
+        act_send = Action(
+            FIF.SEND,
+            "Đang gửi sang điện thoại..." if is_sending else "Gửi sang điện thoại (Video + Clipboard)",
+            self,
+        )
+        act_send.setEnabled(is_ready and not is_sending)
         act_send.triggered.connect(lambda: self._on_send_video(video))
         menu.addAction(act_send)
 
@@ -1214,4 +1802,3 @@ class VideosView(QWidget):
         menu.addAction(act_delete)
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
-

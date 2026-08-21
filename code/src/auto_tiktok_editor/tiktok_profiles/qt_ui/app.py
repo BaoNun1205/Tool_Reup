@@ -28,6 +28,7 @@ from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import (
     set_current_theme_mode,
 )
 from auto_tiktok_editor.tiktok_profiles.qt_ui.views.accounts_view import AccountsView
+from auto_tiktok_editor.tiktok_profiles.qt_ui.views.dashboard_view import DashboardView
 from auto_tiktok_editor.tiktok_profiles.qt_ui.views.log_view import LogView
 from auto_tiktok_editor.tiktok_profiles.qt_ui.views.phone_view import PhoneControlView
 from auto_tiktok_editor.tiktok_profiles.qt_ui.views.settings_view import SettingsView
@@ -60,6 +61,10 @@ class TikTokProfileManagerApp(FluentWindow):
         self._init_logging_bridge()
         self._init_navigation()
 
+        # Propagate initial theme mode to all created sub-interfaces
+        initial_mode = get_current_theme_mode()
+        self.apply_theme_mode(initial_mode, initial=False)
+
     def _init_window(self) -> None:
         self.setWindowTitle("TikTok Profile Manager Pro")
         self.resize(1200, 780)
@@ -85,12 +90,18 @@ class TikTokProfileManagerApp(FluentWindow):
 
         if not initial:
             # Propagate theme updates to subviews
+            if hasattr(self, "dashboard_view"):
+                self.dashboard_view.apply_theme_mode(clean_mode)
             if hasattr(self, "accounts_view"):
                 self.accounts_view.apply_theme_mode(clean_mode)
             if hasattr(self, "sources_view"):
                 self.sources_view.apply_theme_mode(clean_mode)
             if hasattr(self, "videos_view"):
                 self.videos_view.apply_theme_mode(clean_mode)
+            if hasattr(self, "phone_view"):
+                self.phone_view.apply_theme_mode(clean_mode)
+            if hasattr(self, "telegram_view"):
+                self.telegram_view.apply_theme_mode(clean_mode)
             if hasattr(self, "logs_view"):
                 self.logs_view.apply_theme_mode(clean_mode)
             if hasattr(self, "settings_view"):
@@ -98,6 +109,15 @@ class TikTokProfileManagerApp(FluentWindow):
 
     def _init_sub_interfaces(self) -> None:
         # Views
+        self.phone_view = PhoneControlView(self.config, self)
+        self.phone_view.setObjectName("phoneInterface")
+
+        self.telegram_view = TelegramView(self.config, self)
+        self.telegram_view.setObjectName("telegramInterface")
+
+        self.dashboard_view = DashboardView(self.manager, self.config, self.phone_view, self.telegram_view, self)
+        self.dashboard_view.setObjectName("dashboardInterface")
+
         self.accounts_view = AccountsView(self.manager, self.browser_worker, self)
         self.accounts_view.setObjectName("accountsInterface")
 
@@ -107,19 +127,14 @@ class TikTokProfileManagerApp(FluentWindow):
         self.videos_view = VideosView(self.manager, self.config, self)
         self.videos_view.setObjectName("videosInterface")
 
-        self.phone_view = PhoneControlView(self.config, self)
-        self.phone_view.setObjectName("phoneInterface")
-
-        self.telegram_view = TelegramView(self.config, self)
-        self.telegram_view.setObjectName("telegramInterface")
-
-        self.logs_view = LogView(self)
+        self.logs_view = LogView(self.manager, self)
         self.logs_view.setObjectName("logsInterface")
 
         self.settings_view = SettingsView(self.config, self)
         self.settings_view.setObjectName("settingsInterface")
 
         # Connect inter-view signals
+        self.dashboard_view.request_navigate.connect(self._on_dashboard_navigate)
         self.accounts_view.request_videos_view.connect(self._on_request_videos_view)
         self.accounts_view.request_sources_view.connect(self._on_request_sources_view)
 
@@ -134,28 +149,36 @@ class TikTokProfileManagerApp(FluentWindow):
         logging.getLogger("auto_tiktok_editor").addHandler(handler)
 
     def _init_navigation(self) -> None:
+        self.navigationInterface.setExpandWidth(190)
+
+        self.addSubInterface(
+            self.dashboard_view,
+            FIF.HOME,
+            "Dashboard",
+            NavigationItemPosition.TOP,
+        )
         self.addSubInterface(
             self.accounts_view,
             FIF.PEOPLE,
-            "Tài khoản Profiles",
+            "Profiles",
             NavigationItemPosition.TOP,
         )
         self.addSubInterface(
             self.sources_view,
             FIF.GLOBE,
-            "Kênh Nguồn (Sources)",
+            "Sources",
             NavigationItemPosition.TOP,
         )
         self.addSubInterface(
             self.videos_view,
             FIF.VIDEO,
-            "Quản lý Video",
+            "Videos",
             NavigationItemPosition.TOP,
         )
         self.addSubInterface(
             self.phone_view,
             ModernPhoneIcon(),
-            "Điện thoại (ADB)",
+            "Phone Control",
             NavigationItemPosition.TOP,
         )
         self.addSubInterface(
@@ -167,7 +190,7 @@ class TikTokProfileManagerApp(FluentWindow):
         self.addSubInterface(
             self.logs_view,
             FIF.COMMAND_PROMPT,
-            "Nhật ký (Logs)",
+            "Logs",
             NavigationItemPosition.TOP,
         )
 
@@ -175,9 +198,26 @@ class TikTokProfileManagerApp(FluentWindow):
         self.addSubInterface(
             self.settings_view,
             FIF.SETTING,
-            "Cài đặt hệ thống",
+            "Settings",
             NavigationItemPosition.BOTTOM,
         )
+
+    def _on_dashboard_navigate(self, target: str) -> None:
+        target_clean = str(target or "").strip().lower()
+        if target_clean == "profiles":
+            self.switchTo(self.accounts_view)
+        elif target_clean == "sources":
+            self.switchTo(self.sources_view)
+        elif target_clean == "videos":
+            self.switchTo(self.videos_view)
+        elif target_clean == "phone":
+            self.switchTo(self.phone_view)
+        elif target_clean == "telegram":
+            self.switchTo(self.telegram_view)
+        elif target_clean == "logs":
+            self.switchTo(self.logs_view)
+        elif target_clean == "settings":
+            self.switchTo(self.settings_view)
 
     def _on_request_videos_view(self, account) -> None:
         name = account if isinstance(account, str) else getattr(account, "name", "")

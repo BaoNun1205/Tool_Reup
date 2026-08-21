@@ -393,6 +393,11 @@ class PhoneControlView(QWidget):
         except Exception as exc:
             InfoBar.error("Lỗi", str(exc), parent=self.window())
 
+    def apply_theme_mode(self, mode: str) -> None:
+        clean = "dark" if str(mode).strip().lower() == "dark" else "light"
+        if hasattr(self, "status_card"):
+            self.status_card.set_theme_mode(clean)
+
     def closeEvent(self, event) -> None:
         try:
             self.screenshot_hotkey.stop()

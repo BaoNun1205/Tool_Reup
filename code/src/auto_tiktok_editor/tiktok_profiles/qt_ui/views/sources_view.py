@@ -6,7 +6,7 @@ import sys
 import webbrowser
 from typing import Any
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QSettings, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -36,6 +36,7 @@ from qfluentwidgets import (
     TableWidget,
     ToolButton,
 )
+from qfluentwidgets.common.smooth_scroll import SmoothMode
 
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.phone_control import (
@@ -44,11 +45,14 @@ from auto_tiktok_editor.phone_control import (
     normalize_phone_address,
 )
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
+from auto_tiktok_editor.tiktok_profiles.qt_ui.components.instant_combo_box import InstantComboBox
 from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import (
     ModernPhoneIcon,
     TIKTOK_ANDROID_PACKAGES,
     format_vietnam_datetime,
 )
+
+PHONE_ICON = ModernPhoneIcon()
 
 
 class SourcesView(QWidget):
@@ -66,6 +70,7 @@ class SourcesView(QWidget):
         self._sources_cache: list[Any] = []
         self._selected_source: Any | None = None
         self._accounts_map: dict[int, str] = {}
+        self._profiles_signature: tuple[tuple[int, str], ...] | None = None
 
         self._init_ui()
         self.refresh_profiles_list()
@@ -88,7 +93,7 @@ class SourcesView(QWidget):
         toolbar.addWidget(self.add_btn)
 
         toolbar.addWidget(BodyLabel("Chọn Profile:", self))
-        self.profile_combo = ComboBox(self)
+        self.profile_combo = InstantComboBox(self)
         self.profile_combo.setFixedWidth(190)
         self.profile_combo.currentIndexChanged.connect(self._on_profile_filter_changed)
         toolbar.addWidget(self.profile_combo)
@@ -102,15 +107,19 @@ class SourcesView(QWidget):
         main_layout.addLayout(toolbar)
 
         # Splitter: Table (Left) + Detail Card (Right)
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
-        splitter.setChildrenCollapsible(False)
+        self.splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        self.splitter.setChildrenCollapsible(False)
 
         # Left: Table
-        table_container = QWidget(splitter)
+        table_container = QWidget(self.splitter)
         table_layout = QVBoxLayout(table_container)
         table_layout.setContentsMargins(0, 0, 8, 0)
 
         self.table = TableWidget(table_container)
+        if hasattr(self.table, "scrollDelagate") and hasattr(self.table.scrollDelagate, "verticalSmoothScroll"):
+            self.table.scrollDelagate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
+            self.table.scrollDelagate.horizonSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem)
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels([
             "Nổi bật",
@@ -146,10 +155,10 @@ class SourcesView(QWidget):
         self.table.setColumnWidth(6, 110)
 
         table_layout.addWidget(self.table)
-        splitter.addWidget(table_container)
+        self.splitter.addWidget(table_container)
 
         # Right: Detail Card
-        detail_card = CardWidget(splitter)
+        detail_card = CardWidget(self.splitter)
         detail_card.setMinimumWidth(320)
         detail_layout = QVBoxLayout(detail_card)
         detail_layout.setContentsMargins(18, 16, 18, 16)
@@ -193,12 +202,32 @@ class SourcesView(QWidget):
         detail_layout.addLayout(save_row)
 
         detail_layout.addStretch(1)
-        splitter.addWidget(detail_card)
+        self.splitter.addWidget(detail_card)
 
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        splitter.setSizes([650, 350])
-        main_layout.addWidget(splitter, 1)
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 2)
+
+        settings = QSettings("AutoTikTokEditor", "TikTokProfileManager")
+        saved_state = settings.value("sources_view_splitter_state")
+        if saved_state:
+            self.splitter.restoreState(saved_state)
+        else:
+            self.splitter.setSizes([650, 350])
+        self.splitter.splitterMoved.connect(self._on_splitter_moved)
+
+        main_layout.addWidget(self.splitter, 1)
+
+    def _on_splitter_moved(self, pos: int, index: int) -> None:
+        self._save_splitter_state()
+
+    def _save_splitter_state(self) -> None:
+        if hasattr(self, "splitter"):
+            settings = QSettings("AutoTikTokEditor", "TikTokProfileManager")
+            settings.setValue("sources_view_splitter_state", self.splitter.saveState())
+
+    def hideEvent(self, event) -> None:
+        super().hideEvent(event)
+        self._save_splitter_state()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -209,6 +238,10 @@ class SourcesView(QWidget):
         try:
             current_selected_id = self.profile_combo.currentData()
             accounts = self.manager.list_accounts()
+            signature = tuple((acc.id, acc.name) for acc in accounts)
+            if signature == self._profiles_signature:
+                return
+            self._profiles_signature = signature
             self._accounts_map = {acc.id: acc.name for acc in accounts}
 
             self.profile_combo.blockSignals(True)
@@ -315,7 +348,7 @@ class SourcesView(QWidget):
 
             # 1. Open on Phone
             btn_phone = ToolButton(action_widget)
-            btn_phone.setIcon(ModernPhoneIcon())
+            btn_phone.setIcon(PHONE_ICON)
             btn_phone.setFixedHeight(28)
             btn_phone.setToolTip("Mở kênh này trên điện thoại (ADB)")
             btn_phone.clicked.connect(lambda _, src=s: self._open_on_phone(src))

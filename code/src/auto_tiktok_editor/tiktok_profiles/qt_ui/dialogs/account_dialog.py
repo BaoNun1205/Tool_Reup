@@ -121,3 +121,8 @@ class AccountDialog(MessageBoxBase):
             "note": self.note_edit.toPlainText().strip(),
         }
         return True
+
+    @property
+    def result(self) -> dict[str, Any]:
+        """Return the validated form data for callers of the dialog."""
+        return self.result_data or {}

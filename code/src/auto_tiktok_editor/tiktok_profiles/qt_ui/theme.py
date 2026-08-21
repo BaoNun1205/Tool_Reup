@@ -142,7 +142,7 @@ VIDEO_STATUS_LABELS = {
     "ready": "● Sẵn sàng",
     "prepared": "● Đã chuẩn bị",
     "published": "● Đã đăng",
-    "rendering": "● Đang tạo video",
+    "rendering": "● Đang tạo",
     "queued": "● Trong hàng đợi",
     "scheduled": "● Đã đặt lịch",
     "draft": "● Bản nháp",
@@ -238,8 +238,13 @@ FluentWindow {
     background-color: #F6F7FB;
 }
 
-#accountsInterface, #sourcesInterface, #videosInterface, #phoneInterface, #telegramInterface, #logsInterface, #settingsInterface {
+#dashboardInterface, #accountsInterface, #sourcesInterface, #videosInterface, #phoneInterface, #telegramInterface, #logsInterface, #settingsInterface {
     background-color: #F6F7FB;
+}
+
+QScrollArea, SmoothScrollArea, SmoothScrollArea > QWidget, SmoothScrollArea > QWidget > QWidget {
+    background-color: transparent;
+    border: none;
 }
 
 /* Sidebar / Navigation */
@@ -389,8 +394,13 @@ FluentWindow {
     background-color: #11131A;
 }
 
-#accountsInterface, #sourcesInterface, #videosInterface, #phoneInterface, #telegramInterface, #logsInterface, #settingsInterface {
+#dashboardInterface, #accountsInterface, #sourcesInterface, #videosInterface, #phoneInterface, #telegramInterface, #logsInterface, #settingsInterface {
     background-color: #11131A;
+}
+
+QScrollArea, SmoothScrollArea, SmoothScrollArea > QWidget, SmoothScrollArea > QWidget > QWidget {
+    background-color: transparent;
+    border: none;
 }
 
 /* Sidebar / Navigation */

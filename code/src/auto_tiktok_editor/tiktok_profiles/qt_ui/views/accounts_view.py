@@ -35,12 +35,17 @@ from qfluentwidgets import (
     TableWidget,
     ToolButton,
 )
+from qfluentwidgets.common.smooth_scroll import SmoothMode
 
 from auto_tiktok_editor.tiktok_profiles.models import ACCOUNT_STATUSES
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
 from auto_tiktok_editor.tiktok_profiles.qt_ui.components.stat_card import StatCard
 from auto_tiktok_editor.tiktok_profiles.qt_ui.dialogs.account_dialog import AccountDialog
-from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import format_account_status, format_vietnam_datetime
+from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import (
+    VIDEO_ROW_CUT_MODE_LABELS,
+    format_account_status,
+    format_vietnam_datetime,
+)
 from auto_tiktok_editor.tiktok_profiles.qt_ui.workers import BrowserWorkerThread
 
 
@@ -111,21 +116,6 @@ class AccountsView(QWidget):
         title_layout.addWidget(self.refresh_btn)
         main_layout.addLayout(title_layout)
 
-        # KPI / Stat Cards
-        kpi_layout = QHBoxLayout()
-        kpi_layout.setSpacing(12)
-
-        self.card_total = StatCard(FIF.PEOPLE, "Tổng Profiles", "0", "Đang quản lý", self)
-        self.card_active = StatCard(FIF.ACCEPT, "Hoạt động", "0", "Trạng thái sẵn sàng", self)
-        self.card_bot = StatCard(FIF.ROBOT, "Có Bot Telegram", "0", "Đã liên kết bot", self)
-        self.card_videos = StatCard(FIF.VIDEO, "Tổng Video", "0", "Trong kho dữ liệu", self)
-
-        kpi_layout.addWidget(self.card_total)
-        kpi_layout.addWidget(self.card_active)
-        kpi_layout.addWidget(self.card_bot)
-        kpi_layout.addWidget(self.card_videos)
-        main_layout.addLayout(kpi_layout)
-
         # Action Toolbar & Filters
         toolbar_layout = QHBoxLayout()
         toolbar_layout.setSpacing(10)
@@ -150,6 +140,11 @@ class AccountsView(QWidget):
         self.add_btn.clicked.connect(self._on_add_account)
         toolbar_layout.addWidget(self.add_btn)
 
+        self.edit_defaults_btn = PushButton("Thiết lập mặc định", self, FIF.EDIT)
+        self.edit_defaults_btn.setToolTip("Chỉnh Cut Mode và hashtag mặc định của Profile đang chọn")
+        self.edit_defaults_btn.clicked.connect(self._on_edit_account)
+        toolbar_layout.addWidget(self.edit_defaults_btn)
+
         self.browser_btn = PushButton("Mở trình duyệt", self, FIF.GLOBE)
         self.browser_btn.clicked.connect(self._on_open_browser)
         toolbar_layout.addWidget(self.browser_btn)
@@ -162,14 +157,18 @@ class AccountsView(QWidget):
 
         # Accounts Table
         self.table = TableWidget(self)
+        if hasattr(self.table, "scrollDelagate") and hasattr(self.table.scrollDelagate, "verticalSmoothScroll"):
+            self.table.scrollDelagate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
+            self.table.scrollDelagate.horizonSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerItem)
         self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
             "Tên Profile",
             "Trạng thái",
             "Tên Bot",
             "Đăng nhập",
-            "Chế độ cắt",
-            "Hashtags",
+            "Cut Mode mặc định",
+            "Hashtag mặc định",
             "Cập nhật lúc",
             "Ghi chú",
         ])
@@ -193,24 +192,20 @@ class AccountsView(QWidget):
         self.table.setColumnWidth(1, 110)
         self.table.setColumnWidth(2, 120)
         self.table.setColumnWidth(3, 100)
-        self.table.setColumnWidth(4, 110)
+        self.table.setColumnWidth(4, 145)
+        self.table.setColumnWidth(5, 220)
         self.table.setColumnWidth(6, 140)
 
         main_layout.addWidget(self.table, 1)
 
     def apply_theme_mode(self, mode: str) -> None:
-        """Update stat cards and re-render status cells for active theme."""
-        self.card_total.set_theme_mode(mode)
-        self.card_active.set_theme_mode(mode)
-        self.card_bot.set_theme_mode(mode)
-        self.card_videos.set_theme_mode(mode)
+        """Re-render table cells for active theme."""
         self.refresh_accounts()
 
     def refresh_accounts(self) -> None:
         """Fetch all accounts from SQLite database and update view."""
         try:
             self._accounts_cache = self.manager.list_accounts()
-            self._update_kpis()
             self._filter_accounts()
         except Exception as exc:
             InfoBar.error(
@@ -219,20 +214,6 @@ class AccountsView(QWidget):
                 position=InfoBarPosition.TOP,
                 parent=self.window(),
             )
-
-    def _update_kpis(self) -> None:
-        total = len(self._accounts_cache)
-        active = sum(1 for a in self._accounts_cache if getattr(a, "status", "") == "ready")
-        with_bot = sum(1 for a in self._accounts_cache if getattr(a, "bot_name", ""))
-        try:
-            videos_count = len(self.manager.list_videos())
-        except Exception:
-            videos_count = 0
-
-        self.card_total.set_value(str(total))
-        self.card_active.set_value(str(active))
-        self.card_bot.set_value(str(with_bot))
-        self.card_videos.set_value(str(videos_count))
 
     def _filter_accounts(self) -> None:
         query = self.search_edit.text().strip().lower()
@@ -269,7 +250,8 @@ class AccountsView(QWidget):
 
             bot_item = QTableWidgetItem(getattr(a, "bot_name", "") or "-")
             login_item = QTableWidgetItem(getattr(a, "login_type", "") or "cookie")
-            cut_mode_item = QTableWidgetItem(getattr(a, "cut_mode", "") or "original")
+            cut_mode = getattr(a, "cut_mode", "") or "original"
+            cut_mode_item = QTableWidgetItem(VIDEO_ROW_CUT_MODE_LABELS.get(cut_mode, cut_mode))
             tags_item = QTableWidgetItem(getattr(a, "hashtags", "") or "")
             updated_item = QTableWidgetItem(format_vietnam_datetime(getattr(a, "updated_at", "")))
             note_item = QTableWidgetItem(getattr(a, "note", "") or "")
@@ -282,6 +264,7 @@ class AccountsView(QWidget):
             self.table.setItem(row, 5, tags_item)
             self.table.setItem(row, 6, updated_item)
             self.table.setItem(row, 7, note_item)
+
 
     def get_selected_account(self) -> Any | None:
         selected_rows = self.table.selectionModel().selectedRows()
@@ -581,4 +564,3 @@ class AccountsView(QWidget):
         menu.addAction(act_del)
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
-

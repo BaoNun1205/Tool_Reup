@@ -244,6 +244,68 @@ class TikTokProfileManager:
             raise RuntimeError("Created account could not be loaded.")
         return account
 
+    def create_account(
+        self,
+        name: str,
+        login_type: str,
+        note: str = "",
+        bot_name: str = "",
+        cut_mode: str = "original",
+        hashtags: str | None = None,
+        profile_path: str = "",
+    ) -> TikTokAccount:
+        """Compatibility entry point used by the Qt account editor."""
+        return self.add_account(
+            name=name,
+            login_type=login_type,
+            note=note,
+            bot_name=bot_name,
+            cut_mode=cut_mode,
+            hashtags=hashtags,
+        )
+
+    def update_account(
+        self,
+        account_id: int,
+        name: str,
+        login_type: str,
+        note: str = "",
+        bot_name: str = "",
+        cut_mode: str = "original",
+        hashtags: str = "",
+        profile_path: str = "",
+    ) -> TikTokAccount:
+        """Save the editable account settings without changing its profile folder."""
+        if login_type not in LOGIN_TYPES:
+            raise ValueError("Unsupported login type: %s" % login_type)
+        clean_name = (name or "").strip()
+        if not clean_name:
+            raise ValueError("Account name is required.")
+        now = utc_now_iso()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE accounts
+                SET login_type = ?, note = ?, bot_name = ?, cut_mode = ?, hashtags = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    login_type,
+                    note.strip(),
+                    _normalize_bot_name(bot_name),
+                    _normalize_video_cut_mode(cut_mode),
+                    normalize_hashtags(hashtags),
+                    now,
+                    int(account_id),
+                ),
+            )
+            if cursor.rowcount == 0:
+                raise ValueError("Account not found: %s" % account_id)
+        account = self.get_account(account_id)
+        if account is None:
+            raise ValueError("Account not found: %s" % account_id)
+        return account
+
     def update_account_bot_name(self, account_id: int, bot_name: str) -> TikTokAccount:
         clean_bot_name = _normalize_bot_name(bot_name)
         now = utc_now_iso()
@@ -623,11 +685,19 @@ class TikTokProfileManager:
         note: str = "",
         account_id: int | None = None,
     ) -> TikTokVideo:
-        if account_id is not None and self.get_account(account_id) is None:
+        current_video = self.get_video(video_id)
+        if current_video is None:
+            raise ValueError("Video not found: %s" % video_id)
+        account = self.get_account(account_id) if account_id is not None else None
+        if account_id is not None and account is None:
             raise ValueError("Account not found: %s" % account_id)
         publish_mode = _normalize_publish_mode(publish_mode)
         scheduled_at = _normalize_scheduled_at(publish_mode, scheduled_at)
         clean_caption, clean_hashtags = split_caption_and_hashtags(caption, hashtags)
+        # Moving a video to a profile must retain its own tags and add the
+        # profile defaults, rather than silently discarding either set.
+        if account is not None and current_video.account_id != account.id:
+            clean_hashtags = _merge_hashtags(clean_hashtags, account.hashtags)
         now = utc_now_iso()
         with self._connect() as conn:
             conn.execute(

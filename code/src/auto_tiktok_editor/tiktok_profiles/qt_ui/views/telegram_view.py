@@ -299,6 +299,11 @@ class TelegramView(QWidget):
         else:
             self.status_card.set_value("Đã dừng")
 
+    def apply_theme_mode(self, mode: str) -> None:
+        clean = "dark" if str(mode).strip().lower() == "dark" else "light"
+        if hasattr(self, "status_card"):
+            self.status_card.set_theme_mode(clean)
+
     def closeEvent(self, event) -> None:
         self._on_stop_bot()
         super().closeEvent(event)

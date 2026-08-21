@@ -33,7 +33,7 @@ from qfluentwidgets import (
     Theme,
 )
 
-from auto_tiktok_editor.app.media_cleanup import cleanup_tool_storage, format_tool_cleanup_report
+from auto_tiktok_editor.app.media_cleanup import execute_granular_cleanup, format_granular_cleanup_report
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.tiktok_profiles.qt_ui.components.stat_card import StatCard
 from auto_tiktok_editor.tiktok_profiles.qt_ui.dialogs.cleanup_dialog import CleanupDialog
@@ -192,15 +192,41 @@ class SettingsView(QWidget):
 
     def _on_scan_and_cleanup_storage(self) -> None:
         try:
-            report_text = format_tool_cleanup_report(self.config)
-            dialog = CleanupDialog(self.window(), report_text=report_text)
+            win = self.window()
+            manager = getattr(win, "manager", None)
+            phone_view = getattr(win, "phone_view", None)
+            phone_ctrl = getattr(phone_view, "phone_controller", None) if phone_view else None
+            project_root = getattr(manager, "project_root", ".")
+
+            dialog = CleanupDialog(
+                parent=win,
+                config=self.config,
+                project_root=project_root,
+                phone_controller=phone_ctrl,
+                manager=manager,
+            )
             if dialog.exec() and dialog.confirmed:
-                cleaned_count = cleanup_tool_storage(self.config)
+                selected_keys = dialog.get_selected_keys()
+                if not selected_keys:
+                    return
+                report = execute_granular_cleanup(
+                    selected_keys=selected_keys,
+                    config=self.config,
+                    project_root=project_root,
+                    manager=manager,
+                    phone_controller=phone_ctrl,
+                )
+                msg = format_granular_cleanup_report(report)
+                if manager and hasattr(manager, "add_log"):
+                    manager.add_log("info", "system_cleanup", msg)
+                if hasattr(win, "dashboard_view") and hasattr(win.dashboard_view, "refresh_dashboard"):
+                    win.dashboard_view.refresh_dashboard()
                 InfoBar.success(
-                    title="Đã dọn dẹp",
-                    content="Đã dọn dẹp thành công các file tạm và bộ nhớ đệm!",
+                    title="Đã dọn dẹp hệ thống",
+                    content=msg,
                     position=InfoBarPosition.TOP,
-                    parent=self.window(),
+                    duration=5000,
+                    parent=win,
                 )
         except Exception as exc:
             InfoBar.error("Lỗi dọn dẹp", str(exc), parent=self.window())
