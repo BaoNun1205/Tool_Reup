@@ -339,9 +339,9 @@ class PipelineConfig:
     amf_intermediate_maxrate: str = "40M"
     amf_intermediate_bufsize: str = "60M"
     # Thong so encode cuoi cung toi uu cho upload TikTok.
-    final_video_bitrate: str = "16M"
-    final_video_maxrate: str = "20M"
-    final_video_bufsize: str = "32M"
+    final_video_bitrate: str = "6M"
+    final_video_maxrate: str = "8M"
+    final_video_bufsize: str = "12M"
     final_audio_bitrate: str = "192k"
 
     # Tien xu ly truoc khi cat chunk va xao.
@@ -592,6 +592,9 @@ class PipelineConfig:
             amf_intermediate_bitrate=os.getenv("AUTO_EDITOR_AMF_INTERMEDIATE_BITRATE", "30M").strip() or "30M",
             amf_intermediate_maxrate=os.getenv("AUTO_EDITOR_AMF_INTERMEDIATE_MAXRATE", "40M").strip() or "40M",
             amf_intermediate_bufsize=os.getenv("AUTO_EDITOR_AMF_INTERMEDIATE_BUFSIZE", "60M").strip() or "60M",
+            final_video_bitrate=os.getenv("AUTO_EDITOR_FINAL_VIDEO_BITRATE", "6M").strip() or "6M",
+            final_video_maxrate=os.getenv("AUTO_EDITOR_FINAL_VIDEO_MAXRATE", "8M").strip() or "8M",
+            final_video_bufsize=os.getenv("AUTO_EDITOR_FINAL_VIDEO_BUFSIZE", "12M").strip() or "12M",
             adb_bin=(
                 os.getenv("AUTO_EDITOR_ADB_BIN")
                 or _find_runtime_binary("tools/adb.exe")

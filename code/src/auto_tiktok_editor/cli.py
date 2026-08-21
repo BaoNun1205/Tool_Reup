@@ -42,9 +42,9 @@ def main(argv=None) -> int:
     config = PipelineConfig.from_env()
 
     if args.command in (None, "profile-manager"):
-        from auto_tiktok_editor.tiktok_profiles.ui import launch_profile_manager
+        from auto_tiktok_editor.tiktok_profiles.qt_ui.app import launch_app
 
-        return launch_profile_manager(config=config)
+        return launch_app(config=config)
     if args.command == "telegram-bot":
         from auto_tiktok_editor.app.telegram_bot import TelegramBotService
 
