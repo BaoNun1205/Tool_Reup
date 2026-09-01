@@ -23,6 +23,7 @@ from qfluentwidgets import (
     InfoBar,
     InfoBarPosition,
     PrimaryPushButton,
+    PasswordLineEdit,
     PushButton,
     SingleDirectionScrollArea,
     SmoothScrollArea,
@@ -33,8 +34,15 @@ from qfluentwidgets import (
     Theme,
 )
 
+from auto_tiktok_editor.app.gemini import DEFAULT_GEMINI_MODEL, GEMINI_MODELS
 from auto_tiktok_editor.app.media_cleanup import execute_granular_cleanup, format_granular_cleanup_report
 from auto_tiktok_editor.config import PipelineConfig
+from auto_tiktok_editor.gemini_settings import (
+    get_gemini_api_key,
+    get_gemini_model,
+    save_gemini_api_key,
+    save_gemini_model,
+)
 from auto_tiktok_editor.tiktok_profiles.qt_ui.components.stat_card import StatCard
 from auto_tiktok_editor.tiktok_profiles.qt_ui.dialogs.cleanup_dialog import CleanupDialog
 from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import (
@@ -174,6 +182,45 @@ class SettingsView(QWidget):
         info_layout.addStretch(1)
         grid.addWidget(info_card, 1, 1)
 
+        # Card 5: Gemini API key for Fashion image analysis
+        gemini_card = CardWidget(self)
+        gemini_layout = QVBoxLayout(gemini_card)
+        gemini_layout.setContentsMargins(18, 16, 18, 16)
+        gemini_layout.setSpacing(10)
+        gemini_layout.addWidget(SubtitleLabel("Gemini API · Fashion", gemini_card))
+        gemini_desc = BodyLabel(
+            "API key và model này dùng để tạo caption cùng 5 hashtag từ ảnh sản phẩm Fashion. Key chỉ được lưu trong cài đặt cục bộ của ứng dụng.",
+            gemini_card,
+        )
+        gemini_desc.setWordWrap(True)
+        gemini_layout.addWidget(gemini_desc)
+        self.gemini_api_key_edit = PasswordLineEdit(gemini_card)
+        self.gemini_api_key_edit.setEchoMode(PasswordLineEdit.EchoMode.Password)
+        self.gemini_api_key_edit.setViewPasswordButtonVisible(False)
+        self.gemini_api_key_edit.setPlaceholderText("Dán Gemini API key vào đây")
+        self.gemini_api_key_edit.setText(get_gemini_api_key())
+        gemini_layout.addWidget(self.gemini_api_key_edit)
+        self.gemini_model_combo = ComboBox(gemini_card)
+        selected_model = get_gemini_model(DEFAULT_GEMINI_MODEL)
+        selected_index = 0
+        for index, (model_id, label) in enumerate(GEMINI_MODELS):
+            self.gemini_model_combo.addItem(label, userData=model_id)
+            if model_id == selected_model:
+                selected_index = index
+        self.gemini_model_combo.setCurrentIndex(selected_index)
+        gemini_layout.addWidget(BodyLabel("Model Gemini:", gemini_card))
+        gemini_layout.addWidget(self.gemini_model_combo)
+        gemini_actions = QHBoxLayout()
+        self.save_gemini_key_btn = PrimaryPushButton("Lưu API key", gemini_card, FIF.SAVE)
+        self.save_gemini_key_btn.clicked.connect(self._on_save_gemini_api_key)
+        gemini_actions.addWidget(self.save_gemini_key_btn)
+        self.toggle_gemini_key_btn = PushButton("Hiện key", gemini_card)
+        self.toggle_gemini_key_btn.clicked.connect(self._toggle_gemini_api_key_visibility)
+        gemini_actions.addWidget(self.toggle_gemini_key_btn)
+        gemini_actions.addStretch(1)
+        gemini_layout.addLayout(gemini_actions)
+        grid.addWidget(gemini_card, 2, 0, 1, 2)
+
         main_layout.addLayout(grid, 1)
 
     def _on_theme_changed(self, index: int) -> None:
@@ -189,6 +236,24 @@ class SettingsView(QWidget):
             self.theme_combo.blockSignals(True)
             self.theme_combo.setCurrentIndex(idx)
             self.theme_combo.blockSignals(False)
+
+    def _on_save_gemini_api_key(self) -> None:
+        save_gemini_api_key(self.gemini_api_key_edit.text())
+        save_gemini_model(str(self.gemini_model_combo.currentData() or DEFAULT_GEMINI_MODEL))
+        InfoBar.success(
+            title="Đã lưu Gemini API key",
+            content="Đã lưu API key và model dùng cho bot Fashion.",
+            position=InfoBarPosition.TOP,
+            duration=3500,
+            parent=self.window(),
+        )
+
+    def _toggle_gemini_api_key_visibility(self) -> None:
+        is_hidden = self.gemini_api_key_edit.echoMode() == PasswordLineEdit.EchoMode.Password
+        self.gemini_api_key_edit.setEchoMode(
+            PasswordLineEdit.EchoMode.Normal if is_hidden else PasswordLineEdit.EchoMode.Password
+        )
+        self.toggle_gemini_key_btn.setText("Ẩn key" if is_hidden else "Hiện key")
 
     def _on_scan_and_cleanup_storage(self) -> None:
         try:

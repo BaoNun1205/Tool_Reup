@@ -26,6 +26,7 @@ from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
     CardWidget,
+    ComboBox,
     FluentIcon as FIF,
     InfoBar,
     InfoBarPosition,
@@ -154,6 +155,12 @@ class DashboardView(QWidget):
 
         phone_form = QFormLayout()
         phone_form.setSpacing(8)
+
+        self.phone_connection_mode_combo = ComboBox(phone_card)
+        self.phone_connection_mode_combo.addItem("Wi-Fi / IP (mặc định)", userData="wifi")
+        self.phone_connection_mode_combo.addItem("USB", userData="usb")
+        self.phone_connection_mode_combo.currentIndexChanged.connect(self._on_dashboard_connection_mode_changed)
+        phone_form.addRow(BodyLabel("Chế độ kết nối:", phone_card), self.phone_connection_mode_combo)
 
         addr_row = QHBoxLayout()
         addr_row.setSpacing(6)
@@ -342,6 +349,10 @@ class DashboardView(QWidget):
     def _load_saved_phone_settings(self) -> None:
         try:
             settings = load_phone_control_settings()
+            mode_index = self.phone_connection_mode_combo.findData(
+                getattr(settings, "connection_mode", "wifi")
+            )
+            self.phone_connection_mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
             addr = str(settings.address or "").strip()
             if ":" in addr:
                 parts = addr.split(":", 1)
@@ -350,8 +361,21 @@ class DashboardView(QWidget):
             else:
                 self.phone_ip_edit.setText(addr)
                 self.phone_port_edit.setText("5555" if addr else "")
+            self._on_dashboard_connection_mode_changed(self.phone_connection_mode_combo.currentIndex())
         except Exception:
             pass
+
+    def _dashboard_connection_mode(self) -> str:
+        return str(self.phone_connection_mode_combo.currentData() or "wifi")
+
+    def _on_dashboard_connection_mode_changed(self, _index: int) -> None:
+        is_wifi = self._dashboard_connection_mode() == "wifi"
+        self.phone_ip_edit.setEnabled(is_wifi)
+        self.phone_port_edit.setEnabled(is_wifi)
+        if hasattr(self, "btn_phone_connect"):
+            self.btn_phone_connect.setText(
+                "Kết nối Wi-Fi" if is_wifi else "Kết nối USB"
+            )
 
     def refresh_dashboard(self) -> None:
         """Full refresh of statistics, phone connection status, bot status, and recent logs."""
@@ -486,9 +510,10 @@ class DashboardView(QWidget):
             pass
 
     def _on_quick_connect_phone(self) -> None:
+        mode = self._dashboard_connection_mode()
         ip = self.phone_ip_edit.text().strip()
         port = self.phone_port_edit.text().strip()
-        if not ip:
+        if mode == "wifi" and not ip:
             InfoBar.warning("Thiếu địa chỉ", "Vui lòng nhập IP điện thoại!", parent=self.window())
             return
         address = f"{ip}:{port}" if port and ":" not in ip else ip
@@ -496,7 +521,7 @@ class DashboardView(QWidget):
         # Save to phone settings
         try:
             s = load_phone_control_settings()
-            s = replace(s, address=address)
+            s = replace(s, address=address or s.address, connection_mode=mode)
             save_phone_control_settings(s)
             if self.phone_view:
                 self.phone_view.phone_settings = s
@@ -504,8 +529,8 @@ class DashboardView(QWidget):
                 self.phone_view._on_connect_adb()
             else:
                 controller = PhoneController(self.config)
-                controller.connect(address)
-                InfoBar.success("Thành công", f"Đã kết nối tới {address}", parent=self.window())
+                result = controller.connect(address, connection_mode=mode)
+                InfoBar.success("Thành công", f"Đã kết nối tới {result['address']}", parent=self.window())
             self._update_phone_status_ui()
         except Exception as exc:
             InfoBar.error("Lỗi kết nối ADB", str(exc), parent=self.window())
@@ -523,13 +548,23 @@ class DashboardView(QWidget):
         self._update_phone_status_ui()
 
     def _on_quick_open_scrcpy(self) -> None:
+        mode = self._dashboard_connection_mode()
         ip = self.phone_ip_edit.text().strip()
         port = self.phone_port_edit.text().strip()
-        if ip:
+        if mode == "wifi" and ip:
             address = f"{ip}:{port}" if port and ":" not in ip else ip
             try:
                 s = load_phone_control_settings()
-                s = replace(s, address=address)
+                s = replace(s, address=address, connection_mode=mode)
+                save_phone_control_settings(s)
+                if self.phone_view:
+                    self.phone_view.phone_settings = s
+                    self.phone_view._load_settings_to_ui()
+            except Exception:
+                pass
+        elif mode == "usb":
+            try:
+                s = replace(load_phone_control_settings(), connection_mode="usb")
                 save_phone_control_settings(s)
                 if self.phone_view:
                     self.phone_view.phone_settings = s
@@ -655,3 +690,15 @@ class DashboardView(QWidget):
         if hasattr(self, "bot_mode_lbl"):
             self.bot_mode_lbl.setStyleSheet("color: #B5B9C7;" if clean == "dark" else "color: #5F6475;")
         self._refresh_recent_logs()
+
+    def shutdown(self) -> None:
+        if hasattr(self, "_refresh_timer"):
+            self._refresh_timer.stop()
+        workers = list(self._cleanup_workers)
+        self._cleanup_workers.clear()
+        for worker in workers:
+            worker.stop(timeout_ms=1500)
+
+    def closeEvent(self, event) -> None:
+        self.shutdown()
+        super().closeEvent(event)

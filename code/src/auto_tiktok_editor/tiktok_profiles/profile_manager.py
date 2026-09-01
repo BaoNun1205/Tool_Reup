@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
 import re
+import shutil
 import sqlite3
 import unicodedata
 from urllib.parse import urlparse
@@ -13,11 +14,13 @@ from urllib.parse import urlparse
 from auto_tiktok_editor.config import PROJECT_ROOT
 from auto_tiktok_editor.tiktok_profiles.models import (
     ACCOUNT_STATUSES,
+    FASHION_PRODUCT_STATUSES,
     LOGIN_TYPES,
     PUBLISH_MODES,
     VIDEO_CUT_MODES,
     VIDEO_STATUSES,
     TikTokAccount,
+    FashionProduct,
     TikTokLog,
     TikTokSourceChannel,
     TikTokVideo,
@@ -84,6 +87,8 @@ class TikTokProfileManager:
                     bot_name TEXT NOT NULL DEFAULT '',
                     cut_mode TEXT NOT NULL DEFAULT 'original',
                     hashtags TEXT NOT NULL DEFAULT '',
+                    main_image_path TEXT NOT NULL DEFAULT '',
+                    auto_use_main_image INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -92,6 +97,8 @@ class TikTokProfileManager:
             self._ensure_column(conn, "accounts", "bot_name", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(conn, "accounts", "cut_mode", "TEXT NOT NULL DEFAULT 'original'")
             account_hashtags_added = self._ensure_column(conn, "accounts", "hashtags", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "accounts", "main_image_path", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "accounts", "auto_use_main_image", "INTEGER NOT NULL DEFAULT 0")
             if account_hashtags_added:
                 self._migrate_account_hashtags(conn)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status)")
@@ -131,6 +138,27 @@ class TikTokProfileManager:
             self._migrate_caption_hashtags(conn)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_status ON videos(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_videos_account_id ON videos(account_id)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS fashion_products (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_url TEXT NOT NULL,
+                    product_id TEXT NOT NULL DEFAULT '',
+                    product_name TEXT NOT NULL DEFAULT '',
+                    image_path TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    caption TEXT NOT NULL DEFAULT '',
+                    hashtags TEXT NOT NULL DEFAULT '',
+                    video_path TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'processing',
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_fashion_products_status ON fashion_products(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_fashion_products_created_at ON fashion_products(created_at)")
             conn.execute("DROP TABLE IF EXISTS products")
             conn.execute(
                 """
@@ -169,7 +197,7 @@ class TikTokProfileManager:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, name, login_type, profile_path, status, note, bot_name, cut_mode, hashtags, created_at, updated_at
+                SELECT id, name, login_type, profile_path, status, note, bot_name, cut_mode, hashtags, main_image_path, auto_use_main_image, created_at, updated_at
                 FROM accounts
                 ORDER BY id ASC
                 """
@@ -180,7 +208,7 @@ class TikTokProfileManager:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, name, login_type, profile_path, status, note, bot_name, cut_mode, hashtags, created_at, updated_at
+                SELECT id, name, login_type, profile_path, status, note, bot_name, cut_mode, hashtags, main_image_path, auto_use_main_image, created_at, updated_at
                 FROM accounts
                 WHERE id = ?
                 """,
@@ -216,6 +244,8 @@ class TikTokProfileManager:
         bot_name: str = "",
         cut_mode: str = "original",
         hashtags: str | None = None,
+        main_image_path: Path | str = "",
+        auto_use_main_image: bool = False,
     ) -> TikTokAccount:
         clean_name = (name or "").strip()
         if not clean_name:
@@ -233,12 +263,16 @@ class TikTokProfileManager:
         with self._connect() as conn:
             cursor = conn.execute(
                 """
-                INSERT INTO accounts (name, login_type, profile_path, status, note, bot_name, cut_mode, hashtags, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO accounts (name, login_type, profile_path, status, note, bot_name, cut_mode, hashtags, main_image_path, auto_use_main_image, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (clean_name, login_type, stored_profile_path, "paused", note.strip(), _normalize_bot_name(bot_name), cut_mode, clean_hashtags, now, now),
+                (clean_name, login_type, stored_profile_path, "paused", note.strip(), _normalize_bot_name(bot_name), cut_mode, clean_hashtags, "", 0, now, now),
             )
             account_id = int(cursor.lastrowid)
+        if str(main_image_path or "").strip():
+            self.update_account_main_image(account_id, main_image_path, auto_use_main_image)
+        elif auto_use_main_image:
+            raise ValueError("Cần chọn Main Image trước khi bật Auto dùng Main Image.")
         account = self.get_account(account_id)
         if account is None:
             raise RuntimeError("Created account could not be loaded.")
@@ -252,6 +286,8 @@ class TikTokProfileManager:
         bot_name: str = "",
         cut_mode: str = "original",
         hashtags: str | None = None,
+        main_image_path: Path | str = "",
+        auto_use_main_image: bool = False,
         profile_path: str = "",
     ) -> TikTokAccount:
         """Compatibility entry point used by the Qt account editor."""
@@ -262,6 +298,8 @@ class TikTokProfileManager:
             bot_name=bot_name,
             cut_mode=cut_mode,
             hashtags=hashtags,
+            main_image_path=main_image_path,
+            auto_use_main_image=auto_use_main_image,
         )
 
     def update_account(
@@ -274,6 +312,9 @@ class TikTokProfileManager:
         cut_mode: str = "original",
         hashtags: str = "",
         profile_path: str = "",
+        main_image_path: Path | str | None = None,
+        auto_use_main_image: bool = False,
+        clear_main_image: bool = False,
     ) -> TikTokAccount:
         """Save the editable account settings without changing its profile folder."""
         if login_type not in LOGIN_TYPES:
@@ -286,7 +327,7 @@ class TikTokProfileManager:
             cursor = conn.execute(
                 """
                 UPDATE accounts
-                SET login_type = ?, note = ?, bot_name = ?, cut_mode = ?, hashtags = ?, updated_at = ?
+                SET login_type = ?, note = ?, bot_name = ?, cut_mode = ?, hashtags = ?, auto_use_main_image = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (
@@ -295,16 +336,78 @@ class TikTokProfileManager:
                     _normalize_bot_name(bot_name),
                     _normalize_video_cut_mode(cut_mode),
                     normalize_hashtags(hashtags),
+                    1 if auto_use_main_image else 0,
                     now,
                     int(account_id),
                 ),
             )
             if cursor.rowcount == 0:
                 raise ValueError("Account not found: %s" % account_id)
-        account = self.get_account(account_id)
+        if clear_main_image:
+            account = self.clear_account_main_image(account_id)
+        elif main_image_path is not None and str(main_image_path).strip():
+            account = self.update_account_main_image(account_id, main_image_path, auto_use_main_image)
+        else:
+            account = self.get_account(account_id)
         if account is None:
             raise ValueError("Account not found: %s" % account_id)
         return account
+
+    def update_account_main_image(
+        self,
+        account_id: int,
+        image_path: Path | str,
+        auto_use_main_image: bool | None = None,
+    ) -> TikTokAccount:
+        """Copy a profile's persistent main image into its profile folder and save it."""
+        account = self.get_account(account_id)
+        if account is None:
+            raise ValueError("Account not found: %s" % account_id)
+        source = Path(image_path).expanduser()
+        if not source.is_absolute():
+            source = self.project_root / source
+        source = source.resolve()
+        if not source.exists() or not source.is_file():
+            raise ValueError("Main Image file does not exist: %s" % source)
+        if source.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+            raise ValueError("Main Image phải là file ảnh (JPG, PNG, WEBP hoặc BMP).")
+        profile_dir = self.resolve_profile_path(account)
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        destination = profile_dir / ("main_image" + (source.suffix.lower() or ".jpg"))
+        if source != destination.resolve():
+            shutil.copy2(str(source), str(destination))
+        now = utc_now_iso()
+        stored_path = self._path_for_storage(destination)
+        auto_value = bool(account.auto_use_main_image if auto_use_main_image is None else auto_use_main_image)
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE accounts SET main_image_path = ?, auto_use_main_image = ?, updated_at = ? WHERE id = ?",
+                (stored_path, 1 if auto_value else 0, now, int(account_id)),
+            )
+        updated = self.get_account(account_id)
+        if updated is None:
+            raise ValueError("Account not found: %s" % account_id)
+        return updated
+
+    def clear_account_main_image(self, account_id: int) -> TikTokAccount:
+        """Remove the saved Main Image for one profile and disable its Auto setting."""
+        account = self.get_account(account_id)
+        if account is None:
+            raise ValueError("Account not found: %s" % account_id)
+        image_path = self.resolve_account_main_image_path(account)
+        profile_dir = self.resolve_profile_path(account).resolve()
+        if image_path is not None and profile_dir in image_path.resolve().parents:
+            image_path.unlink()
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE accounts SET main_image_path = '', auto_use_main_image = 0, updated_at = ? WHERE id = ?",
+                (now, int(account_id)),
+            )
+        updated = self.get_account(account_id)
+        if updated is None:
+            raise ValueError("Account not found: %s" % account_id)
+        return updated
 
     def update_account_bot_name(self, account_id: int, bot_name: str) -> TikTokAccount:
         clean_bot_name = _normalize_bot_name(bot_name)
@@ -841,6 +944,192 @@ class TikTokProfileManager:
 
         return report
 
+    def list_fashion_products(self) -> list[FashionProduct]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, product_url, product_id, product_name, image_path, description,
+                       caption, hashtags, video_path, status, note, created_at, updated_at
+                FROM fashion_products
+                ORDER BY id DESC
+                """
+            ).fetchall()
+        return [self._row_to_fashion_product(row) for row in rows]
+
+    def get_fashion_product(self, product_id: int) -> FashionProduct | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, product_url, product_id, product_name, image_path, description,
+                       caption, hashtags, video_path, status, note, created_at, updated_at
+                FROM fashion_products
+                WHERE id = ?
+                """,
+                (product_id,),
+            ).fetchone()
+        return self._row_to_fashion_product(row) if row else None
+
+    def add_fashion_product(
+        self,
+        product_url: str,
+        product_id: str,
+        product_name: str,
+        image_path: Path | str,
+        status: str = "processing",
+        note: str = "",
+    ) -> FashionProduct:
+        if status not in FASHION_PRODUCT_STATUSES:
+            raise ValueError("Unsupported Fashion product status: %s" % status)
+        image = Path(image_path).expanduser().resolve()
+        if not image.is_file():
+            raise ValueError("Fashion product image does not exist: %s" % image)
+        clean_url = str(product_url or "").strip()
+        clean_name = str(product_name or "").strip()
+        if not clean_url or not clean_name:
+            raise ValueError("Fashion product URL and name are required.")
+        now = utc_now_iso()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO fashion_products (
+                    product_url, product_id, product_name, image_path, status, note, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    clean_url,
+                    str(product_id or "").strip(),
+                    clean_name,
+                    self._path_for_storage(image),
+                    status,
+                    str(note or "").strip(),
+                    now,
+                    now,
+                ),
+            )
+            record_id = int(cursor.lastrowid)
+        product = self.get_fashion_product(record_id)
+        if product is None:
+            raise RuntimeError("Created Fashion product could not be loaded.")
+        return product
+
+    def update_fashion_product_copy(
+        self,
+        product_id: int,
+        caption: str,
+        hashtags: str,
+        description: str | None = None,
+        status: str = "ready",
+        note: str | None = None,
+    ) -> FashionProduct:
+        if status not in FASHION_PRODUCT_STATUSES:
+            raise ValueError("Unsupported Fashion product status: %s" % status)
+        clean_caption = str(caption or "").strip()
+        clean_hashtags = normalize_hashtags(hashtags)
+        clean_description = str(description or "").strip() or "\n".join(
+            part for part in (clean_caption, clean_hashtags) if part
+        )
+        now = utc_now_iso()
+        with self._connect() as conn:
+            if note is None:
+                conn.execute(
+                    """
+                    UPDATE fashion_products
+                    SET caption = ?, hashtags = ?, description = ?, status = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (clean_caption, clean_hashtags, clean_description, status, now, product_id),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE fashion_products
+                    SET caption = ?, hashtags = ?, description = ?, status = ?, note = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (clean_caption, clean_hashtags, clean_description, status, str(note).strip(), now, product_id),
+                )
+        product = self.get_fashion_product(product_id)
+        if product is None:
+            raise ValueError("Fashion product not found: %s" % product_id)
+        return product
+
+    def update_fashion_product_status(
+        self,
+        product_id: int,
+        status: str,
+        note: str | None = None,
+    ) -> FashionProduct:
+        if status not in FASHION_PRODUCT_STATUSES:
+            raise ValueError("Unsupported Fashion product status: %s" % status)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            if note is None:
+                conn.execute(
+                    "UPDATE fashion_products SET status = ?, updated_at = ? WHERE id = ?",
+                    (status, now, product_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE fashion_products SET status = ?, note = ?, updated_at = ? WHERE id = ?",
+                    (status, str(note).strip(), now, product_id),
+                )
+        product = self.get_fashion_product(product_id)
+        if product is None:
+            raise ValueError("Fashion product not found: %s" % product_id)
+        return product
+
+    def set_fashion_product_video(self, product_id: int, video_path: Path | str) -> FashionProduct:
+        video = Path(video_path).expanduser().resolve()
+        if not video.is_file():
+            raise ValueError("Fashion video does not exist: %s" % video)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE fashion_products SET video_path = ?, updated_at = ? WHERE id = ?",
+                (self._path_for_storage(video), now, product_id),
+            )
+        product = self.get_fashion_product(product_id)
+        if product is None:
+            raise ValueError("Fashion product not found: %s" % product_id)
+        return product
+
+    def delete_fashion_products(self, product_ids: list[int]) -> dict:
+        report = {"deleted": 0, "deleted_ids": [], "missing_files": 0, "errors": []}
+        seen = set()
+        for raw_id in product_ids:
+            product_id = int(raw_id)
+            if product_id in seen:
+                continue
+            seen.add(product_id)
+            product = self.get_fashion_product(product_id)
+            if product is None:
+                report["errors"].append("Fashion product not found: %s" % product_id)
+                continue
+            for path in (self.resolve_fashion_product_image_path(product), self.resolve_fashion_product_video_path(product)):
+                if path is None:
+                    continue
+                try:
+                    try:
+                        path.resolve().relative_to(self.project_root.resolve())
+                    except ValueError:
+                        # A manually attached source outside the project belongs to the user;
+                        # remove only its Fashion record, never their original file.
+                        continue
+                    if path.exists() and path.is_file():
+                        path.unlink()
+                    elif not path.exists():
+                        report["missing_files"] += 1
+                except OSError as exc:
+                    report["errors"].append("Could not delete %s: %s" % (path, exc))
+                    break
+            else:
+                with self._connect() as conn:
+                    conn.execute("DELETE FROM fashion_products WHERE id = ?", (product_id,))
+                report["deleted"] += 1
+                report["deleted_ids"].append(product_id)
+        return report
+
     def list_logs(self, limit: int = 200) -> list[TikTokLog]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -901,6 +1190,21 @@ class TikTokProfileManager:
             return file_path
         return (self.project_root / file_path).resolve()
 
+    def resolve_fashion_product_image_path(self, product: FashionProduct) -> Path | None:
+        return self._resolve_optional_stored_path(product.image_path)
+
+    def resolve_fashion_product_video_path(self, product: FashionProduct) -> Path | None:
+        return self._resolve_optional_stored_path(product.video_path)
+
+    def resolve_account_main_image_path(self, account: TikTokAccount) -> Path | None:
+        raw_path = str(account.main_image_path or "").strip()
+        if not raw_path:
+            return None
+        image_path = Path(raw_path)
+        if not image_path.is_absolute():
+            image_path = (self.project_root / image_path).resolve()
+        return image_path if image_path.exists() and image_path.is_file() else None
+
     @contextmanager
     def _connect(self):
         conn = sqlite3.connect(str(self.db_path))
@@ -938,6 +1242,13 @@ class TikTokProfileManager:
             return ""
         return self._path_for_storage(Path(path).expanduser().resolve())
 
+    def _resolve_optional_stored_path(self, value: str) -> Path | None:
+        raw_path = str(value or "").strip()
+        if not raw_path:
+            return None
+        path = Path(raw_path)
+        return path if path.is_absolute() else (self.project_root / path).resolve()
+
     @staticmethod
     def _row_to_account(row: sqlite3.Row) -> TikTokAccount:
         return TikTokAccount(
@@ -950,6 +1261,8 @@ class TikTokProfileManager:
             bot_name=row["bot_name"],
             cut_mode=row["cut_mode"],
             hashtags=row["hashtags"],
+            main_image_path=row["main_image_path"],
+            auto_use_main_image=bool(row["auto_use_main_image"]),
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
@@ -971,6 +1284,24 @@ class TikTokProfileManager:
             cut_mode=row["cut_mode"],
             source_video_url=row["source_video_url"],
             product_image_path=row["product_image_path"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _row_to_fashion_product(row: sqlite3.Row) -> FashionProduct:
+        return FashionProduct(
+            id=int(row["id"]),
+            product_url=row["product_url"],
+            product_id=row["product_id"],
+            product_name=row["product_name"],
+            image_path=row["image_path"],
+            description=row["description"],
+            caption=row["caption"],
+            hashtags=row["hashtags"],
+            video_path=row["video_path"],
+            status=row["status"],
+            note=row["note"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

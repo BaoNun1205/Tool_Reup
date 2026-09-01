@@ -93,6 +93,13 @@ class TelegramMultiBotTests(unittest.TestCase):
         self.assertEqual(specs[0].bot_token, "token-a")
         self.assertEqual(specs[0].chat_ids, (111, 222))
 
+    def test_load_telegram_bot_specs_marks_a_fashion_bot(self):
+        spec = load_telegram_bot_specs_from_payload(
+            {"bots": [{"name": "fashion", "type": "fashion", "bot_token": "token-a", "chat_id": "111"}]}
+        )[0]
+
+        self.assertEqual(spec.bot_type, "fashion")
+
 
 class FakeProfileManager:
     def __init__(self, accounts):

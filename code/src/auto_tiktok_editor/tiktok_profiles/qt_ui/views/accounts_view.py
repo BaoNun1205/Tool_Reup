@@ -331,6 +331,8 @@ class AccountsView(QWidget):
                     login_type=res.get("login_type", "google"),
                     cut_mode=res.get("cut_mode", "fixed"),
                     hashtags=res.get("hashtags", ""),
+                    main_image_path=res.get("main_image_path", ""),
+                    auto_use_main_image=res.get("auto_use_main_image", False),
                     profile_path=res.get("profile_path", ""),
                     note=res.get("note", ""),
                 )
@@ -371,6 +373,9 @@ class AccountsView(QWidget):
                     login_type=res.get("login_type", "google"),
                     cut_mode=res.get("cut_mode", "fixed"),
                     hashtags=res.get("hashtags", ""),
+                    main_image_path=res.get("main_image_path", ""),
+                    auto_use_main_image=res.get("auto_use_main_image", False),
+                    clear_main_image=res.get("clear_main_image", False),
                     profile_path=res.get("profile_path", ""),
                     note=res.get("note", ""),
                 )

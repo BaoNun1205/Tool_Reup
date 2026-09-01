@@ -270,7 +270,7 @@ class VideosView(QWidget):
         self.table.setColumnCount(7)
         self.table.setHorizontalHeaderLabels([
             "☐",
-            "Product ID",
+            "Ngày tạo",
             "Cut Mode",
             "Caption",
             "Hashtag",
@@ -299,7 +299,7 @@ class VideosView(QWidget):
         self.table.horizontalHeader().sectionClicked.connect(self._on_header_section_clicked)
 
         self.table.setColumnWidth(0, 36)
-        self.table.setColumnWidth(1, 130)
+        self.table.setColumnWidth(1, 150)
         self.table.setColumnWidth(2, 160)
         self.table.setColumnWidth(5, 120)
         self.table.setColumnWidth(6, 140)
@@ -532,13 +532,13 @@ class VideosView(QWidget):
             if chk_item:
                 chk_item.setData(Qt.ItemDataRole.UserRole, v)
 
-            # Col 1: Product ID
-            product_val = getattr(v, "product_id", "") or ""
-            product_item = self.table.item(row, 1)
-            if product_item:
-                product_item.setData(Qt.ItemDataRole.UserRole, v)
-                if product_item.text() != product_val:
-                    product_item.setText(product_val)
+            # Col 1: Creation time
+            created_at = format_vietnam_datetime(getattr(v, "created_at", ""))
+            created_at_item = self.table.item(row, 1)
+            if created_at_item:
+                created_at_item.setData(Qt.ItemDataRole.UserRole, v)
+                if created_at_item.text() != created_at:
+                    created_at_item.setText(created_at)
 
             # Col 2: Cut Mode ComboBox
             cut_mode_combo = self.table.cellWidget(row, 2)
@@ -575,7 +575,7 @@ class VideosView(QWidget):
             action_widget = self.table.cellWidget(row, 6)
             if action_widget and action_widget.layout():
                 status_lower = str(status_val).strip().lower()
-                is_ready = status_lower in ("ready", "published", "prepared")
+                is_ready = status_lower in ("ready", "sent", "published", "prepared")
                 is_rendering = status_lower == "rendering"
                 is_sending = getattr(v, "id", None) in self._sending_video_ids
                 layout = action_widget.layout()
@@ -701,7 +701,7 @@ class VideosView(QWidget):
             )
 
     def _on_cell_clicked(self, row: int, col: int) -> None:
-        """Explicitly select row when clicking data columns (Product ID, Caption, Hashtag, Status)."""
+        """Explicitly select row when clicking data columns (creation time, caption, hashtag, status)."""
         if col in (1, 3, 4, 5):
             self.table.selectRow(row)
 
@@ -715,10 +715,9 @@ class VideosView(QWidget):
             chk_item.setCheckState(Qt.CheckState.Unchecked)
             chk_item.setData(Qt.ItemDataRole.UserRole, v)
 
-            # Col 1: Product ID
-            product_val = getattr(v, "product_id", "") or ""
-            product_item = QTableWidgetItem(product_val)
-            product_item.setData(Qt.ItemDataRole.UserRole, v)
+            # Col 1: Creation time
+            created_at_item = QTableWidgetItem(format_vietnam_datetime(getattr(v, "created_at", "")))
+            created_at_item.setData(Qt.ItemDataRole.UserRole, v)
 
             # Col 2: Cut Mode ComboBox
             cut_mode_combo = InstantComboBox(self.table)
@@ -758,7 +757,7 @@ class VideosView(QWidget):
             status_item.setForeground(QColor(status_color))
 
             self.table.setItem(row, 0, chk_item)
-            self.table.setItem(row, 1, product_item)
+            self.table.setItem(row, 1, created_at_item)
             self.table.setCellWidget(row, 2, cut_mode_combo)
             self.table.setItem(row, 3, caption_item)
             self.table.setItem(row, 4, hashtags_item)
@@ -771,7 +770,7 @@ class VideosView(QWidget):
             action_layout.setSpacing(4)
 
             status_lower = str(status_val).strip().lower()
-            is_ready = status_lower in ("ready", "published", "prepared")
+            is_ready = status_lower in ("ready", "sent", "published", "prepared")
             is_rendering = status_lower == "rendering"
             is_sending = getattr(v, "id", None) in self._sending_video_ids
 
@@ -1210,6 +1209,13 @@ class VideosView(QWidget):
             resolved_product_image = Path(raw_product_image)
             if not resolved_product_image.is_absolute():
                 resolved_product_image = (Path(self.manager.project_root) / resolved_product_image).resolve()
+            profile_main_image = self.manager.resolve_account_main_image_path(account) if account else None
+            if account and getattr(account, "auto_use_main_image", False):
+                if profile_main_image is None:
+                    raise ValueError("Profile đang bật Auto dùng Main Image nhưng chưa có Main Image hợp lệ.")
+                resolved_product_image = profile_main_image
+            elif (not resolved_product_image.exists() or not resolved_product_image.is_file()) and profile_main_image is not None:
+                resolved_product_image = profile_main_image
 
             if source_url and resolved_product_image.exists() and resolved_product_image.is_file():
                 orchestrator = SessionOrchestrator(config=render_config)
@@ -1394,7 +1400,7 @@ class VideosView(QWidget):
             return
 
         status_lower = str(getattr(video, "status", "") or "").strip().lower()
-        if status_lower not in ("ready", "published", "prepared"):
+        if status_lower not in ("ready", "sent", "published", "prepared"):
             InfoBar.warning(
                 title="Chưa thể gửi",
                 content=f"Video #{video.id} chưa tạo xong, vui lòng chờ hoàn thành trước khi gửi!",
@@ -1455,6 +1461,7 @@ class VideosView(QWidget):
                 account_id=video.account_id,
                 video_id=video.id,
             )
+            self.manager.update_video_status(video.id, "sent")
             return {"video_id": video.id, "phone_result": phone_result}
 
         def _cleanup():
@@ -1465,6 +1472,7 @@ class VideosView(QWidget):
 
         def _on_done(result: Any) -> None:
             _cleanup()
+            self.refresh_videos()
             InfoBar.success(
                 title="Gửi thành công",
                 content=f"Đã gửi video ID {video.id} và copy mô tả/hashtag + Product ID vào clipboard điện thoại.",
@@ -1802,3 +1810,15 @@ class VideosView(QWidget):
         menu.addAction(act_delete)
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
+
+    def shutdown(self) -> None:
+        if hasattr(self, "_sync_timer"):
+            self._sync_timer.stop()
+        workers = list(self._active_workers)
+        self._active_workers.clear()
+        for worker in workers:
+            worker.stop(timeout_ms=1500)
+
+    def closeEvent(self, event) -> None:
+        self.shutdown()
+        super().closeEvent(event)

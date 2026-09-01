@@ -813,25 +813,36 @@ class TelegramBotService(object):
         thread.start()
 
     def _handle_direct_caption_message(self, chat_id: int, message: Dict[str, object]) -> None:
-        if not self._message_has_image(message):
-            self.client.send_message(chat_id, "Vui lòng gửi ảnh sản phẩm kèm caption.")
-            return
-        caption = str(message.get("caption") or "").strip()
+        caption = str(message.get("caption") or message.get("text") or "").strip()
         if not caption:
             self.client.send_message(chat_id, self._format_caption_error(["Thiếu caption. Vui lòng gửi caption có ít nhất 1 link video."]))
             return
 
         input_data = parse_natural_telegram_caption(caption)
-        input_data["image"] = True
+        has_uploaded_image = self._message_has_image(message)
+        main_image_path, auto_use_main_image = self._profile_main_image_for_current_bot()
+        if auto_use_main_image and main_image_path is None:
+            self.client.send_message(chat_id, "Profile đang bật Auto dùng Main Image nhưng Main Image chưa được thiết lập hoặc không còn tồn tại.")
+            return
+        use_main_image = bool(
+            main_image_path
+            and (auto_use_main_image or (not has_uploaded_image and bool(input_data.get("product_link"))))
+        )
+        input_data["image"] = main_image_path if use_main_image else has_uploaded_image
         errors = validate_telegram_input(input_data)
         input_data["option"] = detect_input_option(input_data)
         if errors:
             self.client.send_message(chat_id, self._format_caption_error(errors))
             return
 
-        self.client.send_message(chat_id, "Đã nhận format, bot đang tải ảnh và đưa vào hàng đợi...")
+        self.client.send_message(
+            chat_id,
+            "Đã nhận link, bot sẽ dùng Main Image của Profile và đưa vào hàng đợi..."
+            if use_main_image
+            else "Đã nhận format, bot đang tải ảnh và đưa vào hàng đợi...",
+        )
         try:
-            image_path = self._download_image_from_message(chat_id, message)
+            image_path = main_image_path if use_main_image else self._download_image_from_message(chat_id, message)
         except Exception as exc:
             self.logger.warning("Could not download Telegram image for chat %s: %s", chat_id, exc)
             self.client.send_message(chat_id, "Không tải được ảnh từ Telegram. Hãy gửi lại ảnh. Lỗi: %s" % exc)
@@ -854,6 +865,20 @@ class TelegramBotService(object):
             return False
         mime_type = str(document.get("mime_type") or "").lower()
         return bool(mime_type.startswith("image/"))
+
+    def _profile_main_image_for_current_bot(self) -> tuple[Optional[Path], bool]:
+        profile_slug = str(getattr(self.config, "tiktok_profile_slug", "") or "").strip()
+        if not profile_slug:
+            return None, False
+        try:
+            manager = TikTokProfileManager()
+            account = manager.find_account_for_profile_slug(profile_slug)
+            if account is None:
+                return None, False
+            return manager.resolve_account_main_image_path(account), bool(account.auto_use_main_image)
+        except Exception as exc:
+            self.logger.warning("Could not resolve Main Image for Telegram profile %s: %s", profile_slug, exc)
+            return None, False
 
     def save_telegram_video_input(self, chat_id: int, data: Dict[str, object]) -> None:
         product_url = str(data.get("product_link") or "").strip()
@@ -1649,7 +1674,10 @@ class TelegramBotService(object):
         paths = []  # type: List[Path]
         if result is not None and result.session_dir is not None:
             paths.append(Path(result.session_dir))
-        paths.append(Path(product_image_path))
+        product_path = Path(product_image_path).expanduser().resolve()
+        telegram_input_root = Path(self.config.telegram_input_root).expanduser().resolve()
+        if product_path == telegram_input_root or telegram_input_root in product_path.parents:
+            paths.append(product_path)
         for path in paths:
             try:
                 self._delete_ephemeral_path(path)

@@ -338,6 +338,33 @@ class TikTokProfileManagerTests(unittest.TestCase):
             self.assertEqual(second.profile_path, "profiles/nick_1_2")
             self.assertTrue((root / "profiles" / "nick_1_2").is_dir())
 
+    def test_account_main_image_is_copied_and_auto_setting_is_persistent(self):
+        with _temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            source_image = root / "source.png"
+            source_image.write_bytes(b"main-image")
+            manager = TikTokProfileManager(
+                db_path=root / "accounts.sqlite3",
+                profiles_root=root / "profiles",
+                project_root=root,
+            )
+
+            account = manager.add_account(
+                "Nick 1",
+                "google",
+                main_image_path=source_image,
+                auto_use_main_image=True,
+            )
+
+            self.assertTrue(account.auto_use_main_image)
+            self.assertEqual(account.main_image_path, "profiles/nick_1/main_image.png")
+            self.assertEqual(manager.resolve_account_main_image_path(account).read_bytes(), b"main-image")
+
+            cleared = manager.clear_account_main_image(account.id)
+            self.assertEqual(cleared.main_image_path, "")
+            self.assertFalse(cleared.auto_use_main_image)
+            self.assertIsNone(manager.resolve_account_main_image_path(cleared))
+
     def test_update_status(self):
         with _temporary_directory() as temp_dir:
             root = Path(temp_dir)
@@ -606,6 +633,10 @@ class TikTokProfileManagerTests(unittest.TestCase):
 
             self.assertEqual(updated_video.status, "file_selected")
             self.assertEqual(updated_video.note, "selected")
+
+            sent_video = manager.update_video_status(video.id, "sent")
+
+            self.assertEqual(sent_video.status, "sent")
 
     def test_add_video_draft_cut_mode_and_mark_rendered(self):
         with _temporary_directory() as temp_dir:

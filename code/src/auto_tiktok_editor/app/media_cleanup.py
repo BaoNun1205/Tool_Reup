@@ -34,6 +34,19 @@ MEDIA_SUFFIXES = {
     ".heic",
 }
 
+# Final renders use these containers.  Keep this separate from MEDIA_SUFFIXES:
+# a lightweight cleanup must never remove product images or source artifacts.
+OUTPUT_VIDEO_SUFFIXES = {
+    ".mp4",
+    ".mov",
+    ".m4v",
+    ".mkv",
+    ".avi",
+    ".webm",
+    ".wmv",
+    ".flv",
+}
+
 BROWSER_CACHE_DIR_NAMES = {
     "Cache",
     "Code Cache",
@@ -171,10 +184,84 @@ def _calc_dir_stats(path: Path) -> Tuple[int, int]:
     return count, size
 
 
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
+
+
+def _is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve().relative_to(parent.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _is_final_output_video(path: Path) -> bool:
+    """Return whether a path is a final rendered video, not an input artifact."""
+    return path.suffix.lower() in OUTPUT_VIDEO_SUFFIXES and path.stem.lower().endswith("final_video")
+
+
+def _iter_final_output_video_paths(
+    config: PipelineConfig,
+    project_root: Path,
+    manager: Optional[object] = None,
+):
+    """Yield final renders only, without touching image/link inputs or video records."""
+    output_root = Path(config.default_output_root).expanduser().resolve()
+    queue_root = (project_root / "profile_video_queue").resolve()
+    seen: Set[Path] = set()
+
+    def _yield_if_valid(candidate: Path):
+        try:
+            resolved = candidate.expanduser().resolve()
+        except OSError:
+            return
+        if (
+            resolved in seen
+            or not resolved.is_file()
+            or resolved.suffix.lower() not in OUTPUT_VIDEO_SUFFIXES
+            or not (_is_within(resolved, output_root) or _is_within(resolved, queue_root))
+        ):
+            return
+        seen.add(resolved)
+        yield resolved
+
+    # Render sessions are kept under output_root.  Only their explicitly named
+    # final deliverables are safe to remove without affecting a future render.
+    if output_root.exists() and output_root.is_dir():
+        for candidate in output_root.rglob("*"):
+            try:
+                relative_parts = candidate.relative_to(output_root).parts
+            except ValueError:
+                continue
+            if "_telegram_inputs" in relative_parts or not _is_final_output_video(candidate):
+                continue
+            yield from _yield_if_valid(candidate)
+
+    # A rendered profile video is copied to the queue and its database record
+    # points at that file.  Remove that file only; leave the record (URL/image)
+    # intact so the "Tạo lại video" action continues to work.
+    if manager and hasattr(manager, "list_videos") and hasattr(manager, "resolve_video_path"):
+        try:
+            videos = manager.list_videos()
+        except Exception:
+            videos = []
+        for video in videos:
+            try:
+                candidate = Path(manager.resolve_video_path(video))
+            except Exception:
+                continue
+            yield from _yield_if_valid(candidate)
+
+
 def scan_cleanup_items(
     config: PipelineConfig,
     project_root: Path | str,
     phone_controller: Optional[object] = None,
+    manager: Optional[object] = None,
 ) -> List[CleanupItemInfo]:
     """Scan storage and return detailed item info with real-time sizes and file counts."""
     root = Path(project_root).expanduser().resolve()
@@ -315,7 +402,25 @@ def scan_cleanup_items(
         )
     )
 
-    # 8. Build Dir
+    # 8. Final output videos only.  This intentionally preserves input images,
+    # URL/link marker files, session folders, and video records so a video can
+    # be rendered again with another mode.
+    final_output_paths = list(_iter_final_output_video_paths(config, root, manager))
+    final_output_size = sum(_file_size(path) for path in final_output_paths)
+    items.append(
+        CleanupItemInfo(
+            key="output_video_files_only",
+            group="media",
+            title="Chỉ xóa video Output (giữ ảnh & link)",
+            description="Chỉ xóa file video thành phẩm; giữ nguyên ảnh sản phẩm, link nguồn, thư mục và dữ liệu để có thể tạo lại ở mode khác.",
+            file_count=len(final_output_paths),
+            size_bytes=final_output_size,
+            default_checked=False,
+            warning_note="Video sẽ cần render lại trước khi gửi/đăng",
+        )
+    )
+
+    # 9. Build Dir
     build_dir = root / "build"
     b_files, b_size = _calc_dir_stats(build_dir)
     if build_dir.exists() and b_files > 0:
@@ -331,7 +436,7 @@ def scan_cleanup_items(
             )
         )
 
-    # 9. Legacy Backups
+    # 10. Legacy Backups
     bk_files, bk_size = 0, 0
     for bk in root.glob("data_backup_before_rebuild_*"):
         if bk.is_dir():
@@ -471,7 +576,15 @@ def execute_granular_cleanup(
                 report.errors.append("Stale video DB cleanup: %s" % exc)
         report.deleted_items.append("output_videos")
 
-    # 8. Build Dir
+    # 8. Final output videos only.  Do not remove empty folders or clean stale
+    # database records here: those records retain the source URL and image that
+    # the user needs to render this video again.
+    if "output_video_files_only" in keys_set:
+        for video_path in _iter_final_output_video_paths(config, root, manager):
+            _delete_single_file(video_path, report)
+        report.deleted_items.append("output_video_files_only")
+
+    # 9. Build Dir
     if "build_dir" in keys_set:
         build_dir = root / "build"
         if build_dir.exists() and build_dir.is_dir():
@@ -485,7 +598,7 @@ def execute_granular_cleanup(
                 report.errors.append("Build dir: %s" % exc)
         report.deleted_items.append("build_dir")
 
-    # 9. Legacy Backups
+    # 10. Legacy Backups
     if "legacy_backups" in keys_set:
         for bk in root.glob("data_backup_before_rebuild_*"):
             if bk.is_dir():

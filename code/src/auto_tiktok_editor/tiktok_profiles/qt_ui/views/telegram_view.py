@@ -32,6 +32,8 @@ from qfluentwidgets import (
     InfoBarPosition,
     LineEdit,
     MessageBox,
+    MessageBoxBase,
+    PasswordLineEdit,
     PlainTextEdit,
     PrimaryPushButton,
     PushButton,
@@ -50,8 +52,73 @@ from auto_tiktok_editor.telegram_settings import (
     save_telegram_runtime_settings,
 )
 from auto_tiktok_editor.tiktok_profiles.qt_ui.components.stat_card import StatCard
-from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import VIDEO_CUT_MODE_LABELS, VIDEO_CUT_MODE_VALUES
+from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import (
+    PRODUCT_IMAGE_CROP_RATIO_LABELS,
+    PRODUCT_IMAGE_CROP_RATIO_VALUES,
+    PRODUCT_IMAGE_MOTION_LABELS,
+    PRODUCT_IMAGE_MOTION_VALUES,
+    VIDEO_CUT_MODE_LABELS,
+    VIDEO_CUT_MODE_VALUES,
+)
 from auto_tiktok_editor.tiktok_profiles.qt_ui.workers import TelegramBotMonitorThread
+from auto_tiktok_editor.utils.processes import terminate_process_tree
+
+
+class BotConfigDialog(MessageBoxBase):
+    """Create a managed Video or Fashion Telegram bot entry."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.bot_data: dict[str, object] | None = None
+        self.titleLabel = SubtitleLabel("Thêm Telegram Bot", self)
+        self.viewLayout.addWidget(self.titleLabel)
+
+        form = QFormLayout()
+        form.setContentsMargins(0, 16, 0, 16)
+        form.setSpacing(10)
+        self.name_edit = LineEdit(self)
+        self.name_edit.setPlaceholderText("VD: my_me_an_vat")
+        self.token_edit = PasswordLineEdit(self)
+        self.token_edit.setViewPasswordButtonVisible(False)
+        self.token_edit.setPlaceholderText("Token do BotFather cấp")
+        self.chat_ids_edit = LineEdit(self)
+        self.chat_ids_edit.setPlaceholderText("VD: 123456789, -1001234567890")
+        self.bot_type_combo = ComboBox(self)
+        self.bot_type_combo.addItem("Video · nhận video/ảnh", userData="video")
+        self.bot_type_combo.addItem("Fashion · chỉ nhận link sản phẩm", userData="fashion")
+        form.addRow(BodyLabel("Tên bot:", self), self.name_edit)
+        form.addRow(BodyLabel("Bot token:", self), self.token_edit)
+        form.addRow(BodyLabel("Chat ID được phép:", self), self.chat_ids_edit)
+        form.addRow(BodyLabel("Loại bot:", self), self.bot_type_combo)
+        self.viewLayout.addLayout(form)
+        self.yesButton.setText("Thêm bot")
+        self.cancelButton.setText("Hủy")
+        self.widget.setMinimumWidth(560)
+
+    def validate(self) -> bool:
+        name = self.name_edit.text().strip()
+        token = self.token_edit.text().strip()
+        raw_chat_ids = self.chat_ids_edit.text().replace(";", ",").strip()
+        if not name or not token:
+            InfoBar.warning("Thiếu thông tin", "Tên bot và token là bắt buộc.", parent=self.window())
+            return False
+        chat_ids = []
+        for value in raw_chat_ids.split(",") if raw_chat_ids else []:
+            value = value.strip()
+            if not value:
+                continue
+            try:
+                chat_ids.append(int(value))
+            except ValueError:
+                InfoBar.warning("Chat ID không hợp lệ", "Chat ID phải là số, cách nhau bằng dấu phẩy.", parent=self.window())
+                return False
+        self.bot_data = {
+            "name": name,
+            "bot_token": token,
+            "chat_ids": chat_ids,
+            "type": str(self.bot_type_combo.currentData() or "video"),
+        }
+        return True
 
 
 class TelegramView(QWidget):
@@ -129,6 +196,14 @@ class TelegramView(QWidget):
         self.spin_scene_threshold.setValue(0.35)
         form.addRow(BodyLabel("Ngưỡng đổi cảnh (Scene):", service_card), self.spin_scene_threshold)
 
+        self.combo_product_image_crop_ratio = ComboBox(service_card)
+        self.combo_product_image_crop_ratio.addItems(list(PRODUCT_IMAGE_CROP_RATIO_LABELS.values()))
+        form.addRow(BodyLabel("Tỷ lệ ảnh sản phẩm:", service_card), self.combo_product_image_crop_ratio)
+
+        self.combo_product_image_motion = ComboBox(service_card)
+        self.combo_product_image_motion.addItems(list(PRODUCT_IMAGE_MOTION_LABELS.values()))
+        form.addRow(BodyLabel("Hiệu ứng ảnh sản phẩm:", service_card), self.combo_product_image_motion)
+
         service_layout.addLayout(form)
 
         btn_row = QHBoxLayout()
@@ -169,14 +244,16 @@ class TelegramView(QWidget):
         bots_layout.addLayout(bots_header)
 
         self.bots_table = TableWidget(bots_card)
-        self.bots_table.setColumnCount(3)
-        self.bots_table.setHorizontalHeaderLabels(["Tên Bot", "Bot Token", "Chat ID"])
+        self.bots_table.setColumnCount(4)
+        self.bots_table.setHorizontalHeaderLabels(["Tên Bot", "Loại", "Bot Token", "Chat ID"])
         self.bots_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.bots_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
-        self.bots_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.bots_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        self.bots_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        self.bots_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.bots_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
         self.bots_table.setColumnWidth(0, 160)
-        self.bots_table.setColumnWidth(2, 140)
+        self.bots_table.setColumnWidth(1, 100)
+        self.bots_table.setColumnWidth(3, 140)
         self.bots_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.bots_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.bots_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -199,6 +276,14 @@ class TelegramView(QWidget):
         self.combo_cut_mode.setCurrentText(VIDEO_CUT_MODE_LABELS.get(cut_mode, "Cắt cố định"))
         self.spin_chunk_duration.setValue(float(s.fixed_chunk_duration_seconds if s.fixed_chunk_duration_seconds else 2.0))
         self.spin_scene_threshold.setValue(float(s.scene_threshold if s.scene_threshold else 0.35))
+        crop_ratio = str(s.product_image_crop_ratio or "1:1").strip().lower().replace("x", ":")
+        self.combo_product_image_crop_ratio.setCurrentText(
+            PRODUCT_IMAGE_CROP_RATIO_LABELS.get(crop_ratio, PRODUCT_IMAGE_CROP_RATIO_LABELS["1:1"])
+        )
+        motion = str(s.product_image_motion or "still").strip().lower()
+        self.combo_product_image_motion.setCurrentText(
+            PRODUCT_IMAGE_MOTION_LABELS.get(motion, PRODUCT_IMAGE_MOTION_LABELS["still"])
+        )
 
     def _save_settings(self) -> None:
         cut_mode_label = self.combo_cut_mode.currentText()
@@ -213,8 +298,12 @@ class TelegramView(QWidget):
             video_cut_mode=cut_mode_val,
             fixed_chunk_duration_seconds=float(self.spin_chunk_duration.value()),
             scene_threshold=float(self.spin_scene_threshold.value()),
-            product_image_crop_ratio=self.settings.product_image_crop_ratio,
-            product_image_motion=self.settings.product_image_motion,
+            product_image_crop_ratio=PRODUCT_IMAGE_CROP_RATIO_VALUES.get(
+                self.combo_product_image_crop_ratio.currentText(), "1:1"
+            ),
+            product_image_motion=PRODUCT_IMAGE_MOTION_VALUES.get(
+                self.combo_product_image_motion.currentText(), "still"
+            ),
         )
         self.settings = new_settings
         save_telegram_runtime_settings(new_settings)
@@ -234,18 +323,55 @@ class TelegramView(QWidget):
             self.bots_table.setRowCount(len(bots))
             for row, b in enumerate(bots):
                 name = str(b.get("name") or "-")
+                bot_type = str(b.get("type") or b.get("mode") or "video").strip().lower()
                 token = str(b.get("bot_token") or b.get("token") or "-")
                 masked_token = token[:10] + "..." + token[-6:] if len(token) > 16 else token
-                chat_id = str(b.get("chat_id") or b.get("delivery_chat_id") or "-")
+                raw_chat_ids = b.get("chat_ids")
+                if isinstance(raw_chat_ids, list):
+                    chat_id = ", ".join(str(value) for value in raw_chat_ids) or "-"
+                else:
+                    chat_id = str(b.get("chat_id") or b.get("delivery_chat_id") or "-")
 
                 self.bots_table.setItem(row, 0, QTableWidgetItem(name))
-                self.bots_table.setItem(row, 1, QTableWidgetItem(masked_token))
-                self.bots_table.setItem(row, 2, QTableWidgetItem(chat_id))
+                self.bots_table.setItem(row, 1, QTableWidgetItem("Fashion" if bot_type == "fashion" else "Video"))
+                self.bots_table.setItem(row, 2, QTableWidgetItem(masked_token))
+                self.bots_table.setItem(row, 3, QTableWidgetItem(chat_id))
         except Exception as exc:
             InfoBar.error("Lỗi đọc telegram_bots.json", str(exc), parent=self.window())
 
     def _on_add_bot(self) -> None:
-        InfoBar.info("Cấu hình Bot", "Bạn có thể chỉnh sửa trực tiếp file telegram_bots.json", parent=self.window())
+        dialog = BotConfigDialog(self.window() or self)
+        if not dialog.exec() or dialog.bot_data is None:
+            return
+        file_path = Path("telegram_bots.json")
+        try:
+            if file_path.exists():
+                payload = json.loads(file_path.read_text(encoding="utf-8"))
+            else:
+                payload = {"bots": []}
+            if isinstance(payload, dict):
+                bots = payload.get("bots")
+                if bots is None:
+                    bots = []
+                    payload["bots"] = bots
+            elif isinstance(payload, list):
+                bots = payload
+                payload = {"bots": bots}
+            else:
+                raise ValueError("telegram_bots.json phải chứa danh sách bots hợp lệ.")
+            if not isinstance(bots, list):
+                raise ValueError("Key 'bots' trong telegram_bots.json phải là một danh sách.")
+            new_name = str(dialog.bot_data["name"]).casefold()
+            if any(str(bot.get("name") or "").casefold() == new_name for bot in bots if isinstance(bot, dict)):
+                raise ValueError("Tên bot này đã tồn tại. Hãy chọn tên khác.")
+            bots.append(dialog.bot_data)
+            file_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            InfoBar.error("Không thể thêm bot", str(exc), parent=self.window())
+            return
+        self.refresh_bots_table()
+        bot_type = "Fashion" if dialog.bot_data["type"] == "fashion" else "Video"
+        InfoBar.success("Đã thêm bot", "Bot loại %s đã sẵn sàng." % bot_type, parent=self.window())
 
     def _on_start_bot(self) -> None:
         if self.bot_process and self.bot_process.poll() is None:
@@ -268,6 +394,10 @@ class TelegramView(QWidget):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                creationflags=(
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                    | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                ),
             )
 
             self.monitor_thread = TelegramBotMonitorThread(self.bot_process, self)
@@ -280,24 +410,35 @@ class TelegramView(QWidget):
             self.status_card.set_value("Lỗi khởi động")
             InfoBar.error("Lỗi khởi động Bot", str(exc), parent=self.window())
 
-    def _on_stop_bot(self) -> None:
+    def _on_stop_bot(self, show_status: bool = True) -> None:
         if self.monitor_thread:
             self.monitor_thread.stop()
             self.monitor_thread = None
         if self.bot_process:
-            try:
-                self.bot_process.terminate()
-            except Exception:
-                pass
+            terminate_process_tree(self.bot_process, timeout=3)
+            stdout = getattr(self.bot_process, "stdout", None)
+            if stdout is not None:
+                try:
+                    stdout.close()
+                except Exception:
+                    pass
             self.bot_process = None
         self.status_card.set_value("Đã dừng")
-        InfoBar.info("Đã dừng", "Đã tắt dịch vụ Telegram Bot.", parent=self.window())
+        if show_status:
+            InfoBar.info("Đã dừng", "Đã tắt dịch vụ Telegram Bot.", parent=self.window())
 
     def _on_bot_status_changed(self, is_running: bool, message: str) -> None:
         if is_running:
             self.status_card.set_value("Đang chạy")
         else:
-            self.status_card.set_value("Đã dừng")
+            return_code = self.bot_process.poll() if self.bot_process is not None else None
+            if return_code == 3:
+                self.status_card.set_value("Đã chạy ở tiến trình khác")
+            else:
+                self.status_card.set_value("Đã dừng")
+
+    def shutdown(self) -> None:
+        self._on_stop_bot(show_status=False)
 
     def apply_theme_mode(self, mode: str) -> None:
         clean = "dark" if str(mode).strip().lower() == "dark" else "light"
@@ -305,5 +446,5 @@ class TelegramView(QWidget):
             self.status_card.set_theme_mode(clean)
 
     def closeEvent(self, event) -> None:
-        self._on_stop_bot()
+        self.shutdown()
         super().closeEvent(event)

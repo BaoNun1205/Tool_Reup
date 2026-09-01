@@ -52,8 +52,9 @@ class CompletedProcessStub:
 
 
 class DeviceTransferStub:
-    def __init__(self, connected=True):
+    def __init__(self, connected=True, device_serial=""):
         self.connected = connected
+        self.device_serial = device_serial
         self.calls = []
 
     def connect(self, mode, address):
@@ -61,6 +62,7 @@ class DeviceTransferStub:
         return {
             "connected": self.connected,
             "message": "connected" if self.connected else "not connected",
+            "device_serial": self.device_serial,
         }
 
 
@@ -154,6 +156,7 @@ class PhoneControlTests(unittest.TestCase):
                 save_phone_control_settings(
                     PhoneControlSettings(
                         address="192.168.1.20:5555",
+                        connection_mode="usb",
                         keep_screen_awake=True,
                         turn_screen_off=True,
                         always_on_top=True,
@@ -166,6 +169,7 @@ class PhoneControlTests(unittest.TestCase):
                 )
                 loaded = load_phone_control_settings()
             self.assertEqual(loaded.address, "192.168.1.20:5555")
+            self.assertEqual(loaded.connection_mode, "usb")
             self.assertTrue(loaded.keep_screen_awake)
             self.assertTrue(loaded.turn_screen_off)
             self.assertTrue(loaded.always_on_top)
@@ -278,6 +282,25 @@ class PhoneControlTests(unittest.TestCase):
         self.assertFalse(controller.is_running())
         popen.assert_not_called()
         self.assertEqual([event["action"] for event in events], ["phone_connected"])
+
+    def test_connects_over_usb_without_requiring_an_ip_address(self):
+        runner = RunnerStub()
+        device_transfer = DeviceTransferStub(device_serial="R58N123USB")
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=device_transfer,
+        )
+
+        result = controller.connect(connection_mode="usb")
+
+        self.assertEqual(device_transfer.calls, [("usb", "")])
+        self.assertEqual(result["address"], "R58N123USB")
+        self.assertEqual(controller.connected_serial, "R58N123USB")
+        self.assertEqual(
+            runner.commands[0],
+            ["adb", "-s", "R58N123USB", "shell", "mkdir", "-p", DEFAULT_PUSH_TARGET],
+        )
 
     def test_open_tiktok_upload_uses_installed_package_deeplink(self):
         runner = RunnerStub(
@@ -1507,6 +1530,55 @@ class PhoneControlTests(unittest.TestCase):
                     "phone_gallery_ready",
                 ],
             )
+        finally:
+            temp_dir.cleanup()
+
+    def test_send_file_to_gallery_uses_usb_serial_when_usb_mode_is_selected(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            video_path = Path(temp_dir.name) / "usb_video.mp4"
+            video_path.write_bytes(b"video")
+            runner = RunnerStub()
+            device_transfer = DeviceTransferStub(device_serial="USB123")
+            controller = PhoneController(
+                PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+                runner=runner,
+                device_transfer=device_transfer,
+            )
+
+            with mock.patch.object(controller, "_scan_media_file", return_value=True):
+                result = controller.send_file_to_gallery("", video_path, connection_mode="usb")
+
+            self.assertEqual(result["address"], "USB123")
+            self.assertEqual(device_transfer.calls, [("usb", "")])
+            self.assertIn(["adb", "-s", "USB123", "push", str(video_path), result["remote_path"]], runner.commands)
+        finally:
+            temp_dir.cleanup()
+
+    def test_send_file_to_gallery_allows_a_unique_destination_file_name(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        try:
+            video_path = Path(temp_dir.name) / "fashion.mp4"
+            video_path.write_bytes(b"video")
+            runner = RunnerStub()
+            device_transfer = DeviceTransferStub(device_serial="USB123")
+            controller = PhoneController(
+                PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+                runner=runner,
+                device_transfer=device_transfer,
+            )
+
+            with mock.patch.object(controller, "_scan_media_file", return_value=True):
+                result = controller.send_file_to_gallery(
+                    "",
+                    video_path,
+                    connection_mode="usb",
+                    remote_file_name="fashion_20260825_143012_123456.mp4",
+                )
+
+            remote_path = DEFAULT_PUSH_TARGET.rstrip("/") + "/fashion_20260825_143012_123456.mp4"
+            self.assertEqual(result["remote_path"], remote_path)
+            self.assertIn(["adb", "-s", "USB123", "push", str(video_path), remote_path], runner.commands)
         finally:
             temp_dir.cleanup()
 

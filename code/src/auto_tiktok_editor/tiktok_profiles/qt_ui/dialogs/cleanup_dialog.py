@@ -246,7 +246,12 @@ class CleanupDialog(MessageBoxBase):
         self._set_scanning_state()
 
         def _scan() -> List[CleanupItemInfo]:
-            return scan_cleanup_items(self.config, self.project_root, self.phone_controller)
+            return scan_cleanup_items(
+                self.config,
+                self.project_root,
+                self.phone_controller,
+                manager=self.manager,
+            )
 
         worker = WorkerThread(_scan, parent=self)
         self._scan_worker = worker
