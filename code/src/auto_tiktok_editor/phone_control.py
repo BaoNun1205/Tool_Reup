@@ -24,6 +24,7 @@ from auto_tiktok_editor.app.device_transfer import AndroidDeviceTransfer
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.phone_uiautomator import UiAutomatorClient, UiAutomatorUnavailable
 from auto_tiktok_editor.utils.command import CommandRunner
+from auto_tiktok_editor.utils.processes import terminate_process_tree
 
 
 DEFAULT_ADB_PORT = 5555
@@ -53,6 +54,7 @@ ANDROID_KEYCODE_MOVE_END = "123"
 ANDROID_KEYCODE_SPACE = "62"
 DOCK_POSITIONS = {"off", "left", "right"}
 MONITOR_TARGETS = {"primary", "secondary"}
+CONNECTION_MODES = {"wifi", "usb"}
 SCRCPY_MAX_SIZE_OPTIONS = {1024, 1280, 1600}
 SCRCPY_MAX_FPS_OPTIONS = {30, 60}
 SCRCPY_VIDEO_BIT_RATE_OPTIONS = {"4M", "6M", "8M"}
@@ -119,6 +121,7 @@ def _settings_path() -> Path:
 @dataclass(frozen=True)
 class PhoneControlSettings:
     address: str = ""
+    connection_mode: str = "wifi"
     keep_screen_awake: bool = False
     turn_screen_off: bool = False
     always_on_top: bool = False
@@ -137,6 +140,11 @@ def normalize_dock_position(value: str) -> str:
 def normalize_monitor_target(value: str) -> str:
     normalized = str(value or "").strip().lower()
     return normalized if normalized in MONITOR_TARGETS else "primary"
+
+
+def normalize_connection_mode(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    return normalized if normalized in CONNECTION_MODES else "wifi"
 
 
 def normalize_scrcpy_max_size(value: object) -> int:
@@ -176,6 +184,7 @@ def load_phone_control_settings() -> PhoneControlSettings:
         return PhoneControlSettings()
     return PhoneControlSettings(
         address=str(payload.get("address") or "").strip(),
+        connection_mode=normalize_connection_mode(payload.get("connection_mode")),
         keep_screen_awake=payload.get("keep_screen_awake") is True,
         turn_screen_off=payload.get("turn_screen_off") is True,
         always_on_top=payload.get("always_on_top") is True,
@@ -196,6 +205,7 @@ def save_phone_control_settings(settings: PhoneControlSettings) -> Path:
         json.dumps(
             {
                 "address": settings.address,
+                "connection_mode": normalize_connection_mode(settings.connection_mode),
                 "keep_screen_awake": settings.keep_screen_awake,
                 "turn_screen_off": settings.turn_screen_off,
                 "always_on_top": settings.always_on_top,
@@ -653,13 +663,14 @@ class PhoneController:
         self._ui_automation_error = ""
         self._previous_android_input_method = ""
 
-    def connect(self, address: str) -> dict[str, str]:
-        target = normalize_phone_address(address)
+    def connect(self, address: str = "", *, connection_mode: str = "wifi") -> dict[str, str]:
+        mode = normalize_connection_mode(connection_mode)
+        target = normalize_phone_address(address) if mode == "wifi" else ""
         self.runner.ensure_tool(self.config.adb_bin)
-        self._connect_adb(target)
+        selected_serial = self._connect_adb(target, connection_mode=mode)
         return {
-            "address": target,
-            "message": "Phone connected for file transfer: %s." % target,
+            "address": selected_serial,
+            "message": "Phone connected for file transfer: %s." % selected_serial,
         }
 
     def connect_and_open(
@@ -674,14 +685,16 @@ class PhoneController:
         max_size: int = SCRCPY_MAX_SIZE,
         max_fps: int = SCRCPY_MAX_FPS,
         video_bit_rate: str = SCRCPY_VIDEO_BIT_RATE,
+        connection_mode: str = "wifi",
     ) -> dict[str, str]:
-        target = normalize_phone_address(address)
+        mode = normalize_connection_mode(connection_mode)
+        target = normalize_phone_address(address) if mode == "wifi" else ""
         if self.is_running():
-            return {"address": target, "message": "Phone control is already open."}
+            return {"address": self.connected_serial or target, "message": "Phone control is already open."}
 
         self.runner.ensure_tool(self.config.adb_bin)
         self.runner.ensure_tool(self.config.scrcpy_bin)
-        self._connect_adb(target)
+        target = self._connect_adb(target, connection_mode=mode)
         scrcpy_path = Path(self.config.scrcpy_bin)
         cwd = str(scrcpy_path.resolve().parent) if scrcpy_path.exists() else None
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
@@ -741,6 +754,42 @@ class PhoneController:
         self._start_clipboard_helper()
         self._start_media_watcher(target)
         return {"address": target, "message": "Phone control opened for %s." % target}
+
+    def start_scrcpy(self, settings: PhoneControlSettings) -> dict[str, str]:
+        """Open Scrcpy using the configured Wi-Fi or USB ADB connection."""
+        return self.connect_and_open(
+            settings.address,
+            keep_screen_awake=settings.keep_screen_awake,
+            turn_screen_off=settings.turn_screen_off,
+            always_on_top=settings.always_on_top,
+            dock_position=settings.dock_position,
+            monitor_target=settings.monitor_target,
+            max_size=settings.max_size,
+            max_fps=settings.max_fps,
+            video_bit_rate=settings.video_bit_rate,
+            connection_mode=settings.connection_mode,
+        )
+
+    def stop_scrcpy(self) -> None:
+        """Stop the active Scrcpy session without altering saved connection preferences."""
+        self.close()
+
+    def disconnect(self) -> None:
+        """Release the active ADB connection; USB devices remain physically attached."""
+        serial = self.connected_serial
+        if serial and ":" in serial:
+            self.runner.run([self.config.adb_bin, "disconnect", serial], check=False)
+        self.connected_serial = ""
+
+    def list_devices(self) -> list[str]:
+        """Return ADB devices currently available through either Wi-Fi or USB."""
+        completed = self.runner.run([self.config.adb_bin, "devices"], check=False, capture_output=True)
+        devices = []
+        for raw_line in str(getattr(completed, "stdout", "") or "").splitlines():
+            line = raw_line.strip()
+            if line and "\tdevice" in line:
+                devices.append(line.split("\t", 1)[0].strip())
+        return devices
 
     def is_running(self) -> bool:
         return self.process is not None and self.process.poll() is None
@@ -1355,17 +1404,35 @@ class PhoneController:
             caption_y,
         )
 
-    def send_file_to_gallery(self, address: str, local_path: Path) -> dict[str, object]:
-        target = normalize_phone_address(address)
+    def send_file_to_gallery(
+        self,
+        address: str,
+        local_path: Path,
+        *,
+        connection_mode: str = "wifi",
+        remote_file_name: str | None = None,
+    ) -> dict[str, object]:
+        mode = normalize_connection_mode(connection_mode)
+        target = normalize_phone_address(address) if mode == "wifi" else ""
         source_path = Path(local_path).expanduser().resolve()
         if not source_path.exists() or not source_path.is_file():
             raise RuntimeError("Video file does not exist: %s" % source_path)
         if source_path.suffix.lower() not in GALLERY_MEDIA_EXTENSIONS:
             raise RuntimeError("File is not a supported Gallery media file: %s" % source_path.name)
+        destination_name = Path(remote_file_name or source_path.name).name
+        if not destination_name or destination_name in {".", ".."}:
+            raise RuntimeError("A valid destination file name is required.")
+        if Path(destination_name).suffix.lower() != source_path.suffix.lower():
+            raise RuntimeError("Destination file extension must match the source media file.")
 
         self.runner.ensure_tool(self.config.adb_bin)
-        self._connect_adb(target, emit_event=False, ensure_push_target=False)
-        remote_path = "%s/%s" % (DEFAULT_PUSH_TARGET.rstrip("/"), source_path.name)
+        target = self._connect_adb(
+            target,
+            connection_mode=mode,
+            emit_event=False,
+            ensure_push_target=False,
+        )
+        remote_path = "%s/%s" % (DEFAULT_PUSH_TARGET.rstrip("/"), destination_name)
         self._mark_manual_transfer_path(remote_path)
         size = source_path.stat().st_size
         self._emit_event(
@@ -1433,25 +1500,31 @@ class PhoneController:
         self,
         target: str,
         *,
+        connection_mode: str = "wifi",
         emit_event: bool = True,
         ensure_push_target: bool = True,
-    ) -> None:
-        connection = self.device_transfer.connect("wifi", target)
+    ) -> str:
+        mode = normalize_connection_mode(connection_mode)
+        connection = self.device_transfer.connect(mode, target)
         if not connection.get("connected"):
             raise RuntimeError(str(connection.get("message") or "Could not connect to the phone."))
-        self.connected_serial = target
+        selected_serial = str(connection.get("device_serial") or target or "").strip()
+        if not selected_serial:
+            raise RuntimeError("ADB connected but did not return a device serial.")
+        self.connected_serial = selected_serial
         if emit_event:
             self._emit_event(
                 "info",
                 "phone_connected",
-                "Phone connected: %s." % target,
-                device_serial=target,
+                "Phone connected: %s." % selected_serial,
+                device_serial=selected_serial,
             )
         if ensure_push_target:
             self.runner.run(
-                [self.config.adb_bin, "-s", target, "shell", "mkdir", "-p", DEFAULT_PUSH_TARGET],
+                [self.config.adb_bin, "-s", selected_serial, "shell", "mkdir", "-p", DEFAULT_PUSH_TARGET],
                 check=False,
             )
+        return selected_serial
 
     def _ui(self, target: str) -> UiAutomatorClient | None:
         if self._ui_automation is not None and self._ui_automation_serial == target:
@@ -2426,10 +2499,7 @@ class PhoneController:
                 process.stdin.close()
             process.wait(timeout=2)
         except Exception:
-            try:
-                process.terminate()
-            except Exception:
-                pass
+            terminate_process_tree(process, timeout=2)
 
     def _copy_image_to_clipboard(self, screenshot_path: Path) -> None:
         with self._clipboard_lock:
@@ -2458,19 +2528,23 @@ class PhoneController:
         self.process = None
         if process is None or process.poll() is not None:
             return
-        try:
-            process.terminate()
-            process.wait(timeout=3)
-        except Exception:
-            try:
-                process.kill()
-            except Exception:
-                pass
+        terminate_process_tree(process, timeout=3)
         monitor_thread = self._scrcpy_monitor_thread
         self._scrcpy_monitor_thread = None
         if monitor_thread is not None and monitor_thread is not threading.current_thread():
             monitor_thread.join(timeout=2)
         self._emit_event("info", "scrcpy_closed", "Phone control closed.")
+
+    def cleanup(self, *, stop_adb_server: bool = True) -> None:
+        """Release every phone-control resource owned by the application."""
+        try:
+            self.close()
+        finally:
+            try:
+                self.disconnect()
+            finally:
+                if stop_adb_server:
+                    self.runner.run([self.config.adb_bin, "kill-server"], check=False)
 
     def _start_media_watcher(self, device_serial: str) -> None:
         self._stop_media_watcher()
@@ -2488,10 +2562,7 @@ class PhoneController:
         event_process = self._media_event_process
         self._media_event_process = None
         if event_process is not None and event_process.poll() is None:
-            try:
-                event_process.terminate()
-            except Exception:
-                pass
+            terminate_process_tree(event_process, timeout=2)
         thread = self._media_watcher_thread
         self._media_watcher_thread = None
         if thread is not None and thread is not threading.current_thread():
@@ -2549,10 +2620,7 @@ class PhoneController:
             if self._media_event_process is process:
                 self._media_event_process = None
             if process.poll() is None:
-                try:
-                    process.terminate()
-                except Exception:
-                    pass
+                terminate_process_tree(process, timeout=2)
         return self._media_watcher_stop.is_set() or not self.is_running()
 
     @staticmethod

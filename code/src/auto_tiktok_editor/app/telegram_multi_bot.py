@@ -12,6 +12,7 @@ from threading import Thread
 import time
 from typing import Iterable, List, Optional, Tuple
 
+from auto_tiktok_editor.app.fashion_bot import FashionProductBotService
 from auto_tiktok_editor.app.telegram_bot import TelegramBotService
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
@@ -22,6 +23,7 @@ class TelegramBotRuntimeSpec:
     name: str
     bot_token: str
     chat_ids: Tuple[int, ...] = ()
+    bot_type: str = "video"
 
     @property
     def chat_id(self) -> Optional[int]:
@@ -43,15 +45,19 @@ def load_telegram_bot_specs(path: Path) -> List[TelegramBotRuntimeSpec]:
             raise ValueError("Bot #%s thieu bot_token." % index)
         chat_ids = _normalize_chat_ids(item)
         name = str(item.get("name") or ("bot_%03d" % index)).strip() or ("bot_%03d" % index)
+        bot_type = _normalize_bot_type(item.get("type") or item.get("mode") or "video")
         if token not in specs_by_token:
-            specs_by_token[token] = TelegramBotRuntimeSpec(name=name, bot_token=token)
+            specs_by_token[token] = TelegramBotRuntimeSpec(name=name, bot_token=token, bot_type=bot_type)
             chat_ids_by_token[token] = set()
+        elif specs_by_token[token].bot_type != bot_type:
+            raise ValueError("Một bot token không thể vừa là video bot vừa là Fashion bot.")
         chat_ids_by_token[token].update(chat_ids)
     specs = [
         TelegramBotRuntimeSpec(
             name=spec.name,
             bot_token=spec.bot_token,
             chat_ids=tuple(sorted(chat_ids_by_token.get(spec.bot_token) or ())),
+            bot_type=spec.bot_type,
         )
         for spec in specs_by_token.values()
     ]
@@ -76,13 +82,24 @@ def run_multi_telegram_bots(
     try:
         for index, spec in enumerate(specs, start=1):
             bot_config = _config_for_bot(config, spec, index, profile_manager=profile_manager)
-            service = TelegramBotService(config=bot_config, logger=logger, executor=executor)
+            if spec.bot_type == "fashion":
+                service = FashionProductBotService(
+                    config=bot_config,
+                    bot_token=spec.bot_token,
+                    allowed_chat_ids=spec.chat_ids,
+                    manager=profile_manager,
+                    logger=logger,
+                    executor=executor,
+                )
+            else:
+                service = TelegramBotService(config=bot_config, logger=logger, executor=executor)
             thread = _BotThread(service=service, name="telegram-bot-%s" % _safe_name(spec.name))
             services.append(service)
             threads.append(thread)
             thread.start()
             logger.info(
-                "Started Telegram bot '%s' mapped to profile '%s' with cut mode '%s'.",
+                "Started %s Telegram bot '%s' mapped to profile '%s' with cut mode '%s'.",
+                spec.bot_type,
                 spec.name,
                 bot_config.tiktok_profile_slug,
                 bot_config.video_cut_mode,
@@ -175,8 +192,15 @@ def _safe_name(value: str) -> str:
     return normalized or "bot"
 
 
+def _normalize_bot_type(value: object) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"video", "fashion"}:
+        return normalized
+    raise ValueError("type của bot phải là 'video' hoặc 'fashion'.")
+
+
 class _BotThread(Thread):
-    def __init__(self, service: TelegramBotService, name: str):
+    def __init__(self, service, name: str):
         super(_BotThread, self).__init__(target=self._run, name=name, daemon=True)
         self.service = service
         self.error = None

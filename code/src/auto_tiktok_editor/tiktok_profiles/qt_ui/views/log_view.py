@@ -420,3 +420,11 @@ class LogView(QWidget):
             InfoBar.success("Xuất file thành công", f"Đã lưu nhật ký vào: {file_path}", position=InfoBarPosition.TOP, parent=self.window())
         except Exception as exc:
             InfoBar.error("Lỗi xuất file", str(exc), position=InfoBarPosition.TOP, parent=self.window())
+
+    def shutdown(self) -> None:
+        if hasattr(self, "_sync_timer"):
+            self._sync_timer.stop()
+
+    def closeEvent(self, event) -> None:
+        self.shutdown()
+        super().closeEvent(event)

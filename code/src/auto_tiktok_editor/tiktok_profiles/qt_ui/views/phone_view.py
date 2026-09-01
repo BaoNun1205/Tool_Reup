@@ -108,6 +108,12 @@ class PhoneControlView(QWidget):
         conn_form = QFormLayout()
         conn_form.setSpacing(10)
 
+        self.connection_mode_combo = ComboBox(conn_card)
+        self.connection_mode_combo.addItem("Wi-Fi / IP (mặc định)", userData="wifi")
+        self.connection_mode_combo.addItem("USB", userData="usb")
+        self.connection_mode_combo.currentIndexChanged.connect(self._on_connection_mode_changed)
+        conn_form.addRow(BodyLabel("Chế độ kết nối:", conn_card), self.connection_mode_combo)
+
         addr_row = QHBoxLayout()
         addr_row.setSpacing(8)
 
@@ -251,6 +257,8 @@ class PhoneControlView(QWidget):
 
     def _load_settings_to_ui(self) -> None:
         s = self.phone_settings
+        mode_index = self.connection_mode_combo.findData(getattr(s, "connection_mode", "wifi"))
+        self.connection_mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
         raw_addr = str(s.address or "").strip()
         if ":" in raw_addr:
             parts = raw_addr.split(":", 1)
@@ -270,6 +278,17 @@ class PhoneControlView(QWidget):
 
         self.combo_fps.setCurrentText(f"{s.max_fps} FPS")
         self.combo_bitrate.setCurrentText(s.video_bit_rate.replace("M", " Mbps"))
+        self._on_connection_mode_changed(self.connection_mode_combo.currentIndex())
+
+    def _connection_mode(self) -> str:
+        return str(self.connection_mode_combo.currentData() or "wifi")
+
+    def _on_connection_mode_changed(self, _index: int) -> None:
+        is_wifi = self._connection_mode() == "wifi"
+        self.ip_edit.setEnabled(is_wifi)
+        self.port_edit.setEnabled(is_wifi)
+        if hasattr(self, "connect_btn"):
+            self.connect_btn.setText("Kết nối ADB qua Wi-Fi" if is_wifi else "Kết nối ADB qua USB")
 
     def _save_ui_settings(self) -> PhoneControlSettings:
         monitor_val = "secondary" if "phụ" in self.combo_monitor.currentText() else "main"
@@ -281,6 +300,7 @@ class PhoneControlView(QWidget):
 
         settings = PhoneControlSettings(
             address=self.get_adb_address(),
+            connection_mode=self._connection_mode(),
             keep_screen_awake=self.chk_keep_awake.isChecked(),
             turn_screen_off=self.chk_turn_off.isChecked(),
             always_on_top=self.chk_always_on_top.isChecked(),
@@ -306,13 +326,14 @@ class PhoneControlView(QWidget):
     def _on_connect_adb(self) -> None:
         settings = self._save_ui_settings()
         address = settings.address
-        if not address:
+        if settings.connection_mode == "wifi" and not address:
             InfoBar.warning("Thiếu địa chỉ", "Vui lòng nhập IP và Port của điện thoại!", parent=self.window())
             return
         try:
-            self.phone_controller.connect(address)
+            result = self.phone_controller.connect(address, connection_mode=settings.connection_mode)
+            connected_serial = str(result.get("address") or "")
             self.status_card.set_value("Đã kết nối ADB")
-            InfoBar.success("Thành công", f"Đã kết nối tới {address}", parent=self.window())
+            InfoBar.success("Thành công", f"Đã kết nối tới {connected_serial}", parent=self.window())
         except Exception as exc:
             self.status_card.set_value("Lỗi kết nối")
             InfoBar.error("Lỗi kết nối ADB", str(exc), parent=self.window())
@@ -330,11 +351,11 @@ class PhoneControlView(QWidget):
             devices = self.phone_controller.list_devices()
             if devices:
                 dev = devices[0]
-                if ":" in dev:
+                if self._connection_mode() == "wifi" and ":" in dev:
                     parts = dev.split(":", 1)
                     self.ip_edit.setText(parts[0].strip())
                     self.port_edit.setText(parts[1].strip())
-                else:
+                elif self._connection_mode() == "wifi":
                     self.ip_edit.setText(dev)
                 InfoBar.success("Tìm thấy thiết bị", f"Đã phát hiện: {', '.join(devices)}", parent=self.window())
             else:
@@ -399,10 +420,19 @@ class PhoneControlView(QWidget):
             self.status_card.set_theme_mode(clean)
 
     def closeEvent(self, event) -> None:
+        self.shutdown()
+        super().closeEvent(event)
+
+    def shutdown(self) -> None:
         try:
             self.screenshot_hotkey.stop()
+        except Exception:
+            pass
+        try:
             self.close_hotkey.stop()
+        except Exception:
+            pass
+        try:
             self.phone_controller.cleanup()
         except Exception:
             pass
-        super().closeEvent(event)

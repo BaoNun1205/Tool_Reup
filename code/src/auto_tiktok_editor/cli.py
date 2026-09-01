@@ -7,8 +7,13 @@ import logging
 import sys
 from pathlib import Path
 
-from auto_tiktok_editor.config import PipelineConfig
+from auto_tiktok_editor.config import PROJECT_ROOT, PipelineConfig
 from auto_tiktok_editor.runtime import ensure_local_telegram_allowed
+from auto_tiktok_editor.utils.single_instance import (
+    activate_existing_profile_manager_window,
+    profile_manager_runtime_guard,
+    telegram_runtime_guard,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -18,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("profile-manager", help="Launch the TikTok Profile Manager UI")
     subparsers.add_parser("telegram-bot", help="Run the Telegram bot worker")
+    subparsers.add_parser("fashion-bot", help="Run the dedicated Fashion product-link Telegram bot")
     multi_bot_parser = subparsers.add_parser("telegram-bots", help="Run multiple Telegram bot workers")
     multi_bot_parser.add_argument(
         "--bots-file",
@@ -42,21 +48,27 @@ def main(argv=None) -> int:
     config = PipelineConfig.from_env()
 
     if args.command in (None, "profile-manager"):
-        from auto_tiktok_editor.tiktok_profiles.qt_ui.app import launch_app
-
-        return launch_app(config=config)
+        return _run_exclusive_profile_manager(config)
     if args.command == "telegram-bot":
         from auto_tiktok_editor.app.telegram_bot import TelegramBotService
 
         _ensure_local_telegram_policy(config, "telegram-bot")
-        service = TelegramBotService(config=config)
-        service.serve_forever()
-        return 0
+        return _run_exclusive_telegram_runtime(
+            lambda: TelegramBotService(config=config).serve_forever()
+        )
+    if args.command == "fashion-bot":
+        from auto_tiktok_editor.app.fashion_bot import FashionProductBotService
+
+        return _run_exclusive_telegram_runtime(
+            lambda: FashionProductBotService(config=config).serve_forever()
+        )
     if args.command == "telegram-bots":
         from auto_tiktok_editor.app.telegram_multi_bot import load_telegram_bot_specs, run_multi_telegram_bots
 
         specs = load_telegram_bot_specs(Path(args.bots_file))
-        return run_multi_telegram_bots(specs, base_config=config)
+        return _run_exclusive_telegram_runtime(
+            lambda: run_multi_telegram_bots(specs, base_config=config)
+        )
     parser.error("Unknown command.")
     return 2
 
@@ -67,6 +79,33 @@ def _ensure_local_telegram_policy(config: PipelineConfig, surface: str) -> None:
     except RuntimeError as exc:
         print(str(exc))
         raise SystemExit(1)
+
+
+def _run_exclusive_telegram_runtime(run_callable) -> int:
+    """Run exactly one Telegram polling runtime for this installation."""
+    guard = telegram_runtime_guard(PROJECT_ROOT)
+    if not guard.acquire():
+        print("Telegram bot da dang chay trong mot tien trinh khac; khong khoi dong ban sao thu hai.")
+        return 3
+    try:
+        result = run_callable()
+        return int(result or 0)
+    finally:
+        guard.release()
+
+
+def _run_exclusive_profile_manager(config: PipelineConfig) -> int:
+    """Keep one GUI instance and focus it when the shortcut is clicked again."""
+    guard = profile_manager_runtime_guard(PROJECT_ROOT)
+    if not guard.acquire():
+        activate_existing_profile_manager_window(wait_seconds=2.0)
+        return 0
+    try:
+        from auto_tiktok_editor.tiktok_profiles.qt_ui.app import launch_app
+
+        return launch_app(config=config)
+    finally:
+        guard.release()
 
 
 if __name__ == "__main__":

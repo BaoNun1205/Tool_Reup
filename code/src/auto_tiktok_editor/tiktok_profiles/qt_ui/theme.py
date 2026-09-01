@@ -30,6 +30,7 @@ VIDEO_CUT_MODE_LABELS = {
     "fixed": "Cắt cố định",
     "scene": "Cắt theo đổi cảnh",
     "original": "Giữ nguyên video gốc",
+    "remove_background": "Xóa nền & ghép ảnh sản phẩm",
 }
 VIDEO_CUT_MODE_VALUES = {label: value for value, label in VIDEO_CUT_MODE_LABELS.items()}
 
@@ -140,6 +141,7 @@ DARK_INFO = "#60A5FA"
 # Status Definitions
 VIDEO_STATUS_LABELS = {
     "ready": "● Sẵn sàng",
+    "sent": "● Đã gửi",
     "prepared": "● Đã chuẩn bị",
     "published": "● Đã đăng",
     "rendering": "● Đang tạo",
@@ -154,6 +156,7 @@ VIDEO_STATUS_LABELS = {
 
 VIDEO_STATUS_COLORS_LIGHT = {
     "ready": "#16A36A",       # Success
+    "sent": "#16A36A",        # Success
     "prepared": "#16A36A",    # Success
     "published": "#16A36A",   # Success
     "rendering": "#3B82F6",   # Info
@@ -168,6 +171,7 @@ VIDEO_STATUS_COLORS_LIGHT = {
 
 VIDEO_STATUS_COLORS_DARK = {
     "ready": "#32C985",       # Success
+    "sent": "#32C985",        # Success
     "prepared": "#32C985",    # Success
     "published": "#32C985",   # Success
     "rendering": "#60A5FA",   # Info
@@ -191,6 +195,18 @@ def format_video_status(status: str, mode: str | None = None) -> tuple[str, str]
         if key in raw:
             return label, colors.get(key, fallback_color)
     return f"● {raw.capitalize()}", fallback_color
+
+
+def format_fashion_product_status(status: str, mode: str | None = None) -> tuple[str, str]:
+    """Format the smaller Fashion product lifecycle with the shared status palette."""
+    raw = str(status or "processing").strip().lower()
+    aliases = {
+        "processing": "rendering",
+        "ready": "ready",
+        "sent": "sent",
+        "error": "error",
+    }
+    return format_video_status(aliases.get(raw, raw), mode=mode)
 
 
 ACCOUNT_STATUS_LABELS = {
@@ -238,7 +254,11 @@ FluentWindow {
     background-color: #F6F7FB;
 }
 
-#dashboardInterface, #accountsInterface, #sourcesInterface, #videosInterface, #phoneInterface, #telegramInterface, #logsInterface, #settingsInterface {
+#dashboardInterface, #accountsInterface, #sourcesInterface, #videosInterface, #fashionInterface, #phoneInterface, #telegramInterface, #logsInterface, #settingsInterface {
+    background-color: #F6F7FB;
+}
+
+#fashionScrollArea, #fashionScrollViewport, #fashionScrollContent {
     background-color: #F6F7FB;
 }
 
@@ -394,7 +414,11 @@ FluentWindow {
     background-color: #11131A;
 }
 
-#dashboardInterface, #accountsInterface, #sourcesInterface, #videosInterface, #phoneInterface, #telegramInterface, #logsInterface, #settingsInterface {
+#dashboardInterface, #accountsInterface, #sourcesInterface, #videosInterface, #fashionInterface, #phoneInterface, #telegramInterface, #logsInterface, #settingsInterface {
+    background-color: #11131A;
+}
+
+#fashionScrollArea, #fashionScrollViewport, #fashionScrollContent {
     background-color: #11131A;
 }
 

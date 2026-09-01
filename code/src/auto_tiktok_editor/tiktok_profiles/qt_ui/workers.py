@@ -11,6 +11,8 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QRunnable, QThread, QThreadPool, Signal, Slot
 
+from auto_tiktok_editor.utils.processes import terminate_process_tree
+
 
 class LogBridgeSignals(QObject):
     log_record = Signal(str, str, str)  # timestamp, level, message
@@ -64,6 +66,17 @@ class WorkerThread(QThread):
             tb = traceback.format_exc()
             self.error_task.emit(exc, tb)
 
+    def stop(self, timeout_ms: int = 2000) -> bool:
+        """Request shutdown and use QThread termination only as an exit fallback."""
+        if not self.isRunning():
+            return True
+        self.requestInterruption()
+        self.quit()
+        if self.wait(max(0, int(timeout_ms))):
+            return True
+        self.terminate()
+        return self.wait(1000)
+
 
 class PhoneEventBridge(QObject):
     """Bridge for PhoneController event callbacks to Qt Signals."""
@@ -101,15 +114,7 @@ class TelegramBotMonitorThread(QThread):
 
     def stop(self) -> None:
         self._running = False
-        if self.process and self.process.poll() is None:
-            try:
-                self.process.terminate()
-                self.process.wait(timeout=3)
-            except Exception:
-                try:
-                    self.process.kill()
-                except Exception:
-                    pass
+        terminate_process_tree(self.process, timeout=3)
         self.wait(2000)
 
 
@@ -185,6 +190,16 @@ class BrowserWorkerThread(QThread):
 
     def stop(self) -> None:
         self._running = False
+        # Discard work that has not started.  The sentinel is then the next
+        # queue item observed when the current browser operation returns.
+        while True:
+            try:
+                self.task_queue.get_nowait()
+            except queue.Empty:
+                break
         self.task_queue.put(None)
-        self.wait(3000)
-
+        if self.wait(5000):
+            return
+        self.requestInterruption()
+        self.terminate()
+        self.wait(1000)

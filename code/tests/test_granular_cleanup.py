@@ -5,6 +5,7 @@ import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 from auto_tiktok_editor.app.media_cleanup import (
     CleanupItemInfo,
@@ -110,6 +111,53 @@ class GranularCleanupTestCase(unittest.TestCase):
         msg = format_granular_cleanup_report(report)
         self.assertTrue(len(msg) > 0)
         self.assertIn("Đã xóa", msg)
+
+    def test_cleanup_final_output_videos_keeps_images_links_and_records(self) -> None:
+        session_dir = self.output_root / "session_001"
+        session_dir.mkdir(parents=True, exist_ok=True)
+        session_final = session_dir / "final_video.mp4"
+        session_final.write_text("final output", encoding="utf-8")
+        rough_cut = session_dir / "rough_cut.mp4"
+        rough_cut.write_text("render artifact", encoding="utf-8")
+        product_image = session_dir / "product_image.jpg"
+        product_image.write_text("product image", encoding="utf-8")
+        source_link = session_dir / "source_link.txt"
+        source_link.write_text("https://example.com/video", encoding="utf-8")
+
+        queue_final = self.queue_dir / "acc1" / "20260828_120000_final_video.mp4"
+        queue_final.parent.mkdir(parents=True, exist_ok=True)
+        queue_final.write_text("queued final output", encoding="utf-8")
+        video_record = SimpleNamespace(id=101)
+
+        class FakeManager:
+            def list_videos(self):
+                return [video_record]
+
+            def resolve_video_path(self, video):
+                if video.id != 101:
+                    raise AssertionError("Unexpected video record")
+                return queue_final
+
+        manager = FakeManager()
+        items = scan_cleanup_items(self.config, self.base_dir, manager=manager)
+        lightweight_item = next(item for item in items if item.key == "output_video_files_only")
+        self.assertEqual(lightweight_item.file_count, 2)
+        self.assertEqual(lightweight_item.size_bytes, session_final.stat().st_size + queue_final.stat().st_size)
+
+        report = execute_granular_cleanup(
+            selected_keys=["output_video_files_only"],
+            config=self.config,
+            project_root=self.base_dir,
+            manager=manager,
+        )
+
+        self.assertFalse(session_final.exists())
+        self.assertFalse(queue_final.exists())
+        self.assertTrue(product_image.exists(), "Product image must be retained for re-rendering")
+        self.assertTrue(source_link.exists(), "Source link must be retained for re-rendering")
+        self.assertTrue(rough_cut.exists(), "Only final output videos may be removed")
+        self.assertEqual(report.stale_videos_removed, 0, "Video records must not be deleted")
+        self.assertIn("output_video_files_only", report.deleted_items)
 
 
 if __name__ == "__main__":
