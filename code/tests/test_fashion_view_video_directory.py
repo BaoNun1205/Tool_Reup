@@ -59,6 +59,7 @@ class FashionVideoDirectoryTests(unittest.TestCase):
         self.assertEqual(choose_file.call_args.args[2], temp_dir)
         self.assertEqual(view._video_file_path, video_path)
         view.video_file_label.setText.assert_called_once_with("video.mp4")
+        view.video_file_label.setToolTip.assert_called_once_with(str(video_path))
         view.send_video_button.setEnabled.assert_called_once_with(True)
 
     def test_choose_directory_updates_the_field_and_saves_it(self):

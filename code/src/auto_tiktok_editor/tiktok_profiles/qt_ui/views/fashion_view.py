@@ -274,6 +274,7 @@ class FashionView(QWidget):
         self.products_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.products_table.setAlternatingRowColors(True)
         self.products_table.setShowGrid(False)
+        self.products_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.products_table.verticalHeader().setDefaultSectionSize(82)
         self.products_table.cellClicked.connect(self._on_fashion_product_cell_clicked)
         self.products_table.cellDoubleClicked.connect(self._on_fashion_product_double_clicked)
@@ -363,7 +364,7 @@ class FashionView(QWidget):
         self._on_garment_changed(self.garment_combo.currentIndex())
         main_layout.addWidget(preset_card)
 
-        transfer_card = CardWidget(self)
+        transfer_card = self.video_transfer_card = CardWidget(products_tab)
         transfer_layout = QVBoxLayout(transfer_card)
         transfer_layout.setContentsMargins(18, 14, 18, 14)
         transfer_layout.setSpacing(8)
@@ -390,6 +391,13 @@ class FashionView(QWidget):
         )
         self.choose_video_directory_button.clicked.connect(self._choose_video_directory)
         video_picker_row.addWidget(self.choose_video_directory_button)
+
+        self.video_file_label = BodyLabel("Chưa chọn video", transfer_card)
+        self.video_file_label.setWordWrap(False)
+        self.video_file_label.setMinimumWidth(130)
+        self.video_file_label.setMaximumWidth(240)
+        video_picker_row.addWidget(self.video_file_label)
+
         self.choose_video_button = PrimaryPushButton("Chọn video", transfer_card, FIF.VIDEO)
         self.choose_video_button.clicked.connect(self._choose_video_file)
         video_picker_row.addWidget(self.choose_video_button)
@@ -398,19 +406,18 @@ class FashionView(QWidget):
         self.send_video_button.clicked.connect(self._send_video_to_phone)
         video_picker_row.addWidget(self.send_video_button)
         transfer_layout.addLayout(video_picker_row)
-
-        self.video_file_label = BodyLabel("Chưa chọn video", transfer_card)
-        self.video_file_label.setWordWrap(True)
-        transfer_layout.addWidget(self.video_file_label)
-        main_layout.addWidget(transfer_card)
+        products_tab_layout.addWidget(transfer_card, 0)
 
         main_layout.addStretch(1)
 
         self.scroll_area.setWidget(content)
         self.fashion_tabs.addTab(products_tab, "Sản phẩm")
-        self.fashion_tabs.setTabToolTip(0, "Danh sách sản phẩm và mô tả do bot Fashion tạo")
+        self.fashion_tabs.setTabToolTip(
+            0,
+            "Danh sách sản phẩm, mô tả và gửi video sang điện thoại",
+        )
         self.fashion_tabs.addTab(self.scroll_area, "Prompt video")
-        self.fashion_tabs.setTabToolTip(1, "Quản lý prompt Fashion và chuyển video sang điện thoại")
+        self.fashion_tabs.setTabToolTip(1, "Quản lý prompt Fashion")
         outer_layout.addWidget(self.fashion_tabs)
         self._fashion_sync_timer = QTimer(self)
         self._fashion_sync_timer.timeout.connect(self.refresh_fashion_products)
@@ -783,6 +790,7 @@ class FashionView(QWidget):
             return
         self._video_file_path = Path(file_name)
         self.video_file_label.setText(self._video_file_path.name)
+        self.video_file_label.setToolTip(str(self._video_file_path))
         self.send_video_button.setEnabled(True)
 
     def _send_video_to_phone(self) -> None:
