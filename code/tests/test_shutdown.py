@@ -89,6 +89,7 @@ class AppShutdownTests(unittest.TestCase):
             telegram_view=telegram,
             phone_view=mock.Mock(),
             videos_view=mock.Mock(),
+            facebook_view=mock.Mock(),
             fashion_view=mock.Mock(),
             dashboard_view=mock.Mock(),
             logs_view=mock.Mock(),
@@ -104,6 +105,7 @@ class AppShutdownTests(unittest.TestCase):
 
         telegram.shutdown.assert_called_once_with()
         fake_app.phone_view.shutdown.assert_called_once_with()
+        fake_app.facebook_view.shutdown.assert_called_once_with()
         fake_app.browser_worker.stop.assert_called_once_with()
         terminate_children.assert_called_once_with()
 

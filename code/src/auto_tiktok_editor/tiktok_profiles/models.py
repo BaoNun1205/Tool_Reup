@@ -28,6 +28,12 @@ FASHION_PRODUCT_STATUSES = (
     "sent",
     "error",
 )
+FACEBOOK_VIDEO_STATUSES = (
+    "processing",
+    "ready",
+    "sent",
+    "error",
+)
 PUBLISH_MODES = ("now", "scheduled")
 VIDEO_CUT_MODES = ("fixed", "scene", "original", "remove_background")
 
@@ -90,11 +96,31 @@ class FashionProduct:
     product_url: str
     product_id: str
     product_name: str
+    category: str
     image_path: str
     description: str
     caption: str
     hashtags: str
     video_path: str
+    status: str
+    note: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True)
+class FacebookVideo:
+    """An independent video snapshot queued for the Facebook workflow."""
+
+    id: int
+    source_video_id: int
+    source_account_id: int | None
+    file_path: str
+    caption: str
+    hashtags: str
+    product_url: str
+    source_product_name: str
+    display_product_name: str
     status: str
     note: str
     created_at: str

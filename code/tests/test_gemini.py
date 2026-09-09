@@ -14,6 +14,7 @@ if str(SRC) not in sys.path:
 from auto_tiktok_editor.app.gemini import (
     GeminiRequestError,
     chat_with_gemini,
+    classify_fashion_products,
     describe_fashion_image,
     write_fashion_product_copy,
 )
@@ -102,6 +103,7 @@ class GeminiImageDescriptionTests(unittest.TestCase):
                                             {
                                                 "caption": "Áo thun Boxy này mặc lên cực chất.",
                                                 "hashtags": ["thoitrang", "aothun", "boxy", "outfit", "tiktokshop"],
+                                                "category": "Áo Thun",
                                             }
                                         )
                                     }
@@ -117,6 +119,7 @@ class GeminiImageDescriptionTests(unittest.TestCase):
         self.assertEqual(result.caption, "Áo thun Boxy này mặc lên cực chất.")
         self.assertEqual(len(result.hashtags), 5)
         self.assertEqual(result.hashtags[0], "#thoitrang")
+        self.assertEqual(result.category, "Áo Thun")
 
     def test_fashion_caption_instruction_omits_product_name_and_limits_length(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -133,6 +136,7 @@ class GeminiImageDescriptionTests(unittest.TestCase):
                                             {
                                                 "caption": "Phoi do nhanh, mac ca ngay van on.",
                                                 "hashtags": ["thoitrang", "outfit", "phoidodep", "tiktokshop", "dailylook"],
+                                                "category": "Áo Thun",
                                             }
                                         )
                                     }
@@ -153,6 +157,37 @@ class GeminiImageDescriptionTests(unittest.TestCase):
         self.assertNotIn("Boxy Tee", instruction)
         self.assertIn("describe only the specific product", instruction)
         self.assertIn("#xuhuong, #fyp, #viral", instruction)
+        self.assertIn("Áo Thun, Áo Sơ Mi, Áo Khoác, Quần Jean, Quần Short", instruction)
+
+    def test_classifies_existing_fashion_products_into_canonical_categories(self):
+        response = _FakeResponse(
+            {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": json.dumps(
+                                        [
+                                            {"id": 7, "category": "áo sơ mi"},
+                                            {"id": 8, "category": "Quần Jeans"},
+                                        ],
+                                        ensure_ascii=False,
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        )
+        with mock.patch("auto_tiktok_editor.app.gemini.urlopen", return_value=response):
+            result = classify_fashion_products(
+                [(7, "Sơ mi trắng", "Mặc đi làm"), (8, "Quần jeans xanh", "Dáng rộng")],
+                "test-key",
+            )
+
+        self.assertEqual(result, {7: "Áo Sơ Mi", 8: "Quần Jean"})
 
     def test_t_shirt_preset_contains_both_requested_scenes(self):
         self.assertEqual(len(FASHION_PROMPT_PRESETS), 1)

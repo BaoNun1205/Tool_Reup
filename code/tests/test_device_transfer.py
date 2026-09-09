@@ -51,6 +51,46 @@ class AndroidDeviceTransferTests(unittest.TestCase):
         self.assertEqual(runner.commands[1], ["adb", "connect", "192.168.1.20:5555"])
         self.assertEqual(runner.commands[2], ["adb", "devices"])
 
+    def test_usb_mode_selects_usb_when_wifi_device_is_also_connected(self):
+        runner = RecordingRunner(
+            [
+                CompletedProcessStub(stdout="* daemon started successfully *\n"),
+                CompletedProcessStub(
+                    stdout=(
+                        "List of devices attached\n"
+                        "192.168.1.20:5555\tdevice\n"
+                        "R58N123USB\tdevice\n"
+                    )
+                ),
+            ]
+        )
+        transfer = AndroidDeviceTransfer(
+            PipelineConfig(adb_bin="adb", android_device_serial="192.168.1.20:5555"),
+            runner,
+        )
+
+        result = transfer.connect("usb")
+
+        self.assertTrue(result["connected"])
+        self.assertEqual(result["device_serial"], "R58N123USB")
+
+    def test_usb_mode_does_not_fall_back_to_wifi_device(self):
+        runner = RecordingRunner(
+            [
+                CompletedProcessStub(stdout="* daemon started successfully *\n"),
+                CompletedProcessStub(
+                    stdout="List of devices attached\n192.168.1.20:5555\tdevice\n"
+                ),
+            ]
+        )
+        transfer = AndroidDeviceTransfer(PipelineConfig(adb_bin="adb"), runner)
+
+        result = transfer.connect("usb")
+
+        self.assertFalse(result["connected"])
+        self.assertIsNone(result["device_serial"])
+        self.assertIn("USB", result["message"])
+
     def test_pushes_titles_and_videos_in_order_without_overwrite(self):
         temp_dir = tempfile.TemporaryDirectory()
         try:

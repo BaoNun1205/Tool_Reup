@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from auto_tiktok_editor.app.gemini import write_fashion_product_copy
+from auto_tiktok_editor.app.gemini import classify_fashion_products, write_fashion_product_copy
 from auto_tiktok_editor.app.tiktok_shop import (
     TikTokShopProduct,
     download_tiktok_shop_product_image,
@@ -52,9 +52,33 @@ def generate_fashion_product_description(
         caption=generated.caption,
         hashtags=" ".join(generated.hashtags),
         description=generated.description,
+        category=generated.category,
         status="ready",
         note="",
     )
+
+
+def reclassify_existing_fashion_products(manager: TikTokProfileManager) -> dict[str, object]:
+    """Ask Gemini to classify every saved Fashion product and persist the results."""
+    products = manager.list_fashion_products()
+    if not products:
+        return {"updated": 0, "categories": {}}
+    categories = classify_fashion_products(
+        [
+            (product.id, product.product_name, product.description)
+            for product in products
+        ],
+        api_key=get_gemini_api_key(),
+        model=get_gemini_model(DEFAULT_GEMINI_MODEL),
+    )
+    for product in products:
+        manager.update_fashion_product_category(product.id, categories[product.id])
+    manager.add_log(
+        "info",
+        "fashion_products_reclassified",
+        "Đã dùng Gemini phân loại lại %s sản phẩm Fashion." % len(products),
+    )
+    return {"updated": len(products), "categories": categories}
 
 
 def receive_and_generate_fashion_product(manager: TikTokProfileManager, product_url: str) -> FashionProduct:

@@ -20,6 +20,7 @@ def _product(*, image_path: str = "image.jpg") -> SimpleNamespace:
         id=1,
         created_at=datetime(2026, 1, 1, 8, 30),
         product_name="Product",
+        category="Áo Thun",
         description="Description",
         product_url="https://example.com/product",
         status="ready",
@@ -61,7 +62,7 @@ class FashionProductRefreshTests(unittest.TestCase):
             mock.call(0, 0, mock.ANY),
             table.setCellWidget.call_args_list,
         )
-        table.setCellWidget.assert_any_call(0, 6, action_widget)
+        table.setCellWidget.assert_any_call(0, 7, action_widget)
 
     def test_refresh_replaces_the_image_widget_when_its_path_changes(self):
         view, table, _action_widget = self._view(

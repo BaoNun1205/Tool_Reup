@@ -37,12 +37,19 @@ from qfluentwidgets import (
     PrimaryPushButton,
     PushButton,
     SubtitleLabel,
-    TableWidget,
     ToolButton,
 )
+from qfluentwidgets.common.smooth_scroll import SmoothMode
 
-from auto_tiktok_editor.app.fashion_products import generate_fashion_product_description
+from auto_tiktok_editor.app.fashion_products import (
+    generate_fashion_product_description,
+    reclassify_existing_fashion_products,
+)
 from auto_tiktok_editor.config import PipelineConfig
+from auto_tiktok_editor.fashion_categories import (
+    FASHION_PRODUCT_CATEGORIES,
+    UNCATEGORIZED_FASHION_PRODUCT,
+)
 from auto_tiktok_editor.fashion_prompt_settings import (
     add_garment_preset,
     load_change_outfit_prompt,
@@ -67,6 +74,7 @@ from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import (
     format_vietnam_datetime,
 )
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
+from auto_tiktok_editor.tiktok_profiles.qt_ui.components.empty_state_table import EmptyStateTableWidget
 from auto_tiktok_editor.tiktok_profiles.qt_ui.workers import WorkerThread
 
 
@@ -174,6 +182,10 @@ class FashionProductDetailsDialog(MessageBoxBase):
         description_label.setWordWrap(True)
         product_id_label = BodyLabel(product.product_id or "-", self)
         form.addRow(BodyLabel("Tên sản phẩm:", self), name_label)
+        form.addRow(
+            BodyLabel("Danh mục:", self),
+            BodyLabel(getattr(product, "category", "") or UNCATEGORIZED_FASHION_PRODUCT, self),
+        )
         form.addRow(BodyLabel("Mô tả:", self), description_label)
         form.addRow(BodyLabel("Product ID:", self), product_id_label)
         self.viewLayout.addLayout(form)
@@ -250,12 +262,45 @@ class FashionView(QWidget):
         )
         products_desc.setWordWrap(True)
         products_layout.addWidget(products_desc)
-        self.products_table = TableWidget(products_card)
-        self.products_table.setColumnCount(7)
+        category_toolbar = QHBoxLayout()
+        category_toolbar.setSpacing(8)
+        category_toolbar.addWidget(BodyLabel("Danh mục:", products_card))
+        self.category_filter_combo = ComboBox(products_card)
+        self.category_filter_combo.setFixedWidth(180)
+        self.category_filter_combo.addItem("Tất cả danh mục", userData=None)
+        for category in FASHION_PRODUCT_CATEGORIES:
+            self.category_filter_combo.addItem(category, userData=category)
+        self.category_filter_combo.addItem(
+            UNCATEGORIZED_FASHION_PRODUCT,
+            userData="",
+        )
+        self.category_filter_combo.currentIndexChanged.connect(
+            lambda _index: self.refresh_fashion_products(force=True)
+        )
+        category_toolbar.addWidget(self.category_filter_combo)
+        category_toolbar.addStretch(1)
+        self.reclassify_products_button = PushButton(
+            "Phân loại lại bằng Gemini",
+            products_card,
+            FIF.SYNC,
+        )
+        self.reclassify_products_button.clicked.connect(
+            self._reclassify_all_fashion_products
+        )
+        category_toolbar.addWidget(self.reclassify_products_button)
+        products_layout.addLayout(category_toolbar)
+
+        self.products_table = EmptyStateTableWidget(
+            products_card,
+            empty_text="Chưa có sản phẩm Fashion nào.",
+            empty_icon=FIF.SHOPPING_CART,
+        )
+        self.products_table.setColumnCount(8)
         self.products_table.setHorizontalHeaderLabels([
             "Image",
             "Ngày tạo",
             "Tên sản phẩm",
+            "Danh mục",
             "Mô tả",
             "Link sản phẩm",
             "Trạng thái",
@@ -263,18 +308,29 @@ class FashionView(QWidget):
         ])
         self.products_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         self.products_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        self.products_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.products_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
         self.products_table.setColumnWidth(0, 100)
         self.products_table.setColumnWidth(1, 150)
-        self.products_table.setColumnWidth(4, 240)
-        self.products_table.setColumnWidth(5, 120)
-        self.products_table.setColumnWidth(6, 140)
+        self.products_table.setColumnWidth(3, 115)
+        self.products_table.setColumnWidth(5, 240)
+        self.products_table.setColumnWidth(6, 120)
+        self.products_table.setColumnWidth(7, 140)
         self.products_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.products_table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.products_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.products_table.setAlternatingRowColors(True)
         self.products_table.setShowGrid(False)
         self.products_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        if hasattr(self.products_table, "scrollDelagate") and hasattr(
+            self.products_table.scrollDelagate, "verticalSmoothScroll"
+        ):
+            self.products_table.scrollDelagate.verticalSmoothScroll.setSmoothMode(
+                SmoothMode.NO_SMOOTH
+            )
+        self.products_table.setVerticalScrollMode(
+            QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self.products_table.verticalScrollBar().setSingleStep(12)
         self.products_table.verticalHeader().setDefaultSectionSize(82)
         self.products_table.cellClicked.connect(self._on_fashion_product_cell_clicked)
         self.products_table.cellDoubleClicked.connect(self._on_fashion_product_double_clicked)
@@ -420,19 +476,56 @@ class FashionView(QWidget):
         self.fashion_tabs.setTabToolTip(1, "Quản lý prompt Fashion")
         outer_layout.addWidget(self.fashion_tabs)
         self._fashion_sync_timer = QTimer(self)
+        self._fashion_sync_timer.setInterval(3000)
         self._fashion_sync_timer.timeout.connect(self.refresh_fashion_products)
-        self._fashion_sync_timer.start(3000)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
         self.refresh_fashion_products()
+        if not self._fashion_sync_timer.isActive():
+            self._fashion_sync_timer.start()
+
+    def hideEvent(self, event) -> None:
+        self._fashion_sync_timer.stop()
+        super().hideEvent(event)
 
     def refresh_fashion_products(self, force: bool = False) -> None:
         try:
             products = self.manager.list_fashion_products()
         except Exception:
             return
+        category_filter = None
+        category_combo = getattr(self, "category_filter_combo", None)
+        if category_combo is not None:
+            category_filter = category_combo.currentData()
+            if category_filter == "":
+                products = [
+                    product for product in products
+                    if not str(getattr(product, "category", "") or "").strip()
+                ]
+                self.products_table.setEmptyStateText(
+                    "Không có sản phẩm nào chưa được phân loại."
+                )
+                self.products_table.setEmptyStateIcon(FIF.FILTER)
+            elif category_filter:
+                products = [
+                    product for product in products
+                    if getattr(product, "category", "") == category_filter
+                ]
+                self.products_table.setEmptyStateText(
+                    "Không có sản phẩm trong danh mục %s." % category_filter
+                )
+                self.products_table.setEmptyStateIcon(FIF.FILTER)
+            else:
+                self.products_table.setEmptyStateText(
+                    "Chưa có sản phẩm Fashion nào."
+                )
+                self.products_table.setEmptyStateIcon(FIF.SHOPPING_CART)
         signature = tuple(
             (
                 product.id,
                 product.product_name,
+                getattr(product, "category", ""),
                 product.description,
                 product.product_id,
                 product.status,
@@ -441,6 +534,7 @@ class FashionView(QWidget):
             )
             for product in products
         )
+        signature = (category_filter, signature)
         if not force and signature == self._fashion_products_signature:
             return
         self._fashion_products_signature = signature
@@ -457,12 +551,24 @@ class FashionView(QWidget):
             if existing_product is not None and existing_widget is not None:
                 reusable_image_widgets[row] = (existing_product, existing_widget)
 
+        self.products_table.setUpdatesEnabled(False)
+        for row in range(self.products_table.rowCount()):
+            widget = self.products_table.cellWidget(row, 7)
+            if widget is not None:
+                self.products_table.removeCellWidget(row, 7)
+                if hasattr(widget, "hide"):
+                    widget.hide()
+                if hasattr(widget, "deleteLater"):
+                    widget.deleteLater()
         self.products_table.setRowCount(len(products))
         for row, product in enumerate(products):
             created_item = QTableWidgetItem(format_vietnam_datetime(product.created_at))
             created_item.setData(Qt.ItemDataRole.UserRole, product)
             name_item = QTableWidgetItem(product.product_name)
             name_item.setToolTip(product.product_name)
+            category_item = QTableWidgetItem(
+                getattr(product, "category", "") or UNCATEGORIZED_FASHION_PRODUCT
+            )
             description_item = QTableWidgetItem(product.description)
             description_item.setToolTip(product.description)
             product_link_item = QTableWidgetItem(product.product_url)
@@ -482,10 +588,13 @@ class FashionView(QWidget):
                 self.products_table.setCellWidget(row, 0, self._fashion_image_widget(product))
             self.products_table.setItem(row, 1, created_item)
             self.products_table.setItem(row, 2, name_item)
-            self.products_table.setItem(row, 3, description_item)
-            self.products_table.setItem(row, 4, product_link_item)
-            self.products_table.setItem(row, 5, status_item)
-            self.products_table.setCellWidget(row, 6, self._fashion_action_widget(product))
+            self.products_table.setItem(row, 3, category_item)
+            self.products_table.setItem(row, 4, description_item)
+            self.products_table.setItem(row, 5, product_link_item)
+            self.products_table.setItem(row, 6, status_item)
+            self.products_table.setCellWidget(row, 7, self._fashion_action_widget(product))
+        self.products_table.setUpdatesEnabled(True)
+        self.products_table.viewport().update()
 
     @staticmethod
     def _can_reuse_fashion_image_widget(
@@ -619,6 +728,112 @@ class FashionView(QWidget):
         thread.error_task.connect(_error)
         thread.start()
 
+    def _reclassify_all_fashion_products(self) -> None:
+        products = self.manager.list_fashion_products()
+        if not products:
+            InfoBar.info(
+                "Không có sản phẩm",
+                "Danh sách Fashion hiện đang trống.",
+                parent=self.window(),
+            )
+            return
+        if any(product.id in self._fashion_job_ids_in_progress for product in products):
+            InfoBar.warning(
+                "Đang xử lý",
+                "Hãy chờ các tác vụ Fashion hiện tại hoàn thành.",
+                parent=self.window(),
+            )
+            return
+
+        product_ids = {product.id for product in products}
+        self._fashion_job_ids_in_progress.update(product_ids)
+        self.reclassify_products_button.setEnabled(False)
+        self.refresh_fashion_products(force=True)
+
+        thread = WorkerThread(
+            lambda: reclassify_existing_fashion_products(self.manager),
+            parent=self,
+        )
+        self._fashion_job_workers.append(thread)
+
+        def _finish() -> None:
+            self._fashion_job_ids_in_progress.difference_update(product_ids)
+            self.reclassify_products_button.setEnabled(True)
+            if thread in self._fashion_job_workers:
+                self._fashion_job_workers.remove(thread)
+            self.refresh_fashion_products(force=True)
+
+        def _done(result: Any) -> None:
+            _finish()
+            InfoBar.success(
+                "Đã phân loại",
+                "Gemini đã phân loại lại %s sản phẩm Fashion." % result.get("updated", 0),
+                parent=self.window(),
+            )
+
+        def _error(error: Exception, _traceback: str) -> None:
+            _finish()
+            InfoBar.error(
+                "Không thể phân loại sản phẩm",
+                str(error),
+                parent=self.window(),
+            )
+
+        thread.finished_task.connect(_done)
+        thread.error_task.connect(_error)
+        thread.start()
+
+    def _copy_fashion_publish_data_to_phone(
+        self,
+        description: str,
+        product_id: str,
+    ) -> dict[str, object]:
+        """Copy Fashion publish data to the currently configured phone connection."""
+        phone_settings = load_phone_control_settings()
+        address = str(getattr(phone_settings, "address", "") or "").strip()
+        connection_mode = str(
+            getattr(phone_settings, "connection_mode", "wifi") or "wifi"
+        ).strip().lower()
+        controller = PhoneController(self.config)
+
+        # A saved Wi-Fi address can remain in settings after switching to USB.
+        # Let PhoneController select the attached USB serial instead of sending
+        # clipboard commands to that stale address.
+        connection = controller.connect(
+            address if connection_mode == "wifi" else "",
+            connection_mode=connection_mode,
+        )
+        target_address = str(connection.get("address") or "").strip()
+        if not target_address:
+            raise RuntimeError("Không xác định được điện thoại để nhận nội dung Fashion.")
+
+        clipboard_results = []
+        if description:
+            clipboard_results.append(
+                controller.copy_text_to_clipboard(
+                    description,
+                    label="Fashion description",
+                    address=target_address,
+                    sync_to_phone=True,
+                    require_phone_clipboard=True,
+                )
+            )
+        if product_id:
+            clipboard_results.append(
+                controller.copy_text_to_clipboard(
+                    product_id,
+                    label="Product ID",
+                    address=target_address,
+                    sync_to_phone=True,
+                    require_phone_clipboard=True,
+                )
+            )
+        return {
+            "synced_to_phone": True,
+            "address": target_address,
+            "clipboard_results": clipboard_results,
+        }
+
     def _copy_fashion_product_to_clipboard(self, product: Any) -> None:
         """Copy the product's publish data without requiring a Fashion video."""
         if product.id in self._fashion_job_ids_in_progress:
@@ -637,33 +852,14 @@ class FashionView(QWidget):
         self.refresh_fashion_products(force=True)
 
         def _copy() -> dict[str, object]:
-            phone_settings = load_phone_control_settings()
-            address = str(getattr(phone_settings, "address", "") or "").strip()
-            sync_to_phone = bool(address)
-            controller = PhoneController(self.config)
-            if description:
-                controller.copy_text_to_clipboard(
-                    description,
-                    label="Fashion description",
-                    address=address,
-                    sync_to_phone=sync_to_phone,
-                    require_phone_clipboard=False,
-                )
-            if product_id:
-                controller.copy_text_to_clipboard(
-                    product_id,
-                    label="Product ID",
-                    address=address,
-                    sync_to_phone=sync_to_phone,
-                    require_phone_clipboard=False,
-                )
+            result = self._copy_fashion_publish_data_to_phone(description, product_id)
             self.manager.update_fashion_product_status(product.id, "sent")
             self.manager.add_log(
                 "info",
                 "fashion_product_clipboard",
                 "Đã sao chép Mô tả + Product ID cho sản phẩm Fashion '%s'." % product.product_name,
             )
-            return {"synced_to_phone": sync_to_phone}
+            return result
 
         thread = WorkerThread(_copy, parent=self)
         self._fashion_job_workers.append(thread)
@@ -676,10 +872,9 @@ class FashionView(QWidget):
 
         def _done(result: Any) -> None:
             _finish()
-            target = "điện thoại và máy tính" if result.get("synced_to_phone") else "máy tính"
             InfoBar.success(
                 "Đã sao chép",
-                "Mô tả và Product ID đã được đưa vào bộ nhớ tạm %s." % target,
+                "Mô tả và Product ID đã được xác nhận trong bộ nhớ tạm điện thoại.",
                 parent=self.window(),
             )
 
@@ -713,7 +908,7 @@ class FashionView(QWidget):
             self._show_fashion_product_details(product)
 
     def _on_fashion_product_cell_clicked(self, row: int, column: int) -> None:
-        if column != 4:
+        if column != 5:
             return
         product = self._fashion_product_for_row(row)
         product_url = str(getattr(product, "product_url", "") or "").strip()

@@ -12,15 +12,18 @@ import unicodedata
 from urllib.parse import urlparse
 
 from auto_tiktok_editor.config import PROJECT_ROOT
+from auto_tiktok_editor.fashion_categories import normalize_fashion_product_category
 from auto_tiktok_editor.tiktok_profiles.models import (
     ACCOUNT_STATUSES,
     FASHION_PRODUCT_STATUSES,
+    FACEBOOK_VIDEO_STATUSES,
     LOGIN_TYPES,
     PUBLISH_MODES,
     VIDEO_CUT_MODES,
     VIDEO_STATUSES,
     TikTokAccount,
     FashionProduct,
+    FacebookVideo,
     TikTokLog,
     TikTokSourceChannel,
     TikTokVideo,
@@ -145,6 +148,7 @@ class TikTokProfileManager:
                     product_url TEXT NOT NULL,
                     product_id TEXT NOT NULL DEFAULT '',
                     product_name TEXT NOT NULL DEFAULT '',
+                    category TEXT NOT NULL DEFAULT '',
                     image_path TEXT NOT NULL DEFAULT '',
                     description TEXT NOT NULL DEFAULT '',
                     caption TEXT NOT NULL DEFAULT '',
@@ -157,8 +161,31 @@ class TikTokProfileManager:
                 )
                 """
             )
+            self._ensure_column(conn, "fashion_products", "category", "TEXT NOT NULL DEFAULT ''")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_fashion_products_status ON fashion_products(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_fashion_products_category ON fashion_products(category)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_fashion_products_created_at ON fashion_products(created_at)")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS facebook_videos (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    source_video_id INTEGER NOT NULL UNIQUE,
+                    source_account_id INTEGER,
+                    file_path TEXT NOT NULL UNIQUE,
+                    caption TEXT NOT NULL DEFAULT '',
+                    hashtags TEXT NOT NULL DEFAULT '',
+                    product_url TEXT NOT NULL DEFAULT '',
+                    source_product_name TEXT NOT NULL DEFAULT '',
+                    display_product_name TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'processing',
+                    note TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_facebook_videos_status ON facebook_videos(status)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_facebook_videos_created_at ON facebook_videos(created_at)")
             conn.execute("DROP TABLE IF EXISTS products")
             conn.execute(
                 """
@@ -797,10 +824,17 @@ class TikTokProfileManager:
         publish_mode = _normalize_publish_mode(publish_mode)
         scheduled_at = _normalize_scheduled_at(publish_mode, scheduled_at)
         clean_caption, clean_hashtags = split_caption_and_hashtags(caption, hashtags)
-        # Moving a video to a profile must retain its own tags and add the
-        # profile defaults, rather than silently discarding either set.
-        if account is not None and current_video.account_id != account.id:
-            clean_hashtags = _merge_hashtags(clean_hashtags, account.hashtags)
+        if current_video.account_id != account_id:
+            previous_account = (
+                self.get_account(current_video.account_id)
+                if current_video.account_id is not None
+                else None
+            )
+            clean_hashtags = _replace_profile_hashtags(
+                clean_hashtags,
+                previous_account.hashtags if previous_account else "",
+                account.hashtags if account else "",
+            )
         now = utc_now_iso()
         with self._connect() as conn:
             conn.execute(
@@ -944,11 +978,260 @@ class TikTokProfileManager:
 
         return report
 
+    def list_facebook_videos(self) -> list[FacebookVideo]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, source_video_id, source_account_id, file_path, caption, hashtags,
+                       product_url, source_product_name, display_product_name, status, note,
+                       created_at, updated_at
+                FROM facebook_videos
+                ORDER BY id DESC
+                """
+            ).fetchall()
+        return [self._row_to_facebook_video(row) for row in rows]
+
+    def get_facebook_video(self, facebook_video_id: int) -> FacebookVideo | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, source_video_id, source_account_id, file_path, caption, hashtags,
+                       product_url, source_product_name, display_product_name, status, note,
+                       created_at, updated_at
+                FROM facebook_videos
+                WHERE id = ?
+                """,
+                (int(facebook_video_id),),
+            ).fetchone()
+        return self._row_to_facebook_video(row) if row else None
+
+    def get_facebook_video_for_source(self, source_video_id: int) -> FacebookVideo | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, source_video_id, source_account_id, file_path, caption, hashtags,
+                       product_url, source_product_name, display_product_name, status, note,
+                       created_at, updated_at
+                FROM facebook_videos
+                WHERE source_video_id = ?
+                """,
+                (int(source_video_id),),
+            ).fetchone()
+        return self._row_to_facebook_video(row) if row else None
+
+    def recover_interrupted_facebook_videos(self) -> int:
+        """Make queue items left processing by a previous app run retryable."""
+        now = utc_now_iso()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE facebook_videos
+                SET status = 'error', note = 'Lần xử lý trước đã bị gián đoạn. Hãy thử lại.', updated_at = ?
+                WHERE status = 'processing'
+                """,
+                (now,),
+            )
+        return int(cursor.rowcount or 0)
+
+    def enqueue_facebook_video(self, source_video_id: int) -> FacebookVideo:
+        existing = self.get_facebook_video_for_source(source_video_id)
+        if existing is not None:
+            return existing
+
+        video = self.get_video(source_video_id)
+        if video is None:
+            raise ValueError("Video not found: %s" % source_video_id)
+        source_path = self.resolve_video_path(video)
+        if not source_path.exists() or not source_path.is_file():
+            raise ValueError("Video file does not exist: %s" % source_path)
+
+        account = self.get_account(video.account_id) if video.account_id is not None else None
+        hashtags = _replace_profile_hashtags(
+            video.hashtags,
+            account.hashtags if account else "",
+            "",
+        )
+        product_url = _extract_product_url_from_note(video.note)
+        destination_dir = self.project_root / "facebook_video_queue"
+        destination_dir.mkdir(parents=True, exist_ok=True)
+        destination = destination_dir / ("video_%s_%s" % (video.id, source_path.name))
+        suffix = 2
+        while destination.exists():
+            destination = destination_dir / (
+                "video_%s_%s_%s%s" % (video.id, source_path.stem, suffix, source_path.suffix)
+            )
+            suffix += 1
+        shutil.copy2(source_path, destination)
+
+        now = utc_now_iso()
+        try:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO facebook_videos (
+                        source_video_id, source_account_id, file_path, caption, hashtags,
+                        product_url, source_product_name, display_product_name, status, note,
+                        created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, '', '', 'processing', '', ?, ?)
+                    """,
+                    (
+                        video.id,
+                        video.account_id,
+                        self._path_for_storage(destination),
+                        video.caption,
+                        hashtags,
+                        product_url,
+                        now,
+                        now,
+                    ),
+                )
+                facebook_video_id = int(cursor.lastrowid)
+        except Exception:
+            try:
+                destination.unlink()
+            except OSError:
+                pass
+            existing = self.get_facebook_video_for_source(source_video_id)
+            if existing is not None:
+                return existing
+            raise
+
+        queued = self.get_facebook_video(facebook_video_id)
+        if queued is None:
+            raise RuntimeError("Created Facebook video could not be loaded.")
+        return queued
+
+    def update_facebook_video_details(
+        self,
+        facebook_video_id: int,
+        *,
+        display_product_name: str,
+        caption: str,
+        hashtags: str,
+    ) -> FacebookVideo:
+        current = self.get_facebook_video(facebook_video_id)
+        if current is None:
+            raise ValueError("Facebook video not found: %s" % facebook_video_id)
+        display_name = _normalize_facebook_product_name(display_product_name, required=True)
+        clean_caption, clean_hashtags = split_caption_and_hashtags(caption, hashtags)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE facebook_videos
+                SET display_product_name = ?, caption = ?, hashtags = ?, status = 'ready',
+                    note = '', updated_at = ?
+                WHERE id = ?
+                """,
+                (display_name, clean_caption, clean_hashtags, now, int(facebook_video_id)),
+            )
+        updated = self.get_facebook_video(facebook_video_id)
+        if updated is None:
+            raise ValueError("Facebook video not found: %s" % facebook_video_id)
+        return updated
+
+    def update_facebook_video_preparation(
+        self,
+        facebook_video_id: int,
+        *,
+        source_product_name: str = "",
+        display_product_name: str = "",
+        status: str = "ready",
+        note: str = "",
+    ) -> FacebookVideo:
+        if status not in FACEBOOK_VIDEO_STATUSES:
+            raise ValueError("Unsupported Facebook video status: %s" % status)
+        if self.get_facebook_video(facebook_video_id) is None:
+            raise ValueError("Facebook video not found: %s" % facebook_video_id)
+        display_name = _normalize_facebook_product_name(
+            display_product_name,
+            required=status in {"ready", "sent"},
+        )
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE facebook_videos
+                SET source_product_name = ?, display_product_name = ?, status = ?, note = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    str(source_product_name or "").strip(),
+                    display_name,
+                    status,
+                    str(note or "").strip(),
+                    now,
+                    int(facebook_video_id),
+                ),
+            )
+        updated = self.get_facebook_video(facebook_video_id)
+        if updated is None:
+            raise ValueError("Facebook video not found: %s" % facebook_video_id)
+        return updated
+
+    def update_facebook_video_status(self, facebook_video_id: int, status: str, note: str | None = None) -> FacebookVideo:
+        if status not in FACEBOOK_VIDEO_STATUSES:
+            raise ValueError("Unsupported Facebook video status: %s" % status)
+        current = self.get_facebook_video(facebook_video_id)
+        if current is None:
+            raise ValueError("Facebook video not found: %s" % facebook_video_id)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            if note is None:
+                conn.execute(
+                    "UPDATE facebook_videos SET status = ?, updated_at = ? WHERE id = ?",
+                    (status, now, int(facebook_video_id)),
+                )
+            else:
+                conn.execute(
+                    "UPDATE facebook_videos SET status = ?, note = ?, updated_at = ? WHERE id = ?",
+                    (status, str(note).strip(), now, int(facebook_video_id)),
+                )
+        updated = self.get_facebook_video(facebook_video_id)
+        if updated is None:
+            raise ValueError("Facebook video not found: %s" % facebook_video_id)
+        return updated
+
+    def resolve_facebook_video_path(self, video: FacebookVideo) -> Path:
+        return self._resolve_optional_stored_path(video.file_path) or self.project_root / video.file_path
+
+    def delete_facebook_videos(self, facebook_video_ids: list[int]) -> dict:
+        report = {"deleted": 0, "deleted_ids": [], "missing_files": 0, "errors": []}
+        queue_root = (self.project_root / "facebook_video_queue").resolve()
+        for facebook_video_id in dict.fromkeys(int(value) for value in facebook_video_ids):
+            video = self.get_facebook_video(facebook_video_id)
+            if video is None:
+                report["errors"].append("Facebook video not found: %s" % facebook_video_id)
+                continue
+            video_path = self.resolve_facebook_video_path(video).resolve()
+            try:
+                video_path.relative_to(queue_root)
+            except ValueError:
+                report["errors"].append("Facebook queue path is outside its storage directory: %s" % video_path)
+                continue
+            try:
+                if video_path.exists():
+                    if not video_path.is_file():
+                        report["errors"].append("Facebook video path is not a file: %s" % video_path)
+                        continue
+                    video_path.unlink()
+                else:
+                    report["missing_files"] += 1
+            except OSError as exc:
+                report["errors"].append("Could not delete %s: %s" % (video_path, exc))
+                continue
+            with self._connect() as conn:
+                conn.execute("DELETE FROM facebook_videos WHERE id = ?", (facebook_video_id,))
+            report["deleted"] += 1
+            report["deleted_ids"].append(facebook_video_id)
+        return report
+
     def list_fashion_products(self) -> list[FashionProduct]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, product_url, product_id, product_name, image_path, description,
+                SELECT id, product_url, product_id, product_name, category, image_path, description,
                        caption, hashtags, video_path, status, note, created_at, updated_at
                 FROM fashion_products
                 ORDER BY id DESC
@@ -960,7 +1243,7 @@ class TikTokProfileManager:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, product_url, product_id, product_name, image_path, description,
+                SELECT id, product_url, product_id, product_name, category, image_path, description,
                        caption, hashtags, video_path, status, note, created_at, updated_at
                 FROM fashion_products
                 WHERE id = ?
@@ -977,6 +1260,7 @@ class TikTokProfileManager:
         image_path: Path | str,
         status: str = "processing",
         note: str = "",
+        category: str = "",
     ) -> FashionProduct:
         if status not in FASHION_PRODUCT_STATUSES:
             raise ValueError("Unsupported Fashion product status: %s" % status)
@@ -987,19 +1271,24 @@ class TikTokProfileManager:
         clean_name = str(product_name or "").strip()
         if not clean_url or not clean_name:
             raise ValueError("Fashion product URL and name are required.")
+        clean_category = normalize_fashion_product_category(category)
+        if str(category or "").strip() and not clean_category:
+            raise ValueError("Unsupported Fashion product category: %s" % category)
         now = utc_now_iso()
         with self._connect() as conn:
             cursor = conn.execute(
                 """
                 INSERT INTO fashion_products (
-                    product_url, product_id, product_name, image_path, status, note, created_at, updated_at
+                    product_url, product_id, product_name, category, image_path,
+                    status, note, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     clean_url,
                     str(product_id or "").strip(),
                     clean_name,
+                    clean_category,
                     self._path_for_storage(image),
                     status,
                     str(note or "").strip(),
@@ -1021,6 +1310,7 @@ class TikTokProfileManager:
         description: str | None = None,
         status: str = "ready",
         note: str | None = None,
+        category: str | None = None,
     ) -> FashionProduct:
         if status not in FASHION_PRODUCT_STATUSES:
             raise ValueError("Unsupported Fashion product status: %s" % status)
@@ -1029,26 +1319,53 @@ class TikTokProfileManager:
         clean_description = str(description or "").strip() or "\n".join(
             part for part in (clean_caption, clean_hashtags) if part
         )
+        current = self.get_fashion_product(product_id)
+        if current is None:
+            raise ValueError("Fashion product not found: %s" % product_id)
+        clean_category = current.category
+        if category is not None:
+            clean_category = normalize_fashion_product_category(category)
+            if str(category or "").strip() and not clean_category:
+                raise ValueError("Unsupported Fashion product category: %s" % category)
         now = utc_now_iso()
         with self._connect() as conn:
             if note is None:
                 conn.execute(
                     """
                     UPDATE fashion_products
-                    SET caption = ?, hashtags = ?, description = ?, status = ?, updated_at = ?
+                    SET caption = ?, hashtags = ?, description = ?, category = ?, status = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (clean_caption, clean_hashtags, clean_description, status, now, product_id),
+                    (clean_caption, clean_hashtags, clean_description, clean_category, status, now, product_id),
                 )
             else:
                 conn.execute(
                     """
                     UPDATE fashion_products
-                    SET caption = ?, hashtags = ?, description = ?, status = ?, note = ?, updated_at = ?
+                    SET caption = ?, hashtags = ?, description = ?, category = ?, status = ?, note = ?, updated_at = ?
                     WHERE id = ?
                     """,
-                    (clean_caption, clean_hashtags, clean_description, status, str(note).strip(), now, product_id),
+                    (clean_caption, clean_hashtags, clean_description, clean_category, status, str(note).strip(), now, product_id),
                 )
+        product = self.get_fashion_product(product_id)
+        if product is None:
+            raise ValueError("Fashion product not found: %s" % product_id)
+        return product
+
+    def update_fashion_product_category(
+        self,
+        product_id: int,
+        category: str,
+    ) -> FashionProduct:
+        clean_category = normalize_fashion_product_category(category)
+        if not clean_category:
+            raise ValueError("Unsupported Fashion product category: %s" % category)
+        now = utc_now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE fashion_products SET category = ?, updated_at = ? WHERE id = ?",
+                (clean_category, now, product_id),
+            )
         product = self.get_fashion_product(product_id)
         if product is None:
             raise ValueError("Fashion product not found: %s" % product_id)
@@ -1295,11 +1612,30 @@ class TikTokProfileManager:
             product_url=row["product_url"],
             product_id=row["product_id"],
             product_name=row["product_name"],
+            category=row["category"],
             image_path=row["image_path"],
             description=row["description"],
             caption=row["caption"],
             hashtags=row["hashtags"],
             video_path=row["video_path"],
+            status=row["status"],
+            note=row["note"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _row_to_facebook_video(row: sqlite3.Row) -> FacebookVideo:
+        return FacebookVideo(
+            id=int(row["id"]),
+            source_video_id=int(row["source_video_id"]),
+            source_account_id=int(row["source_account_id"]) if row["source_account_id"] is not None else None,
+            file_path=row["file_path"],
+            caption=row["caption"],
+            hashtags=row["hashtags"],
+            product_url=row["product_url"],
+            source_product_name=row["source_product_name"],
+            display_product_name=row["display_product_name"],
             status=row["status"],
             note=row["note"],
             created_at=row["created_at"],
@@ -1505,6 +1841,39 @@ def normalize_hashtags(value: str) -> str:
 
 def _merge_hashtags(*values: str) -> str:
     return normalize_hashtags(" ".join(str(value or "") for value in values))
+
+
+def _replace_profile_hashtags(hashtags: str, old_profile_hashtags: str, new_profile_hashtags: str) -> str:
+    """Keep video-specific tags while replacing the source profile defaults."""
+    old_keys = {
+        tag.lower()
+        for tag in normalize_hashtags(old_profile_hashtags).split()
+    }
+    kept_tags = [
+        tag
+        for tag in normalize_hashtags(hashtags).split()
+        if tag.lower() not in old_keys
+    ]
+    return _merge_hashtags(" ".join(kept_tags), new_profile_hashtags)
+
+
+def _extract_product_url_from_note(note: str) -> str:
+    for raw_line in str(note or "").splitlines():
+        label, separator, value = raw_line.partition(":")
+        if separator and label.strip().casefold() == "product link":
+            candidate = value.strip()
+            if candidate.startswith(("http://", "https://")):
+                return candidate
+    return ""
+
+
+def _normalize_facebook_product_name(value: str, *, required: bool) -> str:
+    name = re.sub(r"\s+", " ", str(value or "")).strip()
+    if required and not name:
+        raise ValueError("Facebook product display name is required.")
+    if len(name) > 50:
+        raise ValueError("Facebook product display name must not exceed 50 characters.")
+    return name
 
 
 def split_caption_and_hashtags(caption: str, hashtags: str = "") -> tuple[str, str]:

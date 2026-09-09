@@ -62,11 +62,23 @@ class AndroidDeviceTransfer(object):
                 "message": warning,
             }
 
-        selected_serial = self._select_device_serial(device_serials, preferred_serial)
+        selectable_serials = device_serials
+        if normalized_mode == "usb":
+            selectable_serials = [serial for serial in device_serials if ":" not in serial]
+            if preferred_serial not in selectable_serials:
+                preferred_serial = ""
+
+        selected_serial = self._select_device_serial(
+            selectable_serials,
+            preferred_serial,
+            use_configured=normalized_mode != "usb" or bool(preferred_serial),
+        )
         if selected_serial is None:
             message = "Không tìm thấy điện thoại ADB nào sẵn sàng."
             if normalized_mode == "wifi":
                 message = "ADB đã chạy nhưng chưa thấy thiết bị Wi-Fi vừa kết nối."
+            elif normalized_mode == "usb":
+                message = "Không tìm thấy thiết bị ADB qua USB. Hãy kiểm tra cáp và bật Gỡ lỗi USB."
             return {
                 "connected": False,
                 "mode": normalized_mode,
@@ -175,14 +187,20 @@ class AndroidDeviceTransfer(object):
                 device_serials.append(line.split("\t", 1)[0].strip())
         return device_serials, None
 
-    def _select_device_serial(self, device_serials: List[str], preferred_serial: str = "") -> Optional[str]:
+    def _select_device_serial(
+        self,
+        device_serials: List[str],
+        preferred_serial: str = "",
+        *,
+        use_configured: bool = True,
+    ) -> Optional[str]:
         preferred = preferred_serial.strip()
         if preferred:
             for serial in device_serials:
                 if serial == preferred or serial.startswith(preferred):
                     return serial
             return None
-        configured = (self.config.android_device_serial or "").strip()
+        configured = (self.config.android_device_serial or "").strip() if use_configured else ""
         if configured:
             for serial in device_serials:
                 if serial == configured or serial.startswith(configured):

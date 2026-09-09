@@ -37,7 +37,6 @@ from qfluentwidgets import (
     PushButton,
     RoundMenu,
     SubtitleLabel,
-    TableWidget,
     ToolButton,
     isDarkTheme,
 )
@@ -50,11 +49,19 @@ from auto_tiktok_editor.domain.models import SessionItemSpec, SessionSpec
 from auto_tiktok_editor.tiktok_profiles.models import PUBLISH_MODES
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
 from auto_tiktok_editor.tiktok_profiles.qt_ui.components.instant_combo_box import InstantComboBox
+from auto_tiktok_editor.tiktok_profiles.qt_ui.components.empty_state_table import EmptyStateTableWidget
 from auto_tiktok_editor.tiktok_profiles.qt_ui.components.tag_bar import YouTubeTagInput
 from auto_tiktok_editor.tiktok_profiles.qt_ui.dialogs.schedule_dialog import ScheduleDialog
-from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import format_video_status, format_vietnam_datetime
+from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import (
+    FacebookIcon,
+    format_video_status,
+    format_vietnam_datetime,
+)
 from auto_tiktok_editor.tiktok_profiles.qt_ui.workers import WorkerThread
 from auto_tiktok_editor.tiktok_profiles.telegram_queue import copy_rendered_video_to_queue
+
+
+FACEBOOK_ICON = FacebookIcon()
 
 
 class VideosTableItemDelegate(TableItemDelegate):
@@ -158,11 +165,15 @@ class VideosTableItemDelegate(TableItemDelegate):
         super(TableItemDelegate, self).paint(painter, option, index)
 
 
-class VideosTableWidget(TableWidget):
+class VideosTableWidget(EmptyStateTableWidget):
     """Custom TableWidget that ignores row selection when clicking interactive columns (Cut Mode, Action) and uses enhanced delegate."""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
+        super().__init__(
+            parent,
+            empty_text="Chưa có video nào trong profile đang chọn.",
+            empty_icon=FIF.VIDEO,
+        )
         self.delegate = VideosTableItemDelegate(self)
         self.setItemDelegate(self.delegate)
         if hasattr(self, "scrollDelagate") and hasattr(self.scrollDelagate, "verticalSmoothScroll"):
@@ -199,18 +210,18 @@ class VideosView(QWidget):
         self._updating_inspector = False
         self._active_workers: list[WorkerThread] = []
         self._sending_video_ids: set[int] = set()
+        self._facebook_push_video_ids: set[int] = set()
         self._last_videos_signature: tuple | None = None
         self._profile_popup_open = False
         self._profiles_signature: tuple[tuple[int, str], ...] | None = None
 
         self._init_ui()
-        self.refresh_profiles_list()
 
-        # Real-time auto-sync timer (polls SQLite changes every 1s without needing manual refresh)
+        # Poll only while this page is visible. Hidden stacked pages otherwise
+        # keep querying SQLite for the entire lifetime of the application.
         self._sync_timer = QTimer(self)
         self._sync_timer.setInterval(1000)
         self._sync_timer.timeout.connect(self._sync_videos_live)
-        self._sync_timer.start()
 
     def _init_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -302,7 +313,7 @@ class VideosView(QWidget):
         self.table.setColumnWidth(1, 150)
         self.table.setColumnWidth(2, 160)
         self.table.setColumnWidth(5, 120)
-        self.table.setColumnWidth(6, 140)
+        self.table.setColumnWidth(6, 180)
 
         # Initially hidden selection column
         self.table.setColumnHidden(0, True)
@@ -414,6 +425,8 @@ class VideosView(QWidget):
     def hideEvent(self, event) -> None:
         super().hideEvent(event)
         self._save_splitter_state()
+        if hasattr(self, "_sync_timer"):
+            self._sync_timer.stop()
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -454,10 +467,13 @@ class VideosView(QWidget):
 
     def set_active_profile(self, account_name: str) -> None:
         self._current_account_name = account_name
+        if self._profiles_signature is None:
+            self.refresh_profiles_list()
         idx = self.profile_combo.findText(account_name)
         if idx >= 0:
             self.profile_combo.setCurrentIndex(idx)
-        self.refresh_videos()
+        elif self._profiles_signature is not None:
+            self.refresh_videos()
 
     def _on_profile_changed(self) -> None:
         text = self.profile_combo.currentText()
@@ -470,7 +486,6 @@ class VideosView(QWidget):
         self.tag_input.set_theme_mode(clean)
         self.edit_filename_label.setStyleSheet("color: #B5B9C7; font-weight: bold;" if clean == "dark" else "color: #5F6475; font-weight: bold;")
         self.table.viewport().update()
-        self.refresh_videos()
 
     def _sync_videos_live(self) -> None:
         """Poll database periodically to update video states or show new videos immediately."""
@@ -485,6 +500,7 @@ class VideosView(QWidget):
             else:
                 videos = all_videos
 
+            facebook_source_ids = {item.source_video_id for item in self.manager.list_facebook_videos()}
             sig = tuple(
                 (
                     v.id,
@@ -498,6 +514,7 @@ class VideosView(QWidget):
                     v.status,
                     v.cut_mode,
                     v.updated_at,
+                    v.id in facebook_source_ids,
                 )
                 for v in videos
             )
@@ -525,6 +542,7 @@ class VideosView(QWidget):
 
     def _update_table_in_place(self, videos: list[Any]) -> None:
         """Update table cells in place without rebuilding rows or disrupting user state."""
+        facebook_source_ids = {item.source_video_id for item in self.manager.list_facebook_videos()}
         self.table.blockSignals(True)
         for row, v in enumerate(videos):
             # Col 0: UserRole data
@@ -579,11 +597,11 @@ class VideosView(QWidget):
                 is_rendering = status_lower == "rendering"
                 is_sending = getattr(v, "id", None) in self._sending_video_ids
                 layout = action_widget.layout()
-                if layout.count() >= 4:
+                if layout.count() >= 5:
                     btn_render = layout.itemAt(0).widget()
                     send_container = layout.itemAt(1).widget()
                     btn_play = layout.itemAt(2).widget()
-                    btn_del = layout.itemAt(3).widget()
+                    btn_facebook = layout.itemAt(3).widget()
                     if btn_render:
                         btn_render.setEnabled(not is_rendering and not is_sending)
                         btn_render.setToolTip("Đang tạo..." if is_rendering else ("Tạo lại video (Re-render)" if status_lower != "draft" else "Tạo video"))
@@ -608,6 +626,15 @@ class VideosView(QWidget):
                     if btn_play:
                         btn_play.setEnabled(is_ready)
                         btn_play.setToolTip("Xem trước video" if is_ready else "Video chưa tạo xong, không thể xem")
+                    if btn_facebook:
+                        already_pushed = v.id in facebook_source_ids
+                        is_pushing = v.id in self._facebook_push_video_ids
+                        btn_facebook.setEnabled(is_ready and not already_pushed and not is_pushing)
+                        btn_facebook.setToolTip(
+                            "Video đã có trong bảng Facebook"
+                            if already_pushed
+                            else ("Đang đẩy qua Facebook..." if is_pushing else "Đẩy qua Facebook")
+                        )
 
         self.table.blockSignals(False)
 
@@ -667,6 +694,7 @@ class VideosView(QWidget):
     def refresh_videos(self) -> None:
         """Load videos from database and update table."""
         try:
+            old_ids = [video.id for video in self._videos_cache]
             all_videos = self.manager.list_videos()
             if self._current_account_name and self._current_account_name != "Tất cả Profile":
                 accounts = {a.name: a.id for a in self.manager.list_accounts()}
@@ -675,7 +703,8 @@ class VideosView(QWidget):
             else:
                 self._videos_cache = all_videos
 
-            self._last_videos_signature = tuple(
+            facebook_source_ids = {item.source_video_id for item in self.manager.list_facebook_videos()}
+            signature = tuple(
                 (
                     v.id,
                     v.account_id,
@@ -688,10 +717,16 @@ class VideosView(QWidget):
                     v.status,
                     v.cut_mode,
                     v.updated_at,
+                    v.id in facebook_source_ids,
                 )
                 for v in self._videos_cache
             )
-            self._populate_table_preserving_state(self._videos_cache)
+            self._last_videos_signature = signature
+            new_ids = [video.id for video in self._videos_cache]
+            if old_ids == new_ids and len(self._videos_cache) == self.table.rowCount():
+                self._update_table_in_place(self._videos_cache)
+            else:
+                self._populate_table_preserving_state(self._videos_cache)
         except Exception as exc:
             InfoBar.error(
                 title="Lỗi tải danh sách video",
@@ -707,7 +742,17 @@ class VideosView(QWidget):
 
     def _populate_table(self, videos: list[Any]) -> None:
         self.table.blockSignals(True)
+        self.table.setUpdatesEnabled(False)
+        for row in range(self.table.rowCount()):
+            for column in (2, 6):
+                widget = self.table.cellWidget(row, column)
+                if widget is not None:
+                    self.table.removeCellWidget(row, column)
+                    widget.deleteLater()
         self.table.setRowCount(len(videos))
+        facebook_by_source = {
+            item.source_video_id: item for item in self.manager.list_facebook_videos()
+        }
         for row, v in enumerate(videos):
             # Col 0: Checkbox for selection
             chk_item = QTableWidgetItem()
@@ -763,7 +808,7 @@ class VideosView(QWidget):
             self.table.setItem(row, 4, hashtags_item)
             self.table.setItem(row, 5, status_item)
 
-            # Col 6: Hành động (Tạo lại, Gửi, Xem, Xóa)
+            # Col 6: Hành động (Tạo lại, Gửi, Xem, Facebook, Xóa)
             action_widget = QWidget(self.table)
             action_layout = QHBoxLayout(action_widget)
             action_layout.setContentsMargins(2, 2, 2, 2)
@@ -825,7 +870,25 @@ class VideosView(QWidget):
             btn_play.clicked.connect(lambda _, vid=v: self._on_play_video(vid))
             action_layout.addWidget(btn_play)
 
-            # 4. Nút Xóa
+            # 4. Nút đẩy sang hàng đợi Facebook
+            facebook_video = facebook_by_source.get(v.id)
+            is_pushing_facebook = v.id in self._facebook_push_video_ids
+            btn_facebook = ToolButton(action_widget)
+            btn_facebook.setIcon(FACEBOOK_ICON)
+            btn_facebook.setFixedHeight(28)
+            btn_facebook.setEnabled(is_ready and not is_pushing_facebook and facebook_video is None)
+            if is_pushing_facebook:
+                btn_facebook.setToolTip("Đang đẩy qua Facebook...")
+            elif facebook_video is not None:
+                btn_facebook.setToolTip("Video đã có trong bảng Facebook")
+            elif is_ready:
+                btn_facebook.setToolTip("Đẩy qua Facebook")
+            else:
+                btn_facebook.setToolTip("Video chưa tạo xong, không thể đẩy qua Facebook")
+            btn_facebook.clicked.connect(lambda _, vid=v: self._on_push_to_facebook(vid))
+            action_layout.addWidget(btn_facebook)
+
+            # 5. Nút Xóa
             btn_del = ToolButton(action_widget)
             btn_del.setIcon(FIF.DELETE)
             btn_del.setFixedHeight(28)
@@ -836,6 +899,8 @@ class VideosView(QWidget):
             self.table.setCellWidget(row, 6, action_widget)
 
         self.table.blockSignals(False)
+        self.table.setUpdatesEnabled(True)
+        self.table.viewport().update()
         self.table.setColumnHidden(0, not self._select_mode)
         self._update_header_checkbox()
         self._update_selection_ui()
@@ -1315,7 +1380,7 @@ class VideosView(QWidget):
 
             status_val = getattr(v, "status", "pending") or "pending"
             status_lower = str(status_val).strip().lower()
-            is_ready = status_lower in ("ready", "published", "prepared")
+            is_ready = status_lower in ("ready", "sent", "published", "prepared")
             is_rendering = status_lower == "rendering"
             is_sending = getattr(v, "id", None) in self._sending_video_ids
 
@@ -1362,34 +1427,21 @@ class VideosView(QWidget):
             )
             return
 
+        # Rows are updated in place while rendering so their action-button callbacks
+        # can still hold the pre-render TikTokVideo object.  Always re-read the row
+        # before checking its status; the table may already display "ready" while
+        # the callback object still says "queued" or "rendering".
+        video = targets[0]
+        video_id = getattr(video, "id", None)
+        if video_id is not None:
+            video = self.manager.get_video(video_id) or video
+
         from auto_tiktok_editor.phone_control import PhoneController, load_phone_control_settings
         phone_settings = load_phone_control_settings()
         address = str(getattr(phone_settings, "address", "") or "").strip()
+        connection_mode = str(getattr(phone_settings, "connection_mode", "wifi") or "wifi")
         controller = PhoneController(self.config)
-        controller.runner.ensure_tool(self.config.adb_bin)
-        completed = controller.runner.run([self.config.adb_bin, "devices"], check=False)
-        device_serials = [
-            line.split("\t", 1)[0].strip()
-            for line in completed.stdout.splitlines()
-            if line.strip() and not line.startswith("List of") and "\tdevice" in line
-        ]
 
-        target_address = address
-        if not target_address:
-            if len(device_serials) == 1:
-                target_address = device_serials[0]
-            elif not device_serials:
-                InfoBar.warning(
-                    title="Chưa kết nối ADB",
-                    content="Vui lòng vào tab 'Điện thoại (ADB)' và kết nối điện thoại trước khi gửi!",
-                    position=InfoBarPosition.TOP,
-                    parent=self.window(),
-                )
-                return
-            else:
-                target_address = device_serials[0]
-
-        video = targets[0]
         if getattr(video, "id", None) in self._sending_video_ids:
             InfoBar.warning(
                 title="Đang gửi",
@@ -1413,16 +1465,21 @@ class VideosView(QWidget):
         self._sending_video_ids.add(video.id)
         self._update_video_action_state(video.id)
 
+        use_editor_values = bool(self._selected_video and self._selected_video.id == video.id)
+        editor_caption = self.edit_caption.toPlainText().strip() if use_editor_values else ""
+        editor_hashtags = self.tag_input.get_tags_string().strip() if use_editor_values else ""
+        editor_product_id = self.edit_product_id.text().strip() if use_editor_values else ""
+
         def _send_worker() -> dict:
             video_path = self.manager.resolve_video_path(video)
             if not video_path.exists():
                 raise FileNotFoundError(f"Không tìm thấy file video: {video_path}")
 
             fresh_video = self.manager.get_video(video.id) or video
-            if self._selected_video and self._selected_video.id == video.id:
-                caption_val = self.edit_caption.toPlainText().strip()
-                hashtags_val = self.tag_input.get_tags_string().strip()
-                product_id_val = self.edit_product_id.text().strip()
+            if use_editor_values:
+                caption_val = editor_caption
+                hashtags_val = editor_hashtags
+                product_id_val = editor_product_id
             else:
                 caption_val = (getattr(fresh_video, "caption", "") or "").strip()
                 hashtags_val = (getattr(fresh_video, "hashtags", "") or "").strip()
@@ -1432,7 +1489,12 @@ class VideosView(QWidget):
             product_id = product_id_val
 
             # 1. Gửi video vào thư viện (Gallery) điện thoại
-            phone_result = controller.send_file_to_gallery(target_address, video_path)
+            phone_result = controller.send_file_to_gallery(
+                address if connection_mode == "wifi" else "",
+                video_path,
+                connection_mode=connection_mode,
+            )
+            target_address = str(phone_result.get("address") or "").strip()
 
             # 2. Copy caption + hashtag vào bộ nhớ tạm
             if caption_text:
@@ -1462,7 +1524,7 @@ class VideosView(QWidget):
                 video_id=video.id,
             )
             self.manager.update_video_status(video.id, "sent")
-            return {"video_id": video.id, "phone_result": phone_result}
+            return {"video_id": video.id, "phone_result": phone_result, "address": target_address}
 
         def _cleanup():
             self._sending_video_ids.discard(video.id)
@@ -1492,7 +1554,7 @@ class VideosView(QWidget):
 
         InfoBar.info(
             title="Đang gửi video",
-            content=f"Đang đẩy video ID {video.id} sang thiết bị {address}...",
+            content=f"Đang đẩy video ID {video.id} sang thiết bị {address or 'ADB đang kết nối'}...",
             position=InfoBarPosition.TOP,
             parent=self.window(),
         )
@@ -1501,6 +1563,91 @@ class VideosView(QWidget):
 
         thread.finished_task.connect(_on_done)
         thread.error_task.connect(_on_err)
+        thread.start()
+
+    def _on_push_to_facebook(self, video: Any) -> None:
+        """Copy one completed video to Facebook and generate its display product name."""
+        video_id = int(getattr(video, "id", 0) or 0)
+        if not video_id or video_id in self._facebook_push_video_ids:
+            return
+        existing = self.manager.get_facebook_video_for_source(video_id)
+        if existing is not None:
+            InfoBar.info(
+                title="Đã có trong Facebook",
+                content=f"Video #{video_id} đã được đẩy qua bảng Facebook.",
+                position=InfoBarPosition.TOP,
+                parent=self.window(),
+            )
+            return
+        status = str(getattr(video, "status", "") or "").strip().lower()
+        if status not in ("ready", "sent", "published", "prepared"):
+            InfoBar.warning(
+                title="Video chưa sẵn sàng",
+                content="Chỉ có thể đẩy video đã tạo xong qua Facebook.",
+                position=InfoBarPosition.TOP,
+                parent=self.window(),
+            )
+            return
+
+        from auto_tiktok_editor.facebook.queue import prepare_facebook_video
+
+        self._facebook_push_video_ids.add(video_id)
+        self._populate_table_preserving_state(self._videos_cache)
+
+        def _push_worker():
+            queued = self.manager.enqueue_facebook_video(video_id)
+            try:
+                prepared = prepare_facebook_video(self.manager, queued.id)
+            except Exception as exc:
+                self.manager.update_facebook_video_preparation(
+                    queued.id,
+                    source_product_name=queued.source_product_name,
+                    display_product_name="",
+                    status="error",
+                    note=str(exc),
+                )
+                raise
+            self.manager.add_log(
+                "info",
+                "facebook_video_queued",
+                "Đã đẩy video %s qua Facebook với tên sản phẩm '%s'."
+                % (video_id, prepared.display_product_name),
+                account_id=getattr(video, "account_id", None),
+                video_id=video_id,
+            )
+            return prepared
+
+        thread = WorkerThread(_push_worker, parent=self)
+        self._active_workers.append(thread)
+
+        def _cleanup() -> None:
+            self._facebook_push_video_ids.discard(video_id)
+            if thread in self._active_workers:
+                self._active_workers.remove(thread)
+            self.refresh_videos()
+
+        def _done(prepared: Any) -> None:
+            _cleanup()
+            InfoBar.success(
+                title="Đã đẩy qua Facebook",
+                content="Tên sản phẩm: %s" % prepared.display_product_name,
+                position=InfoBarPosition.TOP,
+                duration=5000,
+                parent=self.window(),
+            )
+
+        def _error(exc: Exception, _traceback_text: str) -> None:
+            _cleanup()
+            InfoBar.warning(
+                title="Đã thêm vào Facebook nhưng chưa tạo được tên",
+                content=str(exc),
+                position=InfoBarPosition.TOP,
+                duration=6000,
+                parent=self.window(),
+            )
+
+        thread.finished_task.connect(_done)
+        thread.error_task.connect(_error)
         thread.start()
 
     def _on_send_product_id_to_phone(self) -> None:
@@ -1519,34 +1666,20 @@ class VideosView(QWidget):
         phone_settings = load_phone_control_settings()
         address = str(getattr(phone_settings, "address", "") or "").strip()
         controller = PhoneController(self.config)
-        controller.runner.ensure_tool(self.config.adb_bin)
-        completed = controller.runner.run([self.config.adb_bin, "devices"], check=False)
-        device_serials = [
-            line.split("\t", 1)[0].strip()
-            for line in completed.stdout.splitlines()
-            if line.strip() and not line.startswith("List of") and "\tdevice" in line
-        ]
-
-        target_address = address
-        if not target_address:
-            if len(device_serials) == 1:
-                target_address = device_serials[0]
-            elif not device_serials:
-                InfoBar.warning(
-                    title="Chưa kết nối ADB",
-                    content="Vui lòng vào tab 'Điện thoại (ADB)' và kết nối điện thoại trước khi gửi!",
-                    position=InfoBarPosition.TOP,
-                    parent=self.window(),
-                )
-                return
-            else:
-                target_address = device_serials[0]
 
         self.send_product_id_btn.hide()
         self.send_product_id_spinner.show()
         self.send_product_id_spinner.start()
 
         def _copy_worker() -> dict:
+            target_address = address
+            if not target_address:
+                devices = controller.list_devices()
+                if not devices:
+                    raise RuntimeError(
+                        "Chưa kết nối ADB. Vui lòng kết nối điện thoại trước khi gửi Product ID."
+                    )
+                target_address = devices[0]
             controller.copy_text_to_clipboard(
                 product_id,
                 label="Product ID",
@@ -1601,7 +1734,7 @@ class VideosView(QWidget):
         if not video:
             return
         status_lower = str(getattr(video, "status", "") or "").strip().lower()
-        if status_lower not in ("ready", "published", "prepared"):
+        if status_lower not in ("ready", "sent", "published", "prepared"):
             InfoBar.warning(
                 title="Chưa thể xem",
                 content=f"Video #{video.id} chưa tạo xong hoặc đang render.",
@@ -1768,7 +1901,7 @@ class VideosView(QWidget):
             return
 
         status_lower = str(getattr(video, "status", "") or "").strip().lower()
-        is_ready = status_lower in ("ready", "published", "prepared")
+        is_ready = status_lower in ("ready", "sent", "published", "prepared")
         is_rendering = status_lower == "rendering"
 
         menu = RoundMenu(parent=self)
@@ -1792,6 +1925,12 @@ class VideosView(QWidget):
         act_play.setEnabled(is_ready)
         act_play.triggered.connect(lambda: self._on_play_video(video))
         menu.addAction(act_play)
+
+        facebook_video = self.manager.get_facebook_video_for_source(video.id)
+        act_facebook = Action(FACEBOOK_ICON, "Đẩy qua Facebook", self)
+        act_facebook.setEnabled(is_ready and facebook_video is None)
+        act_facebook.triggered.connect(lambda: self._on_push_to_facebook(video))
+        menu.addAction(act_facebook)
 
         menu.addSeparator()
 

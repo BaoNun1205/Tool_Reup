@@ -8,6 +8,7 @@ if str(SRC) not in sys.path:
 
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from auto_tiktok_editor.tiktok_profiles import profile_browser
@@ -455,6 +456,111 @@ class TikTokProfileManagerTests(unittest.TestCase):
             self.assertEqual(draft.hashtags, "#draft #brand #daily")
             self.assertEqual(rendered.hashtags, "#draft #brand #daily #source")
 
+    def test_moving_video_replaces_old_profile_hashtags_with_new_profile_hashtags(self):
+        with _temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            video_file = root / "demo.mp4"
+            video_file.write_bytes(b"fake video")
+            manager = TikTokProfileManager(
+                db_path=root / "accounts.sqlite3",
+                profiles_root=root / "profiles",
+                project_root=root,
+            )
+            old_account = manager.add_account("Old Profile", "google", hashtags="#old #shared")
+            new_account = manager.add_account("New Profile", "google", hashtags="#new #shared")
+            video = manager.add_video(
+                video_file,
+                hashtags="#product #old #shared",
+                account_id=old_account.id,
+            )
+
+            moved = manager.update_video_details(
+                video.id,
+                caption=video.caption,
+                hashtags=video.hashtags,
+                product_id=video.product_id,
+                publish_mode=video.publish_mode,
+                scheduled_at=video.scheduled_at,
+                note=video.note,
+                account_id=new_account.id,
+            )
+
+            self.assertEqual(moved.account_id, new_account.id)
+            self.assertEqual(moved.hashtags, "#product #new #shared")
+
+    def test_enqueue_facebook_video_copies_file_and_removes_profile_hashtags(self):
+        with _temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            video_file = root / "demo.mp4"
+            video_file.write_bytes(b"facebook video")
+            manager = TikTokProfileManager(
+                db_path=root / "accounts.sqlite3",
+                profiles_root=root / "profiles",
+                project_root=root,
+            )
+            account = manager.add_account("Food Profile", "google", hashtags="#profile #shared")
+            source = manager.add_video(
+                video_file,
+                caption="Demo",
+                hashtags="#product #profile #shared",
+                note="Telegram source: https://example.com/video\nProduct link: https://vt.tiktok.com/product/",
+                account_id=account.id,
+            )
+
+            queued = manager.enqueue_facebook_video(source.id)
+            queued_again = manager.enqueue_facebook_video(source.id)
+            queued_path = manager.resolve_facebook_video_path(queued)
+
+            self.assertEqual(queued.id, queued_again.id)
+            self.assertEqual(queued.hashtags, "#product")
+            self.assertEqual(queued.product_url, "https://vt.tiktok.com/product/")
+            self.assertEqual(queued.status, "processing")
+            self.assertTrue(queued_path.is_file())
+            self.assertEqual(queued_path.read_bytes(), b"facebook video")
+            self.assertNotEqual(queued_path, video_file)
+
+            self.assertEqual(manager.recover_interrupted_facebook_videos(), 1)
+            recovered = manager.get_facebook_video(queued.id)
+            self.assertEqual(recovered.status, "error")
+            self.assertIn("gián đoạn", recovered.note)
+
+    def test_facebook_video_name_limit_and_delete_do_not_affect_source_video(self):
+        with _temporary_directory() as temp_dir:
+            root = Path(temp_dir)
+            video_file = root / "demo.mp4"
+            video_file.write_bytes(b"facebook video")
+            manager = TikTokProfileManager(
+                db_path=root / "accounts.sqlite3",
+                profiles_root=root / "profiles",
+                project_root=root,
+            )
+            source = manager.add_video(video_file)
+            queued = manager.enqueue_facebook_video(source.id)
+
+            with self.assertRaisesRegex(ValueError, "50 characters"):
+                manager.update_facebook_video_details(
+                    queued.id,
+                    display_product_name="x" * 51,
+                    caption="Caption",
+                    hashtags="#demo",
+                )
+
+            updated = manager.update_facebook_video_details(
+                queued.id,
+                display_product_name="Tên sản phẩm Facebook",
+                caption="Caption #inline",
+                hashtags="#demo",
+            )
+            report = manager.delete_facebook_videos([updated.id])
+
+            self.assertEqual(updated.display_product_name, "Tên sản phẩm Facebook")
+            self.assertEqual(updated.caption, "Caption")
+            self.assertEqual(updated.hashtags, "#demo #inline")
+            self.assertEqual(report["deleted"], 1)
+            self.assertIsNone(manager.get_facebook_video(updated.id))
+            self.assertTrue(video_file.is_file())
+            self.assertIsNotNone(manager.get_video(source.id))
+
     def test_source_channel_crud_per_account(self):
         with _temporary_directory() as temp_dir:
             root = Path(temp_dir)
@@ -637,6 +743,26 @@ class TikTokProfileManagerTests(unittest.TestCase):
             sent_video = manager.update_video_status(video.id, "sent")
 
             self.assertEqual(sent_video.status, "sent")
+
+    def test_sent_video_can_still_be_opened_for_preview(self):
+        from auto_tiktok_editor.tiktok_profiles.qt_ui.views import videos_view
+
+        with _temporary_directory() as temp_dir:
+            video_path = Path(temp_dir) / "sent.mp4"
+            video_path.write_bytes(b"video")
+            video = SimpleNamespace(id=3123, status="sent")
+            fake_view = SimpleNamespace(
+                manager=SimpleNamespace(resolve_video_path=mock.Mock(return_value=video_path)),
+                window=lambda: None,
+            )
+
+            with mock.patch.object(videos_view.sys, "platform", "linux"), mock.patch.object(
+                videos_view.subprocess, "Popen"
+            ) as open_video, mock.patch.object(videos_view.InfoBar, "warning") as warning:
+                videos_view.VideosView._on_play_video(fake_view, video)
+
+            open_video.assert_called_once_with(["xdg-open", str(video_path)])
+            warning.assert_not_called()
 
     def test_add_video_draft_cut_mode_and_mark_rendered(self):
         with _temporary_directory() as temp_dir:

@@ -89,6 +89,8 @@ class GranularCleanupTestCase(unittest.TestCase):
         self.assertIn("telegram_inputs", item_keys)
         self.assertIn("browser_cache", item_keys)
         self.assertIn("output_videos", item_keys)
+        self.assertIn("video_queue", item_keys)
+        self.assertNotIn("output_video_files_only", item_keys)
 
         # 2. Test selective cleanup: clean safe items ONLY (keep output_videos)
         selected_safe = ["tmp", "logs", "telegram_inputs", "browser_cache"]
@@ -139,11 +141,6 @@ class GranularCleanupTestCase(unittest.TestCase):
                 return queue_final
 
         manager = FakeManager()
-        items = scan_cleanup_items(self.config, self.base_dir, manager=manager)
-        lightweight_item = next(item for item in items if item.key == "output_video_files_only")
-        self.assertEqual(lightweight_item.file_count, 2)
-        self.assertEqual(lightweight_item.size_bytes, session_final.stat().st_size + queue_final.stat().st_size)
-
         report = execute_granular_cleanup(
             selected_keys=["output_video_files_only"],
             config=self.config,

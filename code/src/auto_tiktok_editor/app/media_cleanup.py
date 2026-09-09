@@ -402,25 +402,7 @@ def scan_cleanup_items(
         )
     )
 
-    # 8. Final output videos only.  This intentionally preserves input images,
-    # URL/link marker files, session folders, and video records so a video can
-    # be rendered again with another mode.
-    final_output_paths = list(_iter_final_output_video_paths(config, root, manager))
-    final_output_size = sum(_file_size(path) for path in final_output_paths)
-    items.append(
-        CleanupItemInfo(
-            key="output_video_files_only",
-            group="media",
-            title="Chỉ xóa video Output (giữ ảnh & link)",
-            description="Chỉ xóa file video thành phẩm; giữ nguyên ảnh sản phẩm, link nguồn, thư mục và dữ liệu để có thể tạo lại ở mode khác.",
-            file_count=len(final_output_paths),
-            size_bytes=final_output_size,
-            default_checked=False,
-            warning_note="Video sẽ cần render lại trước khi gửi/đăng",
-        )
-    )
-
-    # 9. Build Dir
+    # 8. Build Dir
     build_dir = root / "build"
     b_files, b_size = _calc_dir_stats(build_dir)
     if build_dir.exists() and b_files > 0:

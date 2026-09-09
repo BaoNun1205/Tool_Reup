@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from PySide6.QtCore import Qt, Signal, Slot
 from PySide6.QtWidgets import (
@@ -48,10 +48,14 @@ from auto_tiktok_editor.phone_control import (
 )
 from auto_tiktok_editor.tiktok_profiles.qt_ui.components.stat_card import StatCard
 from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import ModernPhoneIcon, TIKTOK_ANDROID_PACKAGES
+from auto_tiktok_editor.tiktok_profiles.qt_ui.workers import WorkerThread
 
 
 class PhoneControlView(QWidget):
     """View to manage Android Phone over ADB, Scrcpy screen mirroring, and Automations."""
+
+    hotkey_screenshot_requested = Signal()
+    hotkey_close_requested = Signal()
 
     def __init__(
         self,
@@ -62,6 +66,10 @@ class PhoneControlView(QWidget):
         self.config = config
         self.phone_settings = load_phone_control_settings()
         self.phone_controller = PhoneController(self.config, on_event=self._on_phone_event)
+        self._phone_worker: WorkerThread | None = None
+        self._shutting_down = False
+        self.hotkey_screenshot_requested.connect(self._on_take_screenshot)
+        self.hotkey_close_requested.connect(self._on_close_current_app)
 
         # Global Hotkeys
         self.screenshot_hotkey = WindowsGlobalHotkey(
@@ -318,10 +326,52 @@ class PhoneControlView(QWidget):
         pass
 
     def _on_hotkey_screenshot(self) -> None:
-        self._on_take_screenshot()
+        self.hotkey_screenshot_requested.emit()
 
     def _on_hotkey_close(self) -> None:
-        self._on_close_current_app()
+        self.hotkey_close_requested.emit()
+
+    def _set_phone_actions_enabled(self, enabled: bool) -> None:
+        for name in (
+            "connect_btn", "disconnect_btn", "refresh_devices_btn",
+            "start_scrcpy_btn", "stop_scrcpy_btn", "btn_open_tiktok",
+            "btn_close_app", "btn_clear_tiktok", "btn_screenshot", "btn_open_gallery",
+        ):
+            button = getattr(self, name, None)
+            if button is not None:
+                button.setEnabled(enabled)
+
+    def _run_phone_operation(
+        self,
+        operation: Callable[[], Any],
+        on_success: Callable[[Any], None],
+        error_title: str,
+    ) -> None:
+        if self._shutting_down:
+            return
+        if self._phone_worker is not None and self._phone_worker.isRunning():
+            InfoBar.info("Điện thoại đang bận", "Vui lòng chờ thao tác hiện tại hoàn tất.", parent=self.window())
+            return
+        self._set_phone_actions_enabled(False)
+        worker = WorkerThread(operation, parent=self)
+        self._phone_worker = worker
+
+        def _cleanup(*_args: Any) -> None:
+            if self._phone_worker is worker:
+                self._phone_worker = None
+            if not self._shutting_down:
+                self._set_phone_actions_enabled(True)
+            worker.deleteLater()
+
+        def _error(exc: Exception, _traceback_text: str) -> None:
+            if not self._shutting_down:
+                InfoBar.error(error_title, str(exc), parent=self.window())
+
+        worker.finished_task.connect(on_success)
+        worker.finished_task.connect(_cleanup)
+        worker.error_task.connect(_error)
+        worker.error_task.connect(_cleanup)
+        worker.start()
 
     def _on_connect_adb(self) -> None:
         settings = self._save_ui_settings()
@@ -329,26 +379,26 @@ class PhoneControlView(QWidget):
         if settings.connection_mode == "wifi" and not address:
             InfoBar.warning("Thiếu địa chỉ", "Vui lòng nhập IP và Port của điện thoại!", parent=self.window())
             return
-        try:
-            result = self.phone_controller.connect(address, connection_mode=settings.connection_mode)
+        def _done(result: dict[str, Any]) -> None:
             connected_serial = str(result.get("address") or "")
             self.status_card.set_value("Đã kết nối ADB")
             InfoBar.success("Thành công", f"Đã kết nối tới {connected_serial}", parent=self.window())
-        except Exception as exc:
-            self.status_card.set_value("Lỗi kết nối")
-            InfoBar.error("Lỗi kết nối ADB", str(exc), parent=self.window())
+
+        self._run_phone_operation(
+            lambda: self.phone_controller.connect(address, connection_mode=settings.connection_mode),
+            _done,
+            "Lỗi kết nối ADB",
+        )
 
     def _on_disconnect_adb(self) -> None:
-        try:
-            self.phone_controller.disconnect()
+        def _done(_result: Any) -> None:
             self.status_card.set_value("Đã ngắt")
             InfoBar.info("Đã ngắt", "Đã ngắt kết nối ADB", parent=self.window())
-        except Exception as exc:
-            InfoBar.error("Lỗi", str(exc), parent=self.window())
+
+        self._run_phone_operation(self.phone_controller.disconnect, _done, "Lỗi ngắt kết nối")
 
     def _on_refresh_devices(self) -> None:
-        try:
-            devices = self.phone_controller.list_devices()
+        def _done(devices: list[str]) -> None:
             if devices:
                 dev = devices[0]
                 if self._connection_mode() == "wifi" and ":" in dev:
@@ -360,59 +410,50 @@ class PhoneControlView(QWidget):
                 InfoBar.success("Tìm thấy thiết bị", f"Đã phát hiện: {', '.join(devices)}", parent=self.window())
             else:
                 InfoBar.warning("Không có thiết bị", "Không tìm thấy thiết bị Android nào qua ADB.", parent=self.window())
-        except Exception as exc:
-            InfoBar.error("Lỗi quét thiết bị", str(exc), parent=self.window())
+
+        self._run_phone_operation(self.phone_controller.list_devices, _done, "Lỗi quét thiết bị")
 
     def _on_start_scrcpy(self) -> None:
         settings = self._save_ui_settings()
-        try:
-            self.phone_controller.start_scrcpy(settings)
+        def _done(_result: Any) -> None:
             self.status_card.set_value("Đang chiếu Scrcpy")
             InfoBar.success("Scrcpy", "Đang khởi động cửa sổ chiếu màn hình...", parent=self.window())
-        except Exception as exc:
-            InfoBar.error("Lỗi mở Scrcpy", str(exc), parent=self.window())
+
+        self._run_phone_operation(lambda: self.phone_controller.start_scrcpy(settings), _done, "Lỗi mở Scrcpy")
 
     def _on_stop_scrcpy(self) -> None:
-        try:
-            self.phone_controller.stop_scrcpy()
+        def _done(_result: Any) -> None:
             self.status_card.set_value("Đã dừng Scrcpy")
             InfoBar.info("Scrcpy", "Đã đóng màn hình Scrcpy.", parent=self.window())
-        except Exception as exc:
-            InfoBar.error("Lỗi", str(exc), parent=self.window())
+
+        self._run_phone_operation(self.phone_controller.stop_scrcpy, _done, "Lỗi dừng Scrcpy")
 
     def _on_open_tiktok(self) -> None:
-        try:
-            self.phone_controller.open_tiktok()
+        def _done(_result: Any) -> None:
             InfoBar.success("Thao tác", "Đã mở TikTok trên điện thoại.", parent=self.window())
-        except Exception as exc:
-            InfoBar.error("Lỗi mở TikTok", str(exc), parent=self.window())
+
+        self._run_phone_operation(self.phone_controller.open_tiktok, _done, "Lỗi mở TikTok")
 
     def _on_close_current_app(self) -> None:
-        try:
-            self.phone_controller.close_current_app()
+        def _done(_result: Any) -> None:
             InfoBar.info("Thao tác", "Đã đóng app đang chạy trên điện thoại.", parent=self.window())
-        except Exception as exc:
-            InfoBar.error("Lỗi", str(exc), parent=self.window())
+
+        self._run_phone_operation(self.phone_controller.close_current_app, _done, "Lỗi đóng ứng dụng")
 
     def _on_clear_tiktok_data(self) -> None:
-        try:
-            self.phone_controller.clear_tiktok_cache()
+        def _done(_result: Any) -> None:
             InfoBar.success("Đã xóa cache", "Đã dọn dẹp bộ nhớ đệm TikTok trên điện thoại.", parent=self.window())
-        except Exception as exc:
-            InfoBar.error("Lỗi", str(exc), parent=self.window())
+
+        self._run_phone_operation(self.phone_controller.clear_tiktok_cache, _done, "Lỗi xóa cache")
 
     def _on_take_screenshot(self) -> None:
-        try:
-            path = self.phone_controller.take_screenshot()
+        def _done(path: Path) -> None:
             InfoBar.success("Đã chụp", f"Đã lưu ảnh màn hình vào: {path}", parent=self.window())
-        except Exception as exc:
-            InfoBar.error("Lỗi chụp màn hình", str(exc), parent=self.window())
+
+        self._run_phone_operation(self.phone_controller.take_screenshot, _done, "Lỗi chụp màn hình")
 
     def _on_open_gallery(self) -> None:
-        try:
-            self.phone_controller.open_gallery()
-        except Exception as exc:
-            InfoBar.error("Lỗi", str(exc), parent=self.window())
+        self._run_phone_operation(self.phone_controller.open_gallery, lambda _result: None, "Lỗi mở bộ sưu tập")
 
     def apply_theme_mode(self, mode: str) -> None:
         clean = "dark" if str(mode).strip().lower() == "dark" else "light"
@@ -424,6 +465,11 @@ class PhoneControlView(QWidget):
         super().closeEvent(event)
 
     def shutdown(self) -> None:
+        self._shutting_down = True
+        worker = self._phone_worker
+        self._phone_worker = None
+        if worker is not None:
+            worker.stop(timeout_ms=2000)
         try:
             self.screenshot_hotkey.stop()
         except Exception:

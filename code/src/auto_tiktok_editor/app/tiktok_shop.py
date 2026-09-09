@@ -44,23 +44,7 @@ def resolve_tiktok_shop_product(url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS
     where TikTok omits that parameter.
     """
 
-    source_url = str(url or "").strip()
-    parsed_source = urlparse(source_url)
-    if parsed_source.scheme not in {"http", "https"} or not parsed_source.netloc:
-        raise TikTokShopResolveError("Link sản phẩm phải bắt đầu bằng http:// hoặc https://.")
-
-    request = Request(source_url, headers={"User-Agent": _USER_AGENT, "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8"})
-    try:
-        with urlopen(request, timeout=max(1, int(timeout))) as response:
-            resolved_url = str(response.geturl() or source_url)
-            content_type = str(response.headers.get("Content-Type") or "")
-            response_body = response.read(512 * 1024) if "html" in content_type.lower() else b""
-    except Exception as exc:
-        raise TikTokShopResolveError("Không thể mở link TikTok Shop. Hãy thử lại sau.") from exc
-
-    og_info = _og_info_from_url(resolved_url)
-    if not og_info:
-        og_info = _og_info_from_page(response_body)
+    source_url, resolved_url, og_info = _resolve_tiktok_shop_metadata(url, timeout)
 
     title = str(og_info.get("title") or "").strip()
     image_url = str(og_info.get("image") or og_info.get("image_url") or "").strip()
@@ -78,6 +62,39 @@ def resolve_tiktok_shop_product(url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS
         title=title,
         image_url=image_url,
     )
+
+
+def resolve_tiktok_shop_product_title(url: str, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> str:
+    """Return only the source product title, without requiring an image or Product ID."""
+    _source_url, _resolved_url, og_info = _resolve_tiktok_shop_metadata(url, timeout)
+    title = str(og_info.get("title") or "").strip()
+    if not title:
+        raise TikTokShopResolveError("Không tìm thấy tên sản phẩm trong link TikTok Shop này.")
+    return title
+
+
+def _resolve_tiktok_shop_metadata(url: str, timeout: int) -> tuple[str, str, dict[str, Any]]:
+    source_url = str(url or "").strip()
+    parsed_source = urlparse(source_url)
+    if parsed_source.scheme not in {"http", "https"} or not parsed_source.netloc:
+        raise TikTokShopResolveError("Link sản phẩm phải bắt đầu bằng http:// hoặc https://.")
+
+    request = Request(
+        source_url,
+        headers={"User-Agent": _USER_AGENT, "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8"},
+    )
+    try:
+        with urlopen(request, timeout=max(1, int(timeout))) as response:
+            resolved_url = str(response.geturl() or source_url)
+            content_type = str(response.headers.get("Content-Type") or "")
+            response_body = response.read(512 * 1024) if "html" in content_type.lower() else b""
+    except Exception as exc:
+        raise TikTokShopResolveError("Không thể mở link TikTok Shop. Hãy thử lại sau.") from exc
+
+    og_info = _og_info_from_url(resolved_url)
+    if not og_info:
+        og_info = _og_info_from_page(response_body)
+    return source_url, resolved_url, og_info
 
 
 def download_tiktok_shop_product_image(product: TikTokShopProduct, destination_dir: Path) -> Path:

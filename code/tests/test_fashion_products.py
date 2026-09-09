@@ -12,8 +12,9 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from auto_tiktok_editor.app.tiktok_shop import resolve_tiktok_shop_product
+from auto_tiktok_editor.app.tiktok_shop import resolve_tiktok_shop_product, resolve_tiktok_shop_product_title
 from auto_tiktok_editor.app.fashion_bot import FashionProductBotService
+from auto_tiktok_editor.app.fashion_products import reclassify_existing_fashion_products
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.fashion_bot_settings import FashionBotSettings
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
@@ -39,6 +40,32 @@ class _Response:
 
 
 class FashionProductTests(unittest.TestCase):
+    def test_reclassifies_existing_products_and_persists_gemini_categories(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = root / "shirt.webp"
+            image.write_bytes(b"image")
+            manager = TikTokProfileManager(
+                db_path=root / "manager.sqlite3",
+                profiles_root=root / "profiles",
+                project_root=root,
+            )
+            product = manager.add_fashion_product(
+                "https://shop.tiktok.com/vn/pdp/1",
+                "1",
+                "Sơ mi trắng công sở",
+                image,
+            )
+
+            with mock.patch(
+                "auto_tiktok_editor.app.fashion_products.classify_fashion_products",
+                return_value={product.id: "Áo Sơ Mi"},
+            ):
+                report = reclassify_existing_fashion_products(manager)
+
+            self.assertEqual(report["updated"], 1)
+            self.assertEqual(manager.get_fashion_product(product.id).category, "Áo Sơ Mi")
+
     def test_resolves_title_image_and_product_id_from_redirect_og_info(self):
         og_info = json.dumps(
             {"title": "Áo thun Boxy", "image": "https://p16.example/product.webp"},
@@ -54,6 +81,17 @@ class FashionProductTests(unittest.TestCase):
         self.assertEqual(product.product_id, "1737062736670590410")
         self.assertEqual(product.title, "Áo thun Boxy")
         self.assertEqual(product.image_url, "https://p16.example/product.webp")
+
+    def test_resolves_facebook_product_title_without_requiring_image_or_product_id(self):
+        og_info = json.dumps({"title": "Tên sản phẩm từ link"}, ensure_ascii=False)
+        final_url = "https://shop.tiktok.com/vn/product?" + urlencode({"og_info": og_info})
+        with mock.patch(
+            "auto_tiktok_editor.app.tiktok_shop.urlopen",
+            return_value=_Response(final_url),
+        ):
+            title = resolve_tiktok_shop_product_title("https://vt.tiktok.com/example")
+
+        self.assertEqual(title, "Tên sản phẩm từ link")
 
     def test_fashion_product_record_persists_generated_description_and_sent_status(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -76,6 +114,7 @@ class FashionProductTests(unittest.TestCase):
                 product.id,
                 "Áo thun Boxy mặc đẹp quá.",
                 "#thoitrang #aothun #boxy #outfit #tiktokshop",
+                category="Áo Thun",
             )
             video = root / "fashion_products" / "videos" / "boxy.mp4"
             video.parent.mkdir(parents=True)
@@ -85,6 +124,7 @@ class FashionProductTests(unittest.TestCase):
 
         self.assertEqual(ready.status, "ready")
         self.assertIn("#thoitrang", ready.description)
+        self.assertEqual(ready.category, "Áo Thun")
         self.assertEqual(manager.resolve_fashion_product_video_path(with_video), video)
         self.assertEqual(sent.status, "sent")
 
@@ -100,6 +140,7 @@ class FashionProductTests(unittest.TestCase):
         product = SimpleNamespace(
             product_name="Áo thun Boxy",
             product_id="1737062736670590410",
+            category="Áo Thun",
             description="Áo thun Boxy cực chất.\n#thoitrang #aothun #boxy #outfit #tiktokshop",
         )
         with mock.patch(

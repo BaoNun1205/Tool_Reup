@@ -31,6 +31,7 @@ $preserveItems = @(
     "telegram_bot_token.txt",
     "profiles",
     "profile_video_queue",
+    "facebook_video_queue",
     "logs"
 )
 
@@ -71,6 +72,7 @@ Write-Host "Qua trinh nay co the mat 10-30 phut. Dung bam Ctrl+C neu khong muon 
     --include-package=lxml `
     --include-package-data=customtkinter `
     --include-data-dir=assets=assets `
+    --include-data-dir=src/auto_tiktok_editor/tiktok_profiles/qt_ui/assets=auto_tiktok_editor/tiktok_profiles/qt_ui/assets `
     --include-data-dir=tools=tools `
     --windows-console-mode=disable `
     --windows-icon-from-ico=$iconPath `

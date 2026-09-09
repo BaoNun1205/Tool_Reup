@@ -33,12 +33,12 @@ from qfluentwidgets import (
     PushButton,
     SegmentedWidget,
     SubtitleLabel,
-    TableWidget,
     ToolButton,
 )
 from qfluentwidgets.common.smooth_scroll import SmoothMode
 
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
+from auto_tiktok_editor.tiktok_profiles.qt_ui.components.empty_state_table import EmptyStateTableWidget
 from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import (
     format_vietnam_datetime,
     get_current_theme_mode,
@@ -57,15 +57,17 @@ class LogView(QWidget):
         self.manager = manager
         self._max_lines = 3000
         self._logs_cache: list[dict[str, Any]] = []
+        self._filter_timer = QTimer(self)
+        self._filter_timer.setSingleShot(True)
+        self._filter_timer.setInterval(120)
+        self._filter_timer.timeout.connect(self._apply_filters)
 
         self._init_ui()
-        self.refresh_logs()
 
-        # Auto-sync timer every 2.5 seconds
+        # Poll only while the page is visible.
         self._sync_timer = QTimer(self)
         self._sync_timer.setInterval(2500)
         self._sync_timer.timeout.connect(self._sync_logs_live)
-        self._sync_timer.start()
 
     def _init_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -91,19 +93,19 @@ class LogView(QWidget):
         self.search_edit.setPlaceholderText("Lọc từ khóa trong log...")
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setFixedWidth(200)
-        self.search_edit.textChanged.connect(self._apply_filters)
+        self.search_edit.textChanged.connect(self._schedule_filter_update)
         header_layout.addWidget(self.search_edit)
 
         self.level_combo = ComboBox(self)
         self.level_combo.addItems(["Tất cả cấp độ", "INFO", "WARNING", "ERROR"])
         self.level_combo.setFixedWidth(130)
-        self.level_combo.currentIndexChanged.connect(self._apply_filters)
+        self.level_combo.currentIndexChanged.connect(self._schedule_filter_update)
         header_layout.addWidget(self.level_combo)
 
         self.action_combo = ComboBox(self)
         self.action_combo.addItem("Tất cả hành động")
         self.action_combo.setFixedWidth(160)
-        self.action_combo.currentIndexChanged.connect(self._apply_filters)
+        self.action_combo.currentIndexChanged.connect(self._schedule_filter_update)
         header_layout.addWidget(self.action_combo)
 
         self.chk_autoscroll = CheckBox("Tự cuộn", self)
@@ -132,7 +134,11 @@ class LogView(QWidget):
         self.stack = QStackedWidget(self)
 
         # Page 0: Structured Table
-        self.table = TableWidget(self.stack)
+        self.table = EmptyStateTableWidget(
+            self.stack,
+            empty_text="Không có log phù hợp với bộ lọc hiện tại.",
+            empty_icon=FIF.DOCUMENT,
+        )
         if hasattr(self.table, "scrollDelagate") and hasattr(self.table.scrollDelagate, "verticalSmoothScroll"):
             self.table.scrollDelagate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
             self.table.scrollDelagate.horizonSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
@@ -176,9 +182,14 @@ class LogView(QWidget):
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
-        self.refresh_logs()
+        self._sync_logs_live()
         if hasattr(self, "_sync_timer") and not self._sync_timer.isActive():
             self._sync_timer.start()
+
+    def hideEvent(self, event) -> None:
+        self._sync_timer.stop()
+        self._filter_timer.stop()
+        super().hideEvent(event)
 
     def apply_theme_mode(self, mode: str | None = None) -> None:
         m = (mode or get_current_theme_mode()).lower()
@@ -208,7 +219,7 @@ class LogView(QWidget):
                     line-height: 1.5;
                 }
             """)
-        self._apply_filters()
+        self.table.viewport().update()
 
     def refresh_logs(self) -> None:
         """Fetch all logs from SQLite database and rebuild view."""
@@ -277,7 +288,7 @@ class LogView(QWidget):
 
     @Slot(str, str, str)
     def append_log(self, timestamp: str, level: str, message: str, action: str = "system") -> None:
-        """Slot for live logging bridge signals."""
+        """Append one live record without rebuilding thousands of existing rows."""
         entry = {
             "id": 0,
             "timestamp": timestamp or format_vietnam_datetime(datetime.now()),
@@ -289,7 +300,60 @@ class LogView(QWidget):
         self._logs_cache.insert(0, entry)
         if len(self._logs_cache) > self._max_lines:
             self._logs_cache.pop()
-        self._apply_filters()
+        if self.action_combo.findText(entry["action"]) < 0:
+            self.action_combo.blockSignals(True)
+            self.action_combo.addItem(entry["action"])
+            self.action_combo.blockSignals(False)
+        if self.isVisible() and self._entry_matches_filters(entry):
+            self._insert_visible_log_entry(entry)
+
+    def _schedule_filter_update(self, *_args: Any) -> None:
+        self._filter_timer.start()
+
+    def _entry_matches_filters(self, entry: dict[str, Any]) -> bool:
+        selected_level = self.level_combo.currentText()
+        selected_action = self.action_combo.currentText()
+        query = self.search_edit.text().strip().lower()
+        if selected_level != "Tất cả cấp độ" and entry["level"] != selected_level:
+            return False
+        if selected_action != "Tất cả hành động" and entry["action"] != selected_action:
+            return False
+        if query:
+            haystack = " ".join(
+                str(entry[key] or "") for key in ("message", "action", "target", "level")
+            ).lower()
+            if query not in haystack:
+                return False
+        return True
+
+    def _insert_visible_log_entry(self, entry: dict[str, Any]) -> None:
+        self.table.setUpdatesEnabled(False)
+        self.table.insertRow(0)
+        ts_item = QTableWidgetItem(entry["timestamp"])
+        ts_item.setForeground(QColor("#7F8596"))
+        lvl_item = QTableWidgetItem(f"● {entry['level']}")
+        font = lvl_item.font()
+        font.setBold(True)
+        lvl_item.setFont(font)
+        level_color = "#E24A4A" if entry["level"] == "ERROR" else ("#F59E0B" if entry["level"] == "WARNING" else "#3B82F6")
+        lvl_item.setForeground(QColor(level_color))
+        target_item = QTableWidgetItem(entry["target"])
+        target_item.setForeground(QColor("#7F8596"))
+        message_item = QTableWidgetItem(entry["message"])
+        message_item.setToolTip(entry["message"])
+        for column, item in enumerate(
+            (ts_item, lvl_item, QTableWidgetItem(entry["action"]), target_item, message_item)
+        ):
+            self.table.setItem(0, column, item)
+        while self.table.rowCount() > self._max_lines:
+            self.table.removeRow(self.table.rowCount() - 1)
+        self.table.setUpdatesEnabled(True)
+        self.table.viewport().update()
+
+        line = f"[{entry['timestamp']}] [{entry['level']:7s}] [{entry['action']}] {entry['message']}"
+        self.console.appendPlainText(line)
+        if self.chk_autoscroll.isChecked():
+            self.console.moveCursor(QTextCursor.MoveOperation.End)
 
     def _apply_filters(self) -> None:
         selected_level = self.level_combo.currentText()
@@ -316,6 +380,7 @@ class LogView(QWidget):
 
         # 1. Update Table
         self.table.blockSignals(True)
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(filtered))
 
         for row, entry in enumerate(filtered):
@@ -353,6 +418,8 @@ class LogView(QWidget):
             self.table.setItem(row, 4, msg_item)
 
         self.table.blockSignals(False)
+        self.table.setUpdatesEnabled(True)
+        self.table.viewport().update()
 
         # 2. Update Terminal Console (Chronological order: Oldest to Newest)
         console_lines = []
@@ -424,6 +491,7 @@ class LogView(QWidget):
     def shutdown(self) -> None:
         if hasattr(self, "_sync_timer"):
             self._sync_timer.stop()
+        self._filter_timer.stop()
 
     def closeEvent(self, event) -> None:
         self.shutdown()

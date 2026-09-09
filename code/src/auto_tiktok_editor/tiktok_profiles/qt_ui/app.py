@@ -24,6 +24,7 @@ from qfluentwidgets import (
 from auto_tiktok_editor.config import PipelineConfig
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
 from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import (
+    FacebookIcon,
     MODERN_DARK_STYLESHEET,
     MODERN_LIGHT_STYLESHEET,
     ModernPhoneIcon,
@@ -129,6 +130,7 @@ class TikTokProfileManagerApp(FluentWindow):
     ) -> None:
         super().__init__()
         self._startup_progress = startup_progress
+        self._applied_theme_mode: str | None = None
         self._report_startup("Đang mở dữ liệu ứng dụng...")
         self.config = config or PipelineConfig.from_env()
         self.manager = manager or TikTokProfileManager()
@@ -168,14 +170,20 @@ class TikTokProfileManagerApp(FluentWindow):
         clean_mode = "dark" if str(mode).strip().lower() == "dark" else "light"
         set_current_theme_mode(clean_mode)
 
-        if clean_mode == "dark":
-            setTheme(Theme.DARK)
-            setThemeColor("#8B7CFF")
-            self.setStyleSheet(MODERN_DARK_STYLESHEET)
-        else:
-            setTheme(Theme.LIGHT)
-            setThemeColor("#6D5DFB")
-            self.setStyleSheet(MODERN_LIGHT_STYLESHEET)
+        # QFluentWidgets recursively re-polishes every child whenever its theme or
+        # accent changes.  During startup this method is called once before and
+        # once after creating the pages, so applying the same global theme twice
+        # needlessly walks a very large widget tree.
+        if self._applied_theme_mode != clean_mode:
+            if clean_mode == "dark":
+                setTheme(Theme.DARK)
+                setThemeColor("#8B7CFF")
+                self.setStyleSheet(MODERN_DARK_STYLESHEET)
+            else:
+                setTheme(Theme.LIGHT)
+                setThemeColor("#6D5DFB")
+                self.setStyleSheet(MODERN_LIGHT_STYLESHEET)
+            self._applied_theme_mode = clean_mode
 
         if not initial:
             # Propagate theme updates to subviews
@@ -187,6 +195,8 @@ class TikTokProfileManagerApp(FluentWindow):
                 self.sources_view.apply_theme_mode(clean_mode)
             if hasattr(self, "videos_view"):
                 self.videos_view.apply_theme_mode(clean_mode)
+            if hasattr(self, "facebook_view"):
+                self.facebook_view.apply_theme_mode(clean_mode)
             if hasattr(self, "fashion_view"):
                 self.fashion_view.apply_theme_mode(clean_mode)
             if hasattr(self, "phone_view"):
@@ -235,6 +245,12 @@ class TikTokProfileManagerApp(FluentWindow):
 
         self.videos_view = VideosView(self.manager, self.config, self)
         self.videos_view.setObjectName("videosInterface")
+
+        self._report_startup("Đang tải Facebook Pages...")
+        from auto_tiktok_editor.tiktok_profiles.qt_ui.views.facebook_view import FacebookView
+
+        self.facebook_view = FacebookView(self.manager, self.config, self)
+        self.facebook_view.setObjectName("facebookInterface")
 
         self._report_startup("Đang tải Fashion...")
         from auto_tiktok_editor.tiktok_profiles.qt_ui.views.fashion_view import FashionView
@@ -294,6 +310,12 @@ class TikTokProfileManagerApp(FluentWindow):
             self.videos_view,
             FIF.VIDEO,
             "Videos",
+            NavigationItemPosition.TOP,
+        )
+        self.addSubInterface(
+            self.facebook_view,
+            FacebookIcon(),
+            "Facebook",
             NavigationItemPosition.TOP,
         )
         self.addSubInterface(
@@ -370,10 +392,7 @@ class TikTokProfileManagerApp(FluentWindow):
 
     def _on_request_sources_view(self, account) -> None:
         name = account if isinstance(account, str) else getattr(account, "name", "")
-        for i in range(self.sources_view.profile_combo.count()):
-            if self.sources_view.profile_combo.itemText(i) == name:
-                self.sources_view.profile_combo.setCurrentIndex(i)
-                break
+        self.sources_view.set_active_profile(name)
         self.switchTo(self.sources_view)
 
     def shutdown(self) -> None:
@@ -385,6 +404,7 @@ class TikTokProfileManagerApp(FluentWindow):
             ("Telegram bot", self.telegram_view.shutdown),
             ("phone control", self.phone_view.shutdown),
             ("video workers", self.videos_view.shutdown),
+            ("Facebook workers", self.facebook_view.shutdown),
             ("Fashion workers", self.fashion_view.shutdown),
             ("cleanup workers", self.dashboard_view.shutdown),
             ("log polling", self.logs_view.shutdown),

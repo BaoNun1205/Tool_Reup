@@ -679,6 +679,37 @@ class PhoneControlTests(unittest.TestCase):
         self.assertTrue(result["phone_clipboard"])
         self.assertEqual(result["phone_clipboard_method"], "adb_cmd_clipboard")
 
+    def test_copy_text_to_clipboard_accepts_connected_usb_serial(self):
+        runner = RunnerStub(
+            [
+                CompletedProcessStub(),
+                CompletedProcessStub(stdout="123456\n"),
+            ]
+        )
+        controller = PhoneController(
+            PipelineConfig(adb_bin="adb", scrcpy_bin="scrcpy"),
+            runner=runner,
+            device_transfer=DeviceTransferStub(),
+        )
+        controller.connected_serial = "R58N123USB"
+
+        with mock.patch.object(controller, "_ui", return_value=None), mock.patch.object(
+            controller,
+            "_set_windows_clipboard_text",
+        ):
+            result = controller.copy_text_to_clipboard(
+                "123456",
+                label="Product ID",
+                address="R58N123USB",
+                sync_to_phone=True,
+            )
+
+        self.assertTrue(result["phone_clipboard"])
+        self.assertEqual(
+            runner.commands[0],
+            ["adb", "-s", "R58N123USB", "shell", "cmd", "clipboard", "set", "123456"],
+        )
+
     def test_copy_text_to_clipboard_rejects_unsupported_adb_clipboard_command(self):
         runner = RunnerStub(
             [

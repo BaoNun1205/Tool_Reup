@@ -12,6 +12,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from auto_tiktok_editor.fashion_categories import normalize_fashion_product_category
+
 
 DEFAULT_GEMINI_MODEL = "gemini-3.7-flash"
 GEMINI_MODELS = (
@@ -34,7 +36,7 @@ FASHION_PRODUCT_COPY_INSTRUCTION = """You are writing Vietnamese TikTok Shop cop
 The product name is shown separately in the app and must not appear in the caption.
 
 Using the supplied product image and that exact product name, return ONLY valid JSON in this exact shape:
-{{"caption":"...","hashtags":["#tag1","#tag2","#tag3","#tag4","#tag5"]}}
+{{"caption":"...","hashtags":["#tag1","#tag2","#tag3","#tag4","#tag5"],"category":"Áo Thun"}}
 
 Rules:
 - Write exactly one short Vietnamese sentence, no more than 12 words. It should sound like a real person casually sharing a product they genuinely like, not an advertisement or an AI-generated review.
@@ -44,7 +46,32 @@ Rules:
 - Never invent product specifications, personal experience, discounts, or availability.
 - Return exactly 5 distinct hashtags that describe only the specific product: its garment/product type, visible style, color, material, pattern, or brand when clearly shown.
 - Never use generic discovery, platform, or trend hashtags, including #xuhuong, #fyp, #viral, #trending, #tiktok, #tiktokshop, #outfit, #fashion, or #thoitrang. Do not add any hashtag that is unrelated to the product itself.
-- Do not add markdown, explanations, keys other than caption and hashtags, or text outside the JSON object."""
+- Classify the product into exactly one of these category labels: Áo Thun, Áo Sơ Mi, Áo Khoác, Quần Jean, Quần Short. Return the label exactly as written. Choose the closest category when the title is ambiguous.
+- Do not add markdown, explanations, keys other than caption, hashtags, and category, or text outside the JSON object."""
+
+FASHION_CATEGORY_BATCH_INSTRUCTION = """Classify every Fashion product below into exactly one category.
+Allowed category labels: Áo Thun, Áo Sơ Mi, Áo Khoác, Quần Jean, Quần Short.
+Use the product name first and the existing description only as supporting context.
+Choose the closest allowed category when a product is ambiguous.
+Return ONLY a valid JSON array containing one object per supplied product in this exact shape:
+[{{"id":1,"category":"Áo Thun"}}]
+Do not omit an ID. Do not add markdown, explanations, or any other keys.
+
+Products:
+{products_json}"""
+
+FACEBOOK_PRODUCT_NAME_INSTRUCTION = """Rewrite the following product title into one concise Vietnamese product name
+that is suitable as the customer-facing display name for a product attached to a Facebook Reel.
+
+Rules:
+- Preserve the real product type and meaningful attributes from the source title.
+- Do not invent brands, materials, specifications, promotions, prices, or claims.
+- Make it clear, natural, and useful to a shopper; remove seller codes, repetition, and keyword spam.
+- The final name must contain at most 50 characters, including spaces.
+- Return only the rewritten name, with no quotes, markdown, label, or explanation.
+
+Source product title:
+{product_name}"""
 
 
 class GeminiRequestError(RuntimeError):
@@ -55,6 +82,7 @@ class GeminiRequestError(RuntimeError):
 class FashionProductCopy:
     caption: str
     hashtags: tuple[str, ...]
+    category: str
 
     @property
     def description(self) -> str:
@@ -116,6 +144,63 @@ def write_fashion_product_copy(
         model=model,
     )
     return _parse_fashion_product_copy(response_text, clean_name)
+
+
+def classify_fashion_products(
+    products: list[tuple[int, str, str]],
+    api_key: str,
+    model: str = DEFAULT_GEMINI_MODEL,
+) -> dict[int, str]:
+    """Classify a batch of existing products using their saved name and description."""
+    payload = []
+    for raw_id, product_name, description in products:
+        product_id = int(raw_id)
+        clean_name = re.sub(r"\s+", " ", str(product_name or "")).strip()
+        if not clean_name:
+            raise GeminiRequestError("Thiếu tên sản phẩm để Gemini phân loại.")
+        payload.append(
+            {
+                "id": product_id,
+                "product_name": clean_name,
+                "description": str(description or "").strip()[:500],
+            }
+        )
+    if not payload:
+        return {}
+    response_text = _generate_content(
+        parts=[
+            {
+                "text": FASHION_CATEGORY_BATCH_INSTRUCTION.format(
+                    products_json=json.dumps(payload, ensure_ascii=False)
+                )
+            }
+        ],
+        api_key=api_key,
+        model=model,
+    )
+    return _parse_fashion_category_batch(response_text, {item["id"] for item in payload})
+
+
+def rewrite_facebook_product_name(
+    product_name: str,
+    api_key: str,
+    model: str = DEFAULT_GEMINI_MODEL,
+) -> str:
+    """Rewrite a source product title for a Facebook Reel product display name."""
+    clean_name = re.sub(r"\s+", " ", str(product_name or "")).strip()
+    if not clean_name:
+        raise GeminiRequestError("Thiếu tên sản phẩm gốc để Gemini viết lại.")
+    response_text = _generate_content(
+        parts=[{"text": FACEBOOK_PRODUCT_NAME_INSTRUCTION.format(product_name=clean_name)}],
+        api_key=api_key,
+        model=model,
+    )
+    rewritten = re.sub(r"\s+", " ", str(response_text or "")).strip().strip("`\"'").strip()
+    if not rewritten:
+        raise GeminiRequestError("Gemini không trả về tên sản phẩm.")
+    if "\n" in rewritten or len(rewritten) > 50:
+        raise GeminiRequestError("Tên sản phẩm Gemini tạo phải nằm trên một dòng và không quá 50 ký tự.")
+    return rewritten
 
 
 def _load_image_part(image_path: str | Path) -> dict[str, Any]:
@@ -210,8 +295,9 @@ def _parse_fashion_product_copy(response_text: str, product_name: str) -> Fashio
 
     caption = str(payload.get("caption") or "").strip()
     raw_hashtags = payload.get("hashtags")
-    if not caption or not isinstance(raw_hashtags, list):
-        raise GeminiRequestError("Gemini chưa trả về đủ caption và hashtag. Hãy thử lại.")
+    category = normalize_fashion_product_category(payload.get("category"))
+    if not caption or not isinstance(raw_hashtags, list) or not category:
+        raise GeminiRequestError("Gemini chưa trả về đủ caption, hashtag và danh mục. Hãy thử lại.")
     hashtags = []
     seen = set()
     for raw_tag in raw_hashtags:
@@ -226,7 +312,39 @@ def _parse_fashion_product_copy(response_text: str, product_name: str) -> Fashio
             hashtags.append(tag)
     if len(hashtags) != 5:
         raise GeminiRequestError("Gemini phải trả về đúng 5 hashtag. Hãy thử lại.")
-    return FashionProductCopy(caption=caption, hashtags=tuple(hashtags))
+    return FashionProductCopy(caption=caption, hashtags=tuple(hashtags), category=category)
+
+
+def _parse_fashion_category_batch(response_text: str, expected_ids: set[int]) -> dict[int, str]:
+    text = str(response_text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise GeminiRequestError("Gemini trả về danh mục không đúng định dạng.") from exc
+    if not isinstance(payload, list):
+        raise GeminiRequestError("Gemini trả về danh mục không đúng định dạng.")
+
+    categories: dict[int, str] = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        try:
+            product_id = int(item.get("id"))
+        except (TypeError, ValueError):
+            continue
+        if product_id not in expected_ids or product_id in categories:
+            continue
+        category = normalize_fashion_product_category(item.get("category"))
+        if category:
+            categories[product_id] = category
+    missing_ids = expected_ids.difference(categories)
+    if missing_ids:
+        raise GeminiRequestError(
+            "Gemini chưa phân loại đủ sản phẩm: %s." % ", ".join(str(value) for value in sorted(missing_ids))
+        )
+    return categories
 
 
 def _read_http_error(error: HTTPError) -> str:

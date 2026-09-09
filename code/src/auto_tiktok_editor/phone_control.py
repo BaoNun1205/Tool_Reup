@@ -812,7 +812,7 @@ class PhoneController:
         phone_clipboard = False
         phone_clipboard_method = ""
         if sync_to_phone:
-            target = normalize_phone_address(address or self.connected_serial)
+            target = self._connected_adb_target(address)
             self.runner.ensure_tool(self.config.adb_bin)
             phone_clipboard, phone_clipboard_method = self._set_android_clipboard_text(
                 target,
@@ -846,6 +846,13 @@ class PhoneController:
             "text_length": len(clean_text),
             "message": message,
         }
+
+    def _connected_adb_target(self, address: str = "") -> str:
+        """Resolve either a Wi-Fi address or the serial of the connected USB device."""
+        candidate = str(address or self.connected_serial or "").strip()
+        if self.connected_serial and candidate == self.connected_serial:
+            return candidate
+        return normalize_phone_address(candidate)
 
     def paste_text_with_scrcpy(self, text: str) -> dict[str, object]:
         clean_text = str(text or "")

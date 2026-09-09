@@ -32,13 +32,13 @@ from qfluentwidgets import (
     PushButton,
     RoundMenu,
     SubtitleLabel,
-    TableWidget,
     ToolButton,
 )
 from qfluentwidgets.common.smooth_scroll import SmoothMode
 
 from auto_tiktok_editor.tiktok_profiles.models import ACCOUNT_STATUSES
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
+from auto_tiktok_editor.tiktok_profiles.qt_ui.components.empty_state_table import EmptyStateTableWidget
 from auto_tiktok_editor.tiktok_profiles.qt_ui.components.stat_card import StatCard
 from auto_tiktok_editor.tiktok_profiles.qt_ui.dialogs.account_dialog import AccountDialog
 from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import (
@@ -156,7 +156,11 @@ class AccountsView(QWidget):
         main_layout.addLayout(toolbar_layout)
 
         # Accounts Table
-        self.table = TableWidget(self)
+        self.table = EmptyStateTableWidget(
+            self,
+            empty_text="Chưa có profile nào. Hãy thêm profile để bắt đầu.",
+            empty_icon=FIF.PEOPLE,
+        )
         if hasattr(self.table, "scrollDelagate") and hasattr(self.table.scrollDelagate, "verticalSmoothScroll"):
             self.table.scrollDelagate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
             self.table.scrollDelagate.horizonSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)

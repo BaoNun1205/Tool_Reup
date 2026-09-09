@@ -35,7 +35,6 @@ from qfluentwidgets import (
     PushButton,
     SmoothScrollArea,
     SubtitleLabel,
-    TableWidget,
     TitleLabel,
     ToolButton,
 )
@@ -50,6 +49,7 @@ from auto_tiktok_editor.phone_control import (
 )
 from auto_tiktok_editor.telegram_settings import load_telegram_runtime_settings
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
+from auto_tiktok_editor.tiktok_profiles.qt_ui.components.empty_state_table import EmptyStateTableWidget
 from auto_tiktok_editor.tiktok_profiles.qt_ui.components.stat_card import StatCard
 from auto_tiktok_editor.tiktok_profiles.qt_ui.workers import WorkerThread
 from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import (
@@ -80,6 +80,11 @@ class DashboardView(QWidget):
         self.phone_view = phone_view
         self.telegram_view = telegram_view
         self._cleanup_workers: list[WorkerThread] = []
+        self._phone_status_worker: WorkerThread | None = None
+        self._shutting_down = False
+        self._stats_signature: tuple[int, ...] | None = None
+        self._phone_status_signature: tuple[str, str] | None = None
+        self._bot_status_signature: tuple | None = None
 
         self._init_ui()
         self.refresh_dashboard()
@@ -88,7 +93,6 @@ class DashboardView(QWidget):
         self._refresh_timer = QTimer(self)
         self._refresh_timer.setInterval(3000)
         self._refresh_timer.timeout.connect(self._sync_stats_live)
-        self._refresh_timer.start()
 
     def _init_ui(self) -> None:
         scroll = SmoothScrollArea(self)
@@ -301,7 +305,11 @@ class DashboardView(QWidget):
         logs_header.addWidget(btn_refresh_logs)
         logs_layout.addLayout(logs_header)
 
-        self.logs_table = TableWidget(logs_card)
+        self.logs_table = EmptyStateTableWidget(
+            logs_card,
+            empty_text="Chưa có hoạt động gần đây.",
+            empty_icon=FIF.HISTORY,
+        )
         self.logs_table.setColumnCount(4)
         self.logs_table.setHorizontalHeaderLabels([
             "Thời gian",
@@ -346,6 +354,10 @@ class DashboardView(QWidget):
         if hasattr(self, "_refresh_timer") and not self._refresh_timer.isActive():
             self._refresh_timer.start()
 
+    def hideEvent(self, event) -> None:
+        self._refresh_timer.stop()
+        super().hideEvent(event)
+
     def _load_saved_phone_settings(self) -> None:
         try:
             settings = load_phone_control_settings()
@@ -389,14 +401,10 @@ class DashboardView(QWidget):
             accounts = self.manager.list_accounts()
             total_accounts = len(accounts)
             active_accounts = len([a for a in accounts if str(getattr(a, "status", "")).lower() == "active"])
-            self.card_profiles.set_value(str(total_accounts))
-            self.card_profiles.set_description(f"{active_accounts} profile hoạt động")
 
             # 2. Sources
             sources = self.manager.list_source_channels()
-            self.card_sources.set_value(str(len(sources)))
             featured_sources = len([s for s in sources if getattr(s, "is_featured", False)])
-            self.card_sources.set_description(f"{featured_sources} kênh ưu tiên" if featured_sources else "Kênh nguồn mẫu")
 
             # 3. Videos
             videos = self.manager.list_videos()
@@ -404,14 +412,27 @@ class DashboardView(QWidget):
             ready_videos = len([v for v in videos if str(getattr(v, "status", "")).lower() in ("ready", "published", "prepared")])
             scheduled_videos = len([v for v in videos if str(getattr(v, "status", "")).lower() == "scheduled" or getattr(v, "scheduled_at", None)])
 
-            self.card_videos.set_value(str(total_videos))
-            self.card_videos.set_description(f"{total_videos} video trong kho")
-
-            self.card_ready.set_value(str(ready_videos))
-            self.card_ready.set_description("Đã tạo hoàn chỉnh")
-
-            self.card_scheduled.set_value(str(scheduled_videos))
-            self.card_scheduled.set_description("Đã đặt lịch xuất bản")
+            stats_signature = (
+                total_accounts,
+                active_accounts,
+                len(sources),
+                featured_sources,
+                total_videos,
+                ready_videos,
+                scheduled_videos,
+            )
+            if stats_signature != self._stats_signature:
+                self._stats_signature = stats_signature
+                self.card_profiles.set_value(str(total_accounts))
+                self.card_profiles.set_description(f"{active_accounts} profile hoạt động")
+                self.card_sources.set_value(str(len(sources)))
+                self.card_sources.set_description(f"{featured_sources} kênh ưu tiên" if featured_sources else "Kênh nguồn mẫu")
+                self.card_videos.set_value(str(total_videos))
+                self.card_videos.set_description(f"{total_videos} video trong kho")
+                self.card_ready.set_value(str(ready_videos))
+                self.card_ready.set_description("Đã tạo hoàn chỉnh")
+                self.card_scheduled.set_value(str(scheduled_videos))
+                self.card_scheduled.set_description("Đã đặt lịch xuất bản")
 
             # 4. Sync Phone Status
             self._update_phone_status_ui()
@@ -423,50 +444,98 @@ class DashboardView(QWidget):
             pass
 
     def _update_phone_status_ui(self) -> None:
+        """Request ADB status without blocking Qt's main event loop."""
+        if self._shutting_down:
+            return
+        if self._phone_status_worker is not None and self._phone_status_worker.isRunning():
+            return
+        phone_operation = getattr(self.phone_view, "_phone_worker", None) if self.phone_view else None
+        if phone_operation is not None and phone_operation.isRunning():
+            return
         try:
             controller = (
                 self.phone_view.phone_controller
                 if (self.phone_view and hasattr(self.phone_view, "phone_controller"))
                 else PhoneController(self.config)
             )
-            devices = controller.list_devices()
+        except Exception:
+            self._set_phone_status_error()
+            return
+
+        worker = WorkerThread(controller.list_devices, parent=self)
+        self._phone_status_worker = worker
+
+        def _cleanup_worker(*_args: Any) -> None:
+            if self._phone_status_worker is worker:
+                self._phone_status_worker = None
+            worker.deleteLater()
+
+        def _loaded(devices: list[str]) -> None:
+            if self._shutting_down:
+                return
             if devices:
-                dev_name = devices[0]
-                self.phone_status_badge.setText(f"● Đã kết nối: {dev_name}")
+                signature = ("connected", devices[0])
+                if signature == self._phone_status_signature:
+                    return
+                self._phone_status_signature = signature
+                self.phone_status_badge.setText(f"● Đã kết nối: {devices[0]}")
                 self.phone_status_badge.setStyleSheet("color: #2ECC71; font-weight: bold;")
             else:
+                signature = ("disconnected", "")
+                if signature == self._phone_status_signature:
+                    return
+                self._phone_status_signature = signature
                 self.phone_status_badge.setText("● Chưa kết nối ADB")
                 self.phone_status_badge.setStyleSheet("color: #E24A4A; font-weight: bold;")
-        except Exception:
+
+        worker.finished_task.connect(_loaded)
+        worker.finished_task.connect(_cleanup_worker)
+        worker.error_task.connect(lambda _exc, _traceback: self._set_phone_status_error())
+        worker.error_task.connect(_cleanup_worker)
+        worker.start()
+
+    def _set_phone_status_error(self) -> None:
+        if not self._shutting_down and self._phone_status_signature != ("error", ""):
+            self._phone_status_signature = ("error", "")
             self.phone_status_badge.setText("● Chưa kết nối")
             self.phone_status_badge.setStyleSheet("color: #8C8C8C; font-weight: bold;")
 
     def _update_bot_status_ui(self) -> None:
-        # Load latest Telegram settings info
+        chat_id_text = "Chưa cấu hình"
+        mode_text = ""
         try:
             tg_settings = load_telegram_runtime_settings()
             chat_id_val = str(getattr(tg_settings, "delivery_chat_id", "") or "").strip()
-            self.bot_chat_id_lbl.setText(chat_id_val if chat_id_val else "Chưa cấu hình")
+            chat_id_text = chat_id_val if chat_id_val else "Chưa cấu hình"
 
             cut_mode_val = str(getattr(tg_settings, "video_cut_mode", "fixed") or "fixed")
             dur_val = getattr(tg_settings, "fixed_chunk_duration", 2.0)
             if cut_mode_val == "fixed":
-                self.bot_mode_lbl.setText(f"Cắt cố định ({dur_val:.1f}s)")
+                mode_text = f"Cắt cố định ({dur_val:.1f}s)"
             elif cut_mode_val in ("scene", "smart"):
-                self.bot_mode_lbl.setText("Cắt theo đổi cảnh (Scene)")
+                mode_text = "Cắt theo đổi cảnh (Scene)"
             else:
-                self.bot_mode_lbl.setText("Giữ nguyên video gốc")
+                mode_text = "Giữ nguyên video gốc"
         except Exception:
             pass
 
-        if self.telegram_view:
-            is_running = self.telegram_view.bot_process is not None and self.telegram_view.bot_process.poll() is None
-            if is_running:
-                self.bot_status_badge.setText("● Đang chạy worker")
-                self.bot_status_badge.setStyleSheet("color: #2ECC71; font-weight: bold;")
-            else:
-                self.bot_status_badge.setText("● Đã dừng")
-                self.bot_status_badge.setStyleSheet("color: #8C8C8C; font-weight: bold;")
+        is_running = bool(
+            self.telegram_view
+            and self.telegram_view.bot_process is not None
+            and self.telegram_view.bot_process.poll() is None
+        )
+        signature = (chat_id_text, mode_text, is_running)
+        if signature == self._bot_status_signature:
+            return
+        self._bot_status_signature = signature
+        self.bot_chat_id_lbl.setText(chat_id_text)
+        self.bot_mode_lbl.setText(mode_text)
+        if is_running:
+            self.bot_status_badge.setText("● Đang chạy worker")
+            self.bot_status_badge.setStyleSheet("color: #2ECC71; font-weight: bold;")
+        else:
+            self.bot_status_badge.setText("● Đã dừng")
+            self.bot_status_badge.setStyleSheet("color: #8C8C8C; font-weight: bold;")
 
     def _refresh_recent_logs(self) -> None:
         try:
@@ -689,11 +758,15 @@ class DashboardView(QWidget):
             self.bot_chat_id_lbl.setStyleSheet("color: #B5B9C7; font-weight: bold;" if clean == "dark" else "color: #5F6475; font-weight: bold;")
         if hasattr(self, "bot_mode_lbl"):
             self.bot_mode_lbl.setStyleSheet("color: #B5B9C7;" if clean == "dark" else "color: #5F6475;")
-        self._refresh_recent_logs()
 
     def shutdown(self) -> None:
+        self._shutting_down = True
         if hasattr(self, "_refresh_timer"):
             self._refresh_timer.stop()
+        phone_worker = self._phone_status_worker
+        self._phone_status_worker = None
+        if phone_worker is not None:
+            phone_worker.stop(timeout_ms=1500)
         workers = list(self._cleanup_workers)
         self._cleanup_workers.clear()
         for worker in workers:

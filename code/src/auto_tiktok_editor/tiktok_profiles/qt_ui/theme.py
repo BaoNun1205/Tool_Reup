@@ -26,6 +26,13 @@ class ModernPhoneIcon(FluentIconBase):
         color = "white" if is_dark else "black"
         return str(Path(__file__).parent / "assets" / "icons" / f"phone_{color}.svg")
 
+
+class FacebookIcon(FluentIconBase):
+    """Facebook brand icon used by navigation and publishing actions."""
+
+    def path(self, theme=Theme.AUTO) -> str:
+        return str(Path(__file__).parent / "assets" / "icons" / "facebook.svg")
+
 VIDEO_CUT_MODE_LABELS = {
     "fixed": "Cắt cố định",
     "scene": "Cắt theo đổi cảnh",
@@ -254,11 +261,11 @@ FluentWindow {
     background-color: #F6F7FB;
 }
 
-#dashboardInterface, #accountsInterface, #sourcesInterface, #videosInterface, #fashionInterface, #phoneInterface, #telegramInterface, #logsInterface, #settingsInterface {
+#dashboardInterface, #accountsInterface, #sourcesInterface, #videosInterface, #facebookInterface, #fashionInterface, #phoneInterface, #telegramInterface, #logsInterface, #settingsInterface {
     background-color: #F6F7FB;
 }
 
-#fashionScrollArea, #fashionScrollViewport, #fashionScrollContent {
+#fashionScrollArea, #fashionScrollViewport, #fashionScrollContent, #facebookScrollArea, #facebookScrollViewport, #facebookScrollContent, #facebookPagesContainer {
     background-color: #F6F7FB;
 }
 
@@ -414,11 +421,11 @@ FluentWindow {
     background-color: #11131A;
 }
 
-#dashboardInterface, #accountsInterface, #sourcesInterface, #videosInterface, #fashionInterface, #phoneInterface, #telegramInterface, #logsInterface, #settingsInterface {
+#dashboardInterface, #accountsInterface, #sourcesInterface, #videosInterface, #facebookInterface, #fashionInterface, #phoneInterface, #telegramInterface, #logsInterface, #settingsInterface {
     background-color: #11131A;
 }
 
-#fashionScrollArea, #fashionScrollViewport, #fashionScrollContent {
+#fashionScrollArea, #fashionScrollViewport, #fashionScrollContent, #facebookScrollArea, #facebookScrollViewport, #facebookScrollContent, #facebookPagesContainer {
     background-color: #11131A;
 }
 

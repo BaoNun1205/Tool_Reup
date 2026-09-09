@@ -100,8 +100,8 @@ class FashionProductBotService:
             )
             self.client.send_message(
                 chat_id,
-                "Đã thêm vào Fashion.\n\n%s\n\n%s\nProduct ID: %s"
-                % (product.product_name, product.description, product.product_id),
+                "Đã thêm vào Fashion.\nDanh mục: %s\n\n%s\n\n%s\nProduct ID: %s"
+                % (product.category, product.product_name, product.description, product.product_id),
             )
         except Exception as exc:
             self.logger.warning("Fashion product processing failed: %s", exc)
@@ -111,7 +111,7 @@ class FashionProductBotService:
     def _instruction_text() -> str:
         return (
             "Gửi một link TikTok Shop hoặc vt.tiktok.com.\n"
-            "Bot sẽ tự lấy tên, ảnh, Product ID và tạo mô tả Fashion bằng Gemini."
+            "Bot sẽ tự lấy tên, ảnh, Product ID, tạo mô tả và phân loại sản phẩm bằng Gemini."
         )
 
     def _load_poll_offset(self) -> int | None:

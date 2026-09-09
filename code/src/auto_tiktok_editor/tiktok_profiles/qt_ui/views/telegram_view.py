@@ -42,7 +42,6 @@ from qfluentwidgets import (
     SpinBox,
     SubtitleLabel,
     SwitchButton,
-    TableWidget,
 )
 
 from auto_tiktok_editor.config import PipelineConfig
@@ -52,6 +51,7 @@ from auto_tiktok_editor.telegram_settings import (
     save_telegram_runtime_settings,
 )
 from auto_tiktok_editor.tiktok_profiles.qt_ui.components.stat_card import StatCard
+from auto_tiktok_editor.tiktok_profiles.qt_ui.components.empty_state_table import EmptyStateTableWidget
 from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import (
     PRODUCT_IMAGE_CROP_RATIO_LABELS,
     PRODUCT_IMAGE_CROP_RATIO_VALUES,
@@ -243,7 +243,11 @@ class TelegramView(QWidget):
 
         bots_layout.addLayout(bots_header)
 
-        self.bots_table = TableWidget(bots_card)
+        self.bots_table = EmptyStateTableWidget(
+            bots_card,
+            empty_text="Chưa cấu hình Telegram Bot nào.",
+            empty_icon=FIF.ROBOT,
+        )
         self.bots_table.setColumnCount(4)
         self.bots_table.setHorizontalHeaderLabels(["Tên Bot", "Loại", "Bot Token", "Chat ID"])
         self.bots_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)

@@ -33,7 +33,6 @@ from qfluentwidgets import (
     RoundMenu,
     SubtitleLabel,
     SwitchButton,
-    TableWidget,
     ToolButton,
 )
 from qfluentwidgets.common.smooth_scroll import SmoothMode
@@ -45,6 +44,7 @@ from auto_tiktok_editor.phone_control import (
     normalize_phone_address,
 )
 from auto_tiktok_editor.tiktok_profiles.profile_manager import TikTokProfileManager
+from auto_tiktok_editor.tiktok_profiles.qt_ui.components.empty_state_table import EmptyStateTableWidget
 from auto_tiktok_editor.tiktok_profiles.qt_ui.components.instant_combo_box import InstantComboBox
 from auto_tiktok_editor.tiktok_profiles.qt_ui.theme import (
     ModernPhoneIcon,
@@ -71,9 +71,9 @@ class SourcesView(QWidget):
         self._selected_source: Any | None = None
         self._accounts_map: dict[int, str] = {}
         self._profiles_signature: tuple[tuple[int, str], ...] | None = None
+        self._sources_signature: tuple | None = None
 
         self._init_ui()
-        self.refresh_profiles_list()
 
     def _init_ui(self) -> None:
         main_layout = QVBoxLayout(self)
@@ -115,7 +115,11 @@ class SourcesView(QWidget):
         table_layout = QVBoxLayout(table_container)
         table_layout.setContentsMargins(0, 0, 8, 0)
 
-        self.table = TableWidget(table_container)
+        self.table = EmptyStateTableWidget(
+            table_container,
+            empty_text="Chưa có nguồn video nào cho profile đang chọn.",
+            empty_icon=FIF.GLOBE,
+        )
         if hasattr(self.table, "scrollDelagate") and hasattr(self.table.scrollDelagate, "verticalSmoothScroll"):
             self.table.scrollDelagate.verticalSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
             self.table.scrollDelagate.horizonSmoothScroll.setSmoothMode(SmoothMode.NO_SMOOTH)
@@ -232,6 +236,7 @@ class SourcesView(QWidget):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         self.refresh_profiles_list()
+        self.refresh_sources()
 
     def refresh_profiles_list(self) -> None:
         """Populate profile comboboxes."""
@@ -271,6 +276,8 @@ class SourcesView(QWidget):
 
     def set_active_profile(self, name: str | None) -> None:
         """Filter table to a specific profile name."""
+        if self._profiles_signature is None:
+            self.refresh_profiles_list()
         if not name or name == "Tất cả Profile":
             self.profile_combo.setCurrentIndex(0)
             return
@@ -281,14 +288,35 @@ class SourcesView(QWidget):
                 return
 
     def apply_theme_mode(self, mode: str) -> None:
-        """Refresh table for active theme."""
-        self.refresh_sources()
+        """Recolour theme-dependent cells without rebuilding every row."""
+        star_color = QColor("#F2B84B" if str(mode).strip().lower() == "dark" else "#E89B20")
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None and item.text():
+                item.setForeground(star_color)
+        self.table.viewport().update()
 
     def refresh_sources(self) -> None:
         """Load sources from database and populate table."""
         try:
             selected_account_id = self.profile_combo.currentData()
             all_sources = self.manager.list_source_channels(selected_account_id)
+            signature = tuple(
+                (
+                    source.id,
+                    source.account_id,
+                    source.name,
+                    source.url,
+                    source.note,
+                    bool(getattr(source, "featured", 0)),
+                    bool(getattr(source, "enabled", 1)),
+                    source.updated_at,
+                )
+                for source in all_sources
+            )
+            if signature == self._sources_signature:
+                return
+            self._sources_signature = signature
             self._sources_cache = all_sources
             self._populate_table(all_sources)
         except Exception as exc:
@@ -300,6 +328,12 @@ class SourcesView(QWidget):
         star_color = "#F2B84B" if is_dark else "#E89B20"
 
         self.table.blockSignals(True)
+        self.table.setUpdatesEnabled(False)
+        for row in range(self.table.rowCount()):
+            widget = self.table.cellWidget(row, 6)
+            if widget is not None:
+                self.table.removeCellWidget(row, 6)
+                widget.deleteLater()
         self.table.setRowCount(len(sources))
         for row, s in enumerate(sources):
             # Col 0: Featured Star (Chỉ hiển thị icon ⭐ cho kênh nổi bật)
@@ -373,6 +407,8 @@ class SourcesView(QWidget):
             self.table.setCellWidget(row, 6, action_widget)
 
         self.table.blockSignals(False)
+        self.table.setUpdatesEnabled(True)
+        self.table.viewport().update()
 
     def _on_profile_filter_changed(self) -> None:
         self.refresh_sources()

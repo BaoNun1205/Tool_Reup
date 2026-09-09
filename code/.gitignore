@@ -10,6 +10,12 @@ dist/
 *.pyc
 output/
 assets/
+# Keep source-controlled UI brand icons while runtime assets stay ignored.
+!src/auto_tiktok_editor/tiktok_profiles/qt_ui/assets/
+src/auto_tiktok_editor/tiktok_profiles/qt_ui/assets/*
+!src/auto_tiktok_editor/tiktok_profiles/qt_ui/assets/icons/
+src/auto_tiktok_editor/tiktok_profiles/qt_ui/assets/icons/*
+!src/auto_tiktok_editor/tiktok_profiles/qt_ui/assets/icons/facebook.svg
 work/
 tmp/
 logs/
@@ -19,5 +25,7 @@ _tmp_tests/
 telegram_bot_token.txt
 profiles/
 profile_video_queue/
+facebook_video_queue/
 tiktok_profile_manager.sqlite3
 tiktok_profile_manager.sqlite3-*
+tiktok_profile_manager.before_*.sqlite3
